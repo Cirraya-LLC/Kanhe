@@ -16,6 +16,7 @@
 #include <print>
 
 #include <kanhe/node/api.hpp>
+#include <kanhe/node/client.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/replica.hpp>
 
@@ -82,9 +83,8 @@ Json call(const node::Client& client, std::string_view method, std::string_view 
         "reaching " + client.base().to_string());
     const Json answer = Json::parse(response.body.begin(), response.body.end(), nullptr, false);
     if (response.status != 200) {
-        const std::string message = answer.is_object() && answer.contains("error")
-                                        ? answer["error"].value("message", std::string())
-                                        : "HTTP " + std::to_string(response.status);
+        const std::string message = node::error_message_of(response.body)
+                                        .value_or("HTTP " + std::to_string(response.status));
         throw CommandError{"the cluster refused: " + message};
     }
     return answer;

@@ -112,6 +112,8 @@ if(TARGET kanhe_node)
     kanhe_add_fuzzer(exchange_file_fuzz kanhe::core)
     # Invitation codes between organizations (khp_...).
     kanhe_add_fuzzer(invitation_fuzz kanhe::client)
+    # A peer's condition checked against a record's private data.
+    kanhe_add_fuzzer(claim_check_fuzz kanhe::client)
     # A public witness's registrations and cosign requests, from anyone.
     kanhe_add_fuzzer(witness_registration_fuzz kanhe::client kanhe::crypto_openssl)
     # Relay messages and signed fetches, from anyone; what a mailbox holds.

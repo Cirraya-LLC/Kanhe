@@ -2,7 +2,9 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <array>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <kanhe/client/relay.hpp>
@@ -29,6 +31,23 @@ Bytes associated_data(const protocol::Id& to, const protocol::Id& from, const Re
 
 ByteView text_bytes(std::string_view text) {
     return {reinterpret_cast<const std::uint8_t*>(text.data()), text.size()};
+}
+
+/// What a relayed request's parts may hold, since they become an HTTP
+/// request again: a method the API answers; a path, and a token, of visible
+/// ASCII without spaces; a content type without control characters.
+bool relayable(std::string_view method, std::string_view path, std::string_view type,
+               std::string_view token) {
+    constexpr std::array<std::string_view, 5> methods{"GET", "HEAD", "POST", "PUT", "DELETE"};
+    const auto visible = [](char c) {
+        return c > 0x20 && c < 0x7f;
+    };
+    const auto printable = [](char c) {
+        return c >= 0x20 && c < 0x7f;
+    };
+    return std::ranges::find(methods, method) != methods.end() && path.starts_with("/v1/") &&
+           std::ranges::all_of(path, visible) && std::ranges::all_of(token, visible) &&
+           std::ranges::all_of(type, printable);
 }
 
 Result<protocol::Id> id_from(const Value* v) {
@@ -168,7 +187,8 @@ Result<RelayRequest> open_relay_request(const crypto::openssl::HpkeKey& relay_ke
     const auto* answer_key = bytes_at(*value, 6);
     if (!exact_keys(*value, 6) || method == nullptr || path == nullptr || type == nullptr ||
         body == nullptr || token == nullptr || answer_key == nullptr ||
-        answer_key->size() != crypto::openssl::hpke_public_key_size || !path->starts_with("/v1/")) {
+        answer_key->size() != crypto::openssl::hpke_public_key_size ||
+        !relayable(*method, *path, *type, *token)) {
         return fail(Errc::malformed, "not a relayed request");
     }
     return RelayRequest{*method, *path, *type, *body, *token, *answer_key};

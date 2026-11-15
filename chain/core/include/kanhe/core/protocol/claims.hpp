@@ -51,6 +51,10 @@ struct Claim {
     friend bool operator==(const Claim&, const Claim&) = default;
 };
 
+/// Any CBOR integer, -2^64 to 2^64 - 1, as decimal text; nothing for any
+/// other value. A condition's numbers and amounts may use the whole range.
+[[nodiscard]] std::optional<std::string> integer_text(const cbor::Value& v);
+
 /// Reads a condition, 1 to 16 terms, checking each as the ledger does: a
 /// claim's, and (v0.15) an access request's that asks for a claim.
 [[nodiscard]] Result<std::vector<ClaimTerm>> decode_claim_condition(const cbor::Value& value);

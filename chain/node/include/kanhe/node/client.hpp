@@ -117,4 +117,9 @@ private:
     std::unique_ptr<State> state_;
 };
 
+/// The message of an API error answer, {"error": {"message": TEXT}};
+/// nothing when the body is not one. Never throws, whatever the body holds
+/// (a server, a peer, or a public witness wrote it).
+[[nodiscard]] std::optional<std::string> error_message_of(ByteView body);
+
 } // namespace kanhe::node

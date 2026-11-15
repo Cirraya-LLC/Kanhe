@@ -16,10 +16,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <print>
 #include <sstream>
@@ -1300,6 +1302,25 @@ void claim_seeds(const Seeds& seeds) {
                 {V::text("until"), V::unsigned_integer(1'793'836'800'000)},
                 {V::text("subject"), V::text("Chan Tai Man")}});
     seeds.write("claim_fuzz", "every-operator", must(cbor::encode(claim), "encode"));
+    // claim_check_fuzz: [condition, data]; the numbers below -2^63 once
+    // crashed the check.
+    const V below = V::negative(std::uint64_t{1} << 63);
+    const V check = V::array(
+        {*claim.find(V::text("condition")), V::map({{V::text("salary"), V::text("HKD 32,000.50")},
+                                                    {V::text("age"), V::integer(21)},
+                                                    {V::text("score"), V::text("9")},
+                                                    {V::text("born"), V::text("2001-01-01")},
+                                                    {V::text("name"), V::text("Chan Tai Man")},
+                                                    {V::text("pay"), V::integer(150)},
+                                                    {V::text("grade"), V::text("A")}})});
+    seeds.write("claim_check_fuzz", "every-operator", must(cbor::encode(check), "encode"));
+    const V low = V::array(
+        {V::array({term("balance", ">", "number", below),
+                   term("debt", "<", "money",
+                        V::array({below, V::text("HKD"), V::unsigned_integer(2)}))}),
+         V::map({{V::text("balance"), V::negative(std::numeric_limits<std::uint64_t>::max())},
+                 {V::text("debt"), V::text("HKD 1.00")}})});
+    seeds.write("claim_check_fuzz", "below-int64", must(cbor::encode(low), "encode"));
 }
 
 /// A membership's metadata (spec v0.16): every key, then only those needed.

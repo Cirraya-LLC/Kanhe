@@ -66,10 +66,8 @@ node::Client relay_client(const std::string& url, std::optional<std::string> aut
 }
 
 std::string message_of(const node::http::ClientResponse& response) {
-    const auto j =
-        nlohmann::json::parse(response.body.begin(), response.body.end(), nullptr, false);
-    if (j.is_object() && j.contains("error") && j["error"].is_object()) {
-        return j["error"].value("message", "status " + std::to_string(response.status));
+    if (auto message = node::error_message_of(response.body)) {
+        return std::move(*message);
     }
     return "status " + std::to_string(response.status);
 }
@@ -348,7 +346,9 @@ std::size_t RelayAgent::once(std::chrono::seconds wait) {
         std::optional<node::http::ParseError> error;
         const auto parsed = node::http::parse_request(raw, limits, error);
         RelayAnswer answer{400, "application/json", {}};
-        if (!parsed || error) {
+        // Exactly the one request that was relayed, nothing more.
+        if (!parsed || error || parsed->consumed != raw.size() ||
+            parsed->request.method != request->method || parsed->request.target != request->path) {
             const std::string text = R"({"error":{"code":"malformed","message":"not a request"}})";
             answer.body.assign(text.begin(), text.end());
         } else {

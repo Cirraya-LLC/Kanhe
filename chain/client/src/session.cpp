@@ -17,6 +17,7 @@
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/node/api.hpp>
+#include <kanhe/node/client.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/replica.hpp>
@@ -112,11 +113,8 @@ protocol::Id parse_ledger_id(std::string_view text, std::string_view what) {
 
 /// The message of an API error answer.
 std::string error_message(const node::http::ClientResponse& response) {
-    const auto answer =
-        nlohmann::json::parse(response.body.begin(), response.body.end(), nullptr, false);
-    if (answer.is_object() && answer.contains("error") && answer["error"].is_object()) {
-        return answer["error"].value("message", std::string()) + " (HTTP " +
-               std::to_string(response.status) + ")";
+    if (const auto message = node::error_message_of(response.body)) {
+        return *message + " (HTTP " + std::to_string(response.status) + ")";
     }
     return "HTTP " + std::to_string(response.status);
 }

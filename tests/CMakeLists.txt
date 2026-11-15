@@ -90,6 +90,7 @@ target_link_libraries(kanhe_tests PRIVATE
     kanhe::ledger
     kanhe::node
     kanhe::verifier
+    kanhe::client
     Catch2::Catch2WithMain
     nlohmann_json::nlohmann_json
     OpenSSL::Crypto)

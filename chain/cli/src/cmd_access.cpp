@@ -42,11 +42,9 @@ Json post_to(const node::Peer& peer, const std::string& path, ByteView body,
     const auto response = client::peer_request(peer, "POST", path, body, type);
     const Json answer = Json::parse(response.body.begin(), response.body.end(), nullptr, false);
     if (response.status / 100 != 2) {
-        std::string message = "status " + std::to_string(response.status);
-        if (answer.is_object() && answer.contains("error")) {
-            message = answer["error"].value("message", message);
-        }
-        throw CommandError{"peer " + peer.name + " refused: " + message};
+        throw CommandError{"peer " + peer.name + " refused: " +
+                           node::error_message_of(response.body)
+                               .value_or("status " + std::to_string(response.status))};
     }
     return answer;
 }

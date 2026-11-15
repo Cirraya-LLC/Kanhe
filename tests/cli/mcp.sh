@@ -98,6 +98,11 @@ line 10 | contains '"code":-32601' || fail "unknown method"
 line 11 | contains '"code":-32700' || fail "parse error"
 line 12 | contains '"isError":true' || fail "missing arguments"
 [ "$(wc -l < responses.txt)" -eq 12 ] || fail "one response per request, none for notifications"
+# A jsonrpc member that is not text is an invalid request, and the server goes on.
+printf '%s\n' '{"jsonrpc":2.0,"id":1,"method":"ping"}' '{"jsonrpc":"2.0","id":2,"method":"ping"}' |
+    run mcp --ledger ledger --as agent.key > odd.txt 2> /dev/null
+sed -n 1p odd.txt | contains '"code":-32600' || fail "a jsonrpc that is not text: $(cat odd.txt)"
+sed -n 2p odd.txt | contains '"result":{}' || fail "the server goes on: $(cat odd.txt)"
 
 # The agent's record carries its accountability, visible to any verifier.
 run checkpoint create --ledger ledger --log-key log.key > /dev/null

@@ -23,6 +23,7 @@
 #include <kanhe/client/relay_client.hpp>
 #include <kanhe/client/witness.hpp>
 #include <kanhe/core/protocol/witness.hpp>
+#include <kanhe/node/client.hpp>
 
 #include "commands.hpp"
 #include "output.hpp"
@@ -120,10 +121,8 @@ int cmd_checkpoint_cosign_request(const Args& args) {
     const auto response =
         client::peer_request(*peer, "POST", "/v1/witness/cosign", encoded, "application/cbor");
     if (response.status != 200) {
-        const Json answer = Json::parse(response.body.begin(), response.body.end(), nullptr, false);
-        const std::string message = answer.is_object() && answer.contains("error")
-                                        ? answer["error"].value("message", std::string())
-                                        : "status " + std::to_string(response.status);
+        const std::string message = node::error_message_of(response.body)
+                                        .value_or("status " + std::to_string(response.status));
         if (args.json()) {
             print_json({{"cosigned", false}, {"error", message}, {"status", response.status}});
         } else {

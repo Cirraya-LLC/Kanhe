@@ -103,15 +103,22 @@ void ask_witnesses_until(const std::stop_token& stop, node::LedgerApi& api,
     std::mutex mutex;
     std::condition_variable_any wake;
     while (!stop.stop_requested()) {
-        const auto asked = client::ask_used_witnesses(api.ledger(), dir, [&api](Bytes body) {
-            auto kept = std::make_shared<std::promise<int>>();
-            auto status = kept->get_future();
-            api.add_cosignature(std::move(body),
-                                [kept](node::http::Response r) { kept->set_value(r.status); });
-            return status.wait_for(std::chrono::seconds(30)) == std::future_status::ready
-                       ? status.get()
-                       : 504;
-        });
+        std::vector<client::WitnessAsked> asked;
+        try {
+            asked = client::ask_used_witnesses(api.ledger(), dir, [&api](Bytes body) {
+                auto kept = std::make_shared<std::promise<int>>();
+                auto status = kept->get_future();
+                api.add_cosignature(std::move(body),
+                                    [kept](node::http::Response r) { kept->set_value(r.status); });
+                return status.wait_for(std::chrono::seconds(30)) == std::future_status::ready
+                           ? status.get()
+                           : 504;
+            });
+        } catch (const std::exception& e) {
+            // A damaged witnesses file, say: said, and tried again later;
+            // the server goes on.
+            asked.push_back({"", std::nullopt, e.what()});
+        }
         for (const client::WitnessAsked& a : asked) {
             if (!quiet && a.cosigned) {
                 std::println(stderr, "witness {} cosigned the checkpoint at size {}", a.name,

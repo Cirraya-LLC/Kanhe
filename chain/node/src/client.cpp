@@ -9,6 +9,7 @@
 #include <tuple>
 #include <utility>
 
+#include <nlohmann/json.hpp>
 #include <openssl/ssl.h>
 
 #include <kanhe/node/client.hpp>
@@ -531,6 +532,22 @@ Connection::request(std::string_view method, std::string_view path, ByteView bod
         elsewhere.headers.insert(elsewhere.headers.end(), headers.begin(), headers.end());
         return Client(next->first, elsewhere).request(method, next->second, body, content_type);
     }
+}
+
+std::optional<std::string> error_message_of(ByteView body) {
+    const auto answer = nlohmann::json::parse(body.begin(), body.end(), nullptr, false);
+    if (!answer.is_object()) {
+        return std::nullopt;
+    }
+    const auto error = answer.find("error");
+    if (error == answer.end() || !error->is_object()) {
+        return std::nullopt;
+    }
+    const auto message = error->find("message");
+    if (message == error->end() || !message->is_string()) {
+        return std::nullopt;
+    }
+    return message->get<std::string>();
 }
 
 } // namespace kanhe::node

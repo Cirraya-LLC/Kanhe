@@ -24,6 +24,7 @@
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/ledger/environment.hpp>
 #include <kanhe/ledger/verify.hpp>
+#include <kanhe/node/client.hpp>
 #include <kanhe/node/executor.hpp>
 #include <kanhe/node/process.hpp>
 
@@ -1174,9 +1175,8 @@ private:
         }
         const json body = json::parse(response->body.begin(), response->body.end(), nullptr, false);
         if (response->status != 200 || !body.is_object() || !body.contains("requests")) {
-            const std::string message = body.is_object() && body.contains("error")
-                                            ? body["error"].value("message", std::string("?"))
-                                            : std::format("status {}", response->status);
+            const std::string message = error_message_of(response->body)
+                                            .value_or(std::format("status {}", response->status));
             return Fail(std::format("the server refused the poll: {}", message));
         }
         Poll p;
@@ -1234,9 +1234,8 @@ private:
         if (response->status != 200) {
             const json body =
                 json::parse(response->body.begin(), response->body.end(), nullptr, false);
-            const std::string message = body.is_object() && body.contains("error")
-                                            ? body["error"].value("message", std::string("?"))
-                                            : std::format("status {}", response->status);
+            const std::string message = error_message_of(response->body)
+                                            .value_or(std::format("status {}", response->status));
             const bool transient = response->status == 409 || response->status >= 500 ||
                                    response->status == 401 || response->status == 403 ||
                                    response->status == 429;
@@ -1576,9 +1575,8 @@ private:
             }
             const json body =
                 json::parse(response->body.begin(), response->body.end(), nullptr, false);
-            const std::string message = body.is_object() && body.contains("error")
-                                            ? body["error"].value("message", std::string("?"))
-                                            : std::format("status {}", response->status);
+            const std::string message = error_message_of(response->body)
+                                            .value_or(std::format("status {}", response->status));
             if (response->status == 200 || response->status == 201) {
                 e.stage = Stage::answered;
                 e.index = body.value("index", std::uint64_t{0});

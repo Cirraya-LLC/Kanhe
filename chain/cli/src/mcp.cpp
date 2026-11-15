@@ -248,7 +248,13 @@ public:
             if (line.empty()) {
                 continue;
             }
-            json response = handle_line(line);
+            json response;
+            try {
+                response = handle_line(line);
+            } catch (const std::exception&) {
+                // Whatever a line holds, the server answers and goes on.
+                response = error_response(nullptr, invalid_request, "invalid request");
+            }
             if (!response.is_null()) {
                 std::cout << response.dump() << '\n' << std::flush;
             }
@@ -273,8 +279,10 @@ private:
         } catch (const json::exception&) {
             return error_response(nullptr, parse_error, "parse error");
         }
-        if (!request.is_object() || request.value("jsonrpc", "") != "2.0" ||
-            !request.contains("method") || !request["method"].is_string()) {
+        const auto jsonrpc = request.is_object() ? request.find("jsonrpc") : request.end();
+        if (!request.is_object() || jsonrpc == request.end() || !jsonrpc->is_string() ||
+            jsonrpc->get<std::string>() != "2.0" || !request.contains("method") ||
+            !request["method"].is_string()) {
             return error_response(request.is_object() ? request.value("id", json()) : json(),
                                   invalid_request, "invalid request");
         }

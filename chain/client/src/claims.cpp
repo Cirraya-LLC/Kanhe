@@ -189,14 +189,14 @@ int compare_decimal(std::string a, std::string b) {
     return na ? -m : m;
 }
 
+/// A number as decimal text: any CBOR integer (a condition's may be below
+/// -2^63), or text; empty for anything else.
 std::string decimal_of(const V& v) {
-    if (const auto u = v.as_uint64()) {
-        return std::to_string(*u);
+    if (auto integer = protocol::integer_text(v)) {
+        return std::move(*integer);
     }
-    if (const auto i = v.as_int64()) {
-        return std::to_string(*i);
-    }
-    return *v.as_text();
+    const std::string* text = v.as_text();
+    return text != nullptr ? *text : std::string();
 }
 
 /// A money value as [currency, decimal amount].
@@ -220,9 +220,8 @@ std::pair<std::string, std::string> money_of(const V& v) {
 /// cannot be (the condition then does not hold).
 std::optional<std::string> field_as(const V& value, const std::string& type,
                                     const std::string& currency) {
-    const std::string text = value.as_text() != nullptr              ? trimmed(*value.as_text())
-                             : value.as_int64() || value.as_uint64() ? decimal_of(value)
-                                                                     : std::string();
+    const std::string text =
+        value.as_text() != nullptr ? trimmed(*value.as_text()) : decimal_of(value);
     if (type == "text") {
         return value.as_text() != nullptr ? std::optional(*value.as_text()) : std::nullopt;
     }

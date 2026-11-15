@@ -9,6 +9,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iterator>
 #include <memory>
 #include <netinet/in.h>
@@ -321,6 +323,41 @@ TEST_CASE("the API answers only those it should", "[node][api]") {
     CHECK(get(third.client(), "/v1/contracts/due").status == 401); // runs contracts
     CHECK(get(third.client(p.read_token), "/metrics").status == 200);
     CHECK(get(third.client(p.read_token), "/v1/contracts/due").status == 200);
+}
+
+TEST_CASE("a request a relay carried reaches the API's routes, never the console",
+          "[node][api][relay]") {
+    Primary p;
+    node::ApiOptions o;
+    o.directory = p.dir;
+    o.log_keys = {p.log_key};
+    int console_asked = 0;
+    o.console = [&](const node::http::Request&, std::function<void(node::http::Response)> answer) {
+        ++console_asked;
+        node::http::Response r;
+        r.status = 200;
+        answer(std::move(r));
+    };
+    auto api = node::LedgerApi::open(o, provider());
+    REQUIRE(api);
+    const auto ask = [&](const std::string& path, const std::string& peer) {
+        node::http::Request r;
+        r.method = "GET";
+        r.target = r.path = path;
+        std::promise<node::http::Response> done;
+        auto answered = done.get_future();
+        (*api)->handle(std::move(r), peer, [&done](node::http::Response response) {
+            done.set_value(std::move(response));
+        });
+        return answered.get().status;
+    };
+    CHECK(ask("/console/api/session", "127.0.0.1") == 200);
+    CHECK(console_asked == 1);
+    CHECK(ask("/console/api/session", "relay") == 404);
+    CHECK(ask("/console", "relay") == 404);
+    CHECK(ask("/healthz", "relay") == 404);
+    CHECK(console_asked == 1);
+    CHECK(ask("/v1/genesis", "relay") != 404);
 }
 
 TEST_CASE("statements, checkpoints, proofs, and evidence over HTTP", "[node][api]") {

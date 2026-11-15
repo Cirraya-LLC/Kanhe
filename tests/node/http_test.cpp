@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Cirraya
 
+#include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -183,4 +185,22 @@ TEST_CASE("server URLs", "[node][http]") {
     CHECK_FALSE(Url::parse("http://x:65536"));
     CHECK_FALSE(Url::parse("http://"));
     CHECK(http::percent_encode("a b/é") == "a%20b%2F%C3%A9");
+}
+
+TEST_CASE("an error answer's message is read whatever the body holds", "[node][http][security]") {
+    // A peer, a relay, or a public witness writes these: a message that is
+    // not text once threw out of a server's background loop.
+    const auto message = [](std::string_view body) {
+        return kanhe::node::error_message_of(
+            {reinterpret_cast<const std::uint8_t*>(body.data()), body.size()});
+    };
+    CHECK(message(R"({"error":{"code":"x","message":"refused"}})") == "refused");
+    CHECK_FALSE(message(R"({"error":{"message":1}})"));
+    CHECK_FALSE(message(R"({"error":{"message":null}})"));
+    CHECK_FALSE(message(R"({"error":{"message":["a"]}})"));
+    CHECK_FALSE(message(R"({"error":"refused"})"));
+    CHECK_FALSE(message(R"({"error":1})"));
+    CHECK_FALSE(message(R"(["error"])"));
+    CHECK_FALSE(message("not json"));
+    CHECK_FALSE(message(""));
 }

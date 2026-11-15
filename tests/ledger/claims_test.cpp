@@ -5,11 +5,14 @@
 // rules for their source, and their evidence, which carries the source and
 // says when it was revoked or replaced since.
 
+#include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <kanhe/client/claims.hpp>
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 
@@ -121,6 +124,39 @@ TEST_CASE("a claim's condition in words", "[claims]") {
           "balance is at most JPY -123,456,789 and rate is between -1 and 2.50 and born is below "
           "2008-11-10 and grade is given and name is \"Chan Tai Man\" and left is not USD 0.05 "
           "and age is at least 18");
+}
+
+TEST_CASE("a condition's numbers may be any CBOR integer, also when checked", "[claims]") {
+    // -2^63 - 1 and -2^64: below what an int64 holds, as a peer's access
+    // request may ask; the ledger takes them, so checking one must work.
+    const V below = V::negative(std::uint64_t{1} << 63);
+    const V lowest = V::negative(std::numeric_limits<std::uint64_t>::max());
+    CHECK(protocol::integer_text(below) == "-9223372036854775809");
+    CHECK(protocol::integer_text(lowest) == "-18446744073709551616");
+    CHECK(protocol::integer_text(V::unsigned_integer(std::numeric_limits<std::uint64_t>::max())) ==
+          "18446744073709551615");
+    CHECK(protocol::integer_text(V::integer(-1)) == "-1");
+    CHECK_FALSE(protocol::integer_text(V::text("1")));
+
+    auto claim = salary_claim(*protocol::to_id(Bytes(32, 7)));
+    claim.condition = {
+        {"balance", ">", "number", below},
+        {"debt", ">=", "money", V::array({lowest, V::text("HKD"), V::unsigned_integer(2)})},
+        {"floor", "<", "number", V::integer(0)},
+        {"range", "between", "number", V::array({lowest, below})},
+        {"level", "in", "number", V::array({below, V::integer(1)})}};
+    REQUIRE(protocol::encode_claim(claim));
+    const auto field = [](std::string name, V value) {
+        return protocol::RecordField{std::move(name), {}, std::move(value)};
+    };
+    const std::vector<protocol::RecordField> data{
+        field("balance", V::integer(-5)), field("debt", V::text("HKD 10.00")),
+        field("floor", lowest), field("range", V::negative((std::uint64_t{1} << 63) + 5)),
+        field("level", below)};
+    const auto checked = kanhe::client::check_claim(claim, data);
+    CHECK(checked.holds);
+    claim.condition = {{"balance", "<", "number", below}};
+    CHECK_FALSE(kanhe::client::check_claim(claim, data).holds);
 }
 
 TEST_CASE("the ledger takes a claim only on a live record of its own", "[claims][ledger]") {

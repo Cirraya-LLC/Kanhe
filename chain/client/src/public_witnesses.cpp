@@ -44,13 +44,9 @@ Bytes cosignature_of(const node::http::ClientResponse& response) {
     if (response.status / 100 == 2) {
         return response.body;
     }
-    const auto answer =
-        nlohmann::json::parse(response.body.begin(), response.body.end(), nullptr, false);
-    std::string message = "status " + std::to_string(response.status);
-    if (answer.is_object() && answer.contains("error") && answer["error"].is_object()) {
-        message = answer["error"].value("message", message);
-    }
-    throw WitnessRefused{response.status, message};
+    throw WitnessRefused{response.status,
+                         node::error_message_of(response.body)
+                             .value_or("status " + std::to_string(response.status))};
 }
 
 std::uint64_t last_cosigned_size(const ledger::Ledger& ledger, const crypto::PublicKey& key) {
@@ -95,7 +91,9 @@ std::vector<UsedWitness> load_used_witnesses(const std::filesystem::path& ledger
         try {
             out.push_back({w["name"].get<std::string>(), w["url"].get<std::string>(),
                            witness_key_from_hex(w["key"].get<std::string>()),
-                           w.value("added", protocol::Timestamp{0})});
+                           w.contains("added") && w["added"].is_number_unsigned()
+                               ? w["added"].get<protocol::Timestamp>()
+                               : protocol::Timestamp{0}});
         } catch (const UsageError&) {
             throw ActionError{"the witnesses file " + path.string() + " holds a damaged key"};
         }
@@ -269,6 +267,9 @@ std::vector<WitnessAsked> ask_used_witnesses(const ledger::Ledger& ledger,
             asked.problem = e.message;
         } catch (const UsageError& e) {
             asked.problem = e.message;
+        } catch (const std::exception& e) {
+            // Whatever a witness answered, the others are still asked.
+            asked.problem = e.what();
         }
         out.push_back(std::move(asked));
     }

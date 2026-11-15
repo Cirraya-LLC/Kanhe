@@ -24,28 +24,6 @@ bool digits(std::string_view s) {
     return !s.empty() && std::ranges::all_of(s, [](char c) { return c >= '0' && c <= '9'; });
 }
 
-/// Any CBOR integer (-2^64 to 2^64 - 1) as decimal text.
-std::optional<std::string> integer_text(const cbor::Value& v) {
-    if (const auto u = v.as_uint64()) {
-        return std::to_string(*u);
-    }
-    if (const auto n = v.as_negative()) {
-        // -1 - n, with n up to 2^64 - 1: add one to n's digits.
-        std::string digits_only = std::to_string(n->n);
-        std::size_t i = digits_only.size();
-        while (i > 0 && digits_only[i - 1] == '9') {
-            digits_only[--i] = '0';
-        }
-        if (i == 0) {
-            digits_only.insert(0, 1, '1');
-        } else {
-            ++digits_only[i - 1];
-        }
-        return "-" + digits_only;
-    }
-    return std::nullopt;
-}
-
 bool decimal_text(std::string_view s) {
     if (s.size() > max_number_text) {
         return false;
@@ -305,6 +283,27 @@ std::string term_text(const ClaimTerm& t) {
 }
 
 } // namespace
+
+std::optional<std::string> integer_text(const cbor::Value& v) {
+    if (const auto u = v.as_uint64()) {
+        return std::to_string(*u);
+    }
+    if (const auto n = v.as_negative()) {
+        // -1 - n, with n up to 2^64 - 1: add one to n's digits.
+        std::string digits_only = std::to_string(n->n);
+        std::size_t i = digits_only.size();
+        while (i > 0 && digits_only[i - 1] == '9') {
+            digits_only[--i] = '0';
+        }
+        if (i == 0) {
+            digits_only.insert(0, 1, '1');
+        } else {
+            ++digits_only[i - 1];
+        }
+        return "-" + digits_only;
+    }
+    return std::nullopt;
+}
 
 Result<std::vector<ClaimTerm>> decode_claim_condition(const cbor::Value& value) {
     const cbor::Array* terms = value.as_array();

@@ -209,17 +209,21 @@ Result<RecordLog> RecordLog::open(FileSystem& fs, std::string_view name, Recover
 
 Result<RecordLog> RecordLog::open_as(FileSystem& fs, std::string_view name, RecoveryReport* report,
                                      bool cut_tail) {
-    auto log = fs.open(name);
-    if (!log) {
-        return std::unexpected(log.error());
-    }
+    // The sync file first, then the log, as refresh() reads them: a writer
+    // syncs the log before it records the sync, so a log opened after the
+    // record is never shorter than it, however busy the writer. A reader
+    // never cuts anything (cut_tail is false for it).
     auto synced_file = fs.open(std::string(name) + ".synced");
     if (!synced_file) {
         return std::unexpected(synced_file.error());
     }
-    auto synced = read_synced_size(**synced_file);
+    auto synced = read_synced_size(**synced_file, cut_tail);
     if (!synced) {
         return std::unexpected(synced.error());
+    }
+    auto log = fs.open(name);
+    if (!log) {
+        return std::unexpected(log.error());
     }
     if (*synced > (*log)->size()) {
         return fail(Errc::malformed, "the log is shorter than its acknowledged size");

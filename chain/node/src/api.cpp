@@ -541,6 +541,10 @@ struct LedgerApi::State {
         if (verified.error().code == Errc::unavailable) {
             return; // stopping
         }
+        // Removed first, while the writer still takes jobs: once failed is
+        // set it refuses them all, and the snapshot would be loaded again at
+        // the next start.
+        static_cast<void>(on_writer([this] { static_cast<void>(ledger->remove_snapshots()); }));
         {
             const std::lock_guard lock(failure_mutex);
             if (!failed) {
@@ -549,7 +553,6 @@ struct LedgerApi::State {
         }
         failed.store(true, std::memory_order_release);
         event("snapshot-failed", verified.error().detail);
-        static_cast<void>(on_writer([this] { static_cast<void>(ledger->remove_snapshots()); }));
     }
 
     /// The stamper's loop: a token over the latest checkpoint at once, then
@@ -1922,6 +1925,7 @@ struct LedgerApi::State {
         if (!bundle) {
             return error_response(bundle.error());
         }
+        add_membership_proofs(options.directory, "", *bundle);
         auto evidence = contract_evidence(*provider, options.directory, *bundle, ancestors);
         return evidence ? binary("application/cbor", std::move(*evidence))
                         : error_response(evidence.error());
@@ -3283,6 +3287,8 @@ struct LedgerApi::State {
                 done(std::unexpected(bundle.error()));
                 return;
             }
+            // As served over HTTP: the kept membership and source proofs.
+            with_memberships(*bundle);
             done(protocol::encode_bundle(*bundle));
         });
     }
@@ -3327,6 +3333,7 @@ struct LedgerApi::State {
                 done(std::unexpected(bundle.error()));
                 return;
             }
+            add_membership_proofs(options.directory, "", *bundle);
             done(contract_evidence(*provider, options.directory, *bundle, ancestors));
         });
     }
@@ -4256,6 +4263,13 @@ struct LedgerApi::State {
     }
 
     void serve(http::Request r, Done done, std::string_view address = {}) {
+        // A request a relay carried came from another ledger, by way of a
+        // mailbox: it reaches the API's own routes, never the console or
+        // anything else this process serves.
+        if (address == "relay" && !r.path.starts_with("/v1/")) {
+            finish(done, {}, error_response(404, "not_found", "no such route"));
+            return;
+        }
         if (options.public_witness && r.path.starts_with("/v1/witness")) {
             if (auto answer = options.public_witness(r, address)) {
                 finish(done, "witness", std::move(*answer));
