@@ -40,6 +40,8 @@ constexpr std::array types{
     // A claim (spec v0.14): withdrawn by revoking it.
     RecordType{"kanhe.claim/1", "confirmed", no_transitions, no_roles},
     RecordType{"kanhe.membership/1", "active", membership_transitions, no_roles},
+    // A script's approval (spec v0.18): withdrawn by revoking it.
+    RecordType{"kanhe.script/1", "approved", no_transitions, no_roles},
 };
 
 } // namespace

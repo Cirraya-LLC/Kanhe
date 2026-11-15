@@ -71,6 +71,11 @@
 ;   v0.17 the name: Kanhe, formerly CexChain; every protocol string under
 ;         it (the record-type prefix kanhe., the content types). Objects
 ;         under the old name are not Kanhe objects.
+;   v0.18 where a record came from: the kanhe.script/1 mechanism type and
+;         its metadata (script); provenance key 5 names a script;
+;         record-register key 7 names sources; a bundle carries its scripts
+;         and local sources as involved objects, and source proofs (key 10).
+;         Earlier objects remain valid.
 ;
 ; Every structure is encoded as deterministic CBOR (RFC 8949 section 4.2.1) in
 ; the Kanhe profile: no floats, no indefinite lengths, no duplicate keys.
@@ -315,8 +320,9 @@ delegation-revoke-body = {
 ; whose type begins with it and is not one of the mechanism types
 ; (kanhe.access-request/1, kanhe.access-grant/1,
 ; kanhe.access-receipt/1, kanhe.contract-consent/1, and, v0.14,
-; kanhe.claim/1) is refused. The mechanism types have lifecycles of
-; their own and take no endorsements.
+; kanhe.claim/1, v0.16, kanhe.membership/1, v0.18, kanhe.script/1) is
+; refused. The mechanism types have lifecycles of their own and take no
+; endorsements, versions, or sources.
 record-register-body = {
   1 => tstr,                   ; record type, e.g. "example.org.inspection/1"
   2 => bstr .size 32,          ; field commitment root (see record-field)
@@ -324,7 +330,13 @@ record-register-body = {
   ? 4 => [+ attachment],
   ? 5 => { + tstr => any },    ; public metadata, disclosed in the clear
   ? 6 => id,                   ; the record this one supersedes (v0.10)
+  ? 7 => [1*64 source],        ; v0.18: the records it was made from
 }
+; A source (v0.18): a ledger id (this ledger's for a local source) and a
+; record id; no source twice. A local source is a record of this ledger, of
+; a generic type, neither revoked nor superseded at the registration; one on
+; another ledger is checked for its shape only. Mechanism types take none.
+source = [ledger: id, record: id]
 ; Versions (v0.10): with key 6 the registration supersedes a record of the
 ; same ledger, which must not be superseded already; neither type may be a
 ; mechanism type, and the signer's scope must cover both types. A revoked
@@ -473,6 +485,8 @@ provenance = {
   ? 2 => tstr,                 ; model version
   ? 3 => bstr,                 ; commitment to the inputs the agent acted on
   ? 4 => [+ tool-pin],         ; tools and skills used, pinned by digest
+  ? 5 => id,                   ; v0.18: the kanhe.script/1 record of this
+                               ; ledger the content came from, not revoked
 }
 tool-pin = [name: tstr, digest: bstr]
 
@@ -649,6 +663,9 @@ evidence-bundle = {
                                ; evidence-bundle (without key 9) of a
                                ; kanhe.membership/1 record on a trust
                                ; node's ledger naming this bundle's ledger
+  ? 10 => [1*64 bstr],         ; v0.18: source proofs, each an encoded
+                               ; evidence-bundle (without key 10) of one of
+                               ; the record's sources on another ledger
 }
 ; A checkpoint with time-stamp authorities' tokens over its payload (v0.11),
 ; open-network witnesses' cosignatures of its note (v0.13), or both: an
@@ -905,6 +922,23 @@ membership = {
   ? "jurisdiction" => tstr .regexp "[A-Z]{2}(-[A-Z0-9]{1,3})?",  ; ISO 3166
   ? "until" => uint,                   ; ms, above 0: lapsed after it
 }
+
+; Metadata of a kanhe.script/1 record (v0.18; initial state "approved", no
+; transitions; withdrawn by revoking it): the organization's approval of
+; one version of a script, by its files' digests. The ledger checks it,
+; refuses other keys, and requires the signer to be a person proving
+; presence, user-verified.
+script = {
+  "name" => tstr .size (1..128),
+  "version" => tstr .size (1..64),
+  "files" => [1*256 script-file],      ; strictly ascending by path (bytewise)
+  "deterministic" => bool,
+  ? "runtime" => tstr .size (1..128),
+}
+; path: 1 to 1024 bytes, relative, segments separated by "/", each non-empty
+; and neither "." nor ".."; size: the content's length; digest: the
+; ledger's hash of the content.
+script-file = [path: tstr, size: uint, digest: bstr .size 32]
 
 ; Metadata of a kanhe.contract-consent/1 record (initial state "given",
 ; which may become "withdrawn"), on the consenting party's ledger. It is

@@ -54,7 +54,8 @@ struct Scenario {
             {protocol::Attachment{"report.pdf", "application/pdf", attachment.size(),
                                   Bytes(commitment->bytes().begin(), commitment->bytes().end())}},
             cbor::Value::map({{cbor::Value::text("product"), cbor::Value::text("Flange DN50")}}),
-            std::nullopt};
+            std::nullopt,
+            {}};
         auto s = w.statement(c.agent_id, c.agent_delegation, body);
         s.provenance = provenance();
         record = w.ok(c.agent, s);

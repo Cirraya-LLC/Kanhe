@@ -6022,6 +6022,8 @@ def main() -> None:
     generate_protocol_v14()
     generate_protocol_v15()
     generate_protocol_v16()
+    import provenance_vectors
+    provenance_vectors.generate()
     generate_vm_v1()
     import evidence_suite
     evidence_suite.generate(args.openssl)

@@ -48,6 +48,7 @@
 #include <kanhe/core/protocol/network.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/ledger/backup.hpp>
@@ -140,7 +141,8 @@ void ledger_seeds(const Seeds& seeds) {
         {{"report.pdf", "application/pdf", report.size(),
           Bytes(attachment.bytes().begin(), attachment.bytes().end())}},
         std::nullopt,
-        std::nullopt});
+        std::nullopt,
+        {}});
 
     const protocol::AccessRequest request{ledger.id(),
                                           document,
@@ -172,7 +174,8 @@ void ledger_seeds(const Seeds& seeds) {
             1,
             {},
             std::move(metadata),
-            std::nullopt});
+            std::nullopt,
+            {}});
     };
     const auto request_id = access_record(protocol::access_request_type, request_metadata);
     const protocol::AccessGrant grant{ledger.id(),    request_id,    document,         {"result"},
@@ -208,6 +211,11 @@ void ledger_seeds(const Seeds& seeds) {
     auto bundle = must(ledger.export_evidence(log, document), "export");
     const Bytes plain = must(protocol::encode_bundle(bundle), "encode");
     seeds.write("protocol_parse_fuzz", "bundle", plain);
+    // A bundle carrying another ledger's evidence as a source proof (v0.18).
+    auto sourced = bundle;
+    sourced.source_proofs = {plain};
+    seeds.write("protocol_parse_fuzz", "bundle-source-proof",
+                must(protocol::encode_bundle(sourced), "encode"));
     bundle.disclosures.push_back(
         must(protocol::disclose_field(provider, hash, commitment, "result"), "disclose"));
     bundle.attachments.push_back({"report.pdf", salt});
@@ -240,7 +248,8 @@ void ledger_seeds(const Seeds& seeds) {
         commitment.leaves.size(),
         {},
         std::nullopt,
-        std::nullopt});
+        std::nullopt,
+        {}});
     must(ledger.checkpoint(log2), "checkpoint");
     seeds.write(
         "protocol_parse_fuzz", "bundle-rotated",
@@ -343,7 +352,8 @@ struct Org {
                           1,
                           {},
                           std::move(metadata),
-                          std::nullopt})
+                          std::nullopt,
+                          {}})
             .id;
     }
 
@@ -1313,6 +1323,36 @@ void membership_seeds(const Seeds& seeds) {
         must(cbor::encode(must(kanhe::protocol::encode_membership(person), "encode")), "encode"));
 }
 
+/// A script's metadata (spec v0.18): every key; and a statement whose
+/// provenance names a script, registering a record from two sources.
+void script_seeds(const Seeds& seeds) {
+    kanhe::protocol::Script s;
+    s.name = "risk-model";
+    s.version = "3.2";
+    s.files = {{"model/weights.json", 48213, Bytes(32, 0x9a)}, {"run.py", 1204, Bytes(32, 0xac)}};
+    s.deterministic = true;
+    s.runtime = "python 3.12";
+    seeds.write("script_fuzz", "every-key",
+                must(cbor::encode(must(kanhe::protocol::encode_script(s), "encode")), "encode"));
+
+    const auto id = [](std::uint8_t b) {
+        return must(kanhe::protocol::to_id(Bytes(32, b)), "id");
+    };
+    kanhe::protocol::Statement st;
+    st.ledger_id = id(1);
+    st.actor_id = id(2);
+    st.delegation_id = id(3);
+    st.issued_at = 1'794'700'800'000;
+    kanhe::protocol::RecordRegisterBody body{"example.org.report/1", Bytes(32, 0x42), 3, {},
+                                             std::nullopt,           std::nullopt,    {}};
+    body.sources = {{id(1), id(4)}, {id(5), id(6)}};
+    st.body = std::move(body);
+    st.provenance = kanhe::protocol::Provenance{};
+    st.provenance->script = id(7);
+    seeds.write("protocol_parse_fuzz", "payload-sources",
+                must(kanhe::protocol::encode_payload(st), "encode"));
+}
+
 /// A published record's file: one disclosed field, then none and untimed
 /// (a request to publish).
 void published_seeds(const Seeds& seeds) {
@@ -1409,6 +1449,7 @@ int main(int argc, char** argv) {
         credential_seeds(seeds);
         claim_seeds(seeds);
         membership_seeds(seeds);
+        script_seeds(seeds);
         form_seeds(seeds);
         calls_seeds(seeds);
         exchange_seeds(seeds);

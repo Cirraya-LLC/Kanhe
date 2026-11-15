@@ -135,8 +135,8 @@ public:
     protocol::Nonce nonce() { return entropy_.bytes<16>(); }
 
     protocol::RecordRegisterBody record_body(const std::string& type) {
-        return protocol::RecordRegisterBody{type, Bytes(32, 0x42), 3,
-                                            {},   std::nullopt,    std::nullopt};
+        return protocol::RecordRegisterBody{type,         Bytes(32, 0x42), 3, {},
+                                            std::nullopt, std::nullopt,    {}};
     }
 
 private:
@@ -151,7 +151,7 @@ private:
 };
 
 inline protocol::Provenance provenance() {
-    return protocol::Provenance{"claude-opus-5-5", "2026-09", std::nullopt, {}};
+    return protocol::Provenance{"claude-opus-5-5", "2026-09", std::nullopt, {}, std::nullopt};
 }
 
 inline protocol::Scope scope(std::vector<StatementType> types,

@@ -15,7 +15,8 @@ It verifies an evidence bundle (spec section 11), a record's or an instance's, e
   claims, memberships, and contracts (below);
 - proof of presence, by passkey or hardware key;
 - disclosed fields and attachments;
-- completeness against the state commitment, a claim's source included;
+- completeness against the state commitment, a claim's source, a record's local sources, and
+  the scripts its statements name included;
 - claims: the condition in words, whether it holds, as of when and until when, whether it has
   lapsed, and whether its source is live, revoked, or replaced (`kanhe_verify/claims.py`);
 - witness cosignatures;
@@ -27,7 +28,13 @@ It verifies an evidence bundle (spec section 11), a record's or an instance's, e
   evidence of a `kanhe.membership/1` record naming the bundle's ledger, verified as a bundle of
   its own, and where the membership stood when the record was registered and at the proof's
   checkpoint (`kanhe_verify/memberships.py`). A trust node is trusted, and named, only by the
-  verifier's list (`--trust-node`), never by anything the evidence says.
+  verifier's list (`--trust-node`), never by anything the evidence says;
+- scripts and sources (spec v0.18): the scripts a record's statements name (provenance key 5),
+  what each is, who approved it in person, and whether it was withdrawn since; the sources its
+  registration names (key 7), each on this ledger from the bundle itself or on another from its
+  source proof (bundle key 10, a complete bundle of that ledger, one level, verified with the
+  same trust settings), and where each stood when the record was registered and at the
+  checkpoint (`kanhe_verify/scripts.py`).
 
 And it verifies an instance's contract evidence (sections 14 and 15):
 

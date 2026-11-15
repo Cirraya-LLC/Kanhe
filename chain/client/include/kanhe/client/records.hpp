@@ -36,6 +36,8 @@ struct IssueRequest {
     std::optional<PresenceRequest> presence;
     /// The record the new one supersedes, as its new version.
     std::optional<protocol::Id> supersedes;
+    /// The records it was made from (spec v0.18): on this ledger or another.
+    std::vector<protocol::Source> sources;
 };
 
 /// The media type an attachment named `path` is given (by its extension).

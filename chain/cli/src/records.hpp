@@ -24,4 +24,9 @@ namespace kanhe::cli {
 [[nodiscard]] Vault read_vault(const client::Session& session, const protocol::Id& record,
                                const Args& args);
 
+/// A source as --source names it (spec v0.18): RECORD on this ledger (a full
+/// id or a prefix), or LEDGER:RECORD, both full ids, on another.
+[[nodiscard]] protocol::Source parse_source(const client::Session& session,
+                                            const std::string& text);
+
 } // namespace kanhe::cli

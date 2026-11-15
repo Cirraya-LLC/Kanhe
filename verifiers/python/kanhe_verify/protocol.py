@@ -181,6 +181,7 @@ class Provenance:
     model_version: str | None
     input_commitment: bytes | None
     tools: list  # [(name, digest)]
+    script: bytes | None = None  # v0.18: the kanhe.script/1 record its content came from
 
 
 @dataclass
@@ -280,7 +281,7 @@ def parse_presence_proof(value) -> PresenceProof:
 
 
 def parse_provenance(value) -> Provenance:
-    m = _map(value, "a provenance", set(), {1, 2, 3, 4})
+    m = _map(value, "a provenance", set(), {1, 2, 3, 4, 5})
     tools = []
     if 4 in m:
         _check(isinstance(m[4], list) and m[4], "provenance tools are not a non-empty list")
@@ -293,7 +294,25 @@ def parse_provenance(value) -> Provenance:
         model_version=_tstr(m[2], "a provenance model version") if 2 in m else None,
         input_commitment=_bstr(m[3], "a provenance input commitment") if 3 in m else None,
         tools=tools,
+        script=_id(m[5], "a provenance's script") if 5 in m else None,
     )
+
+
+# A registration names at most this many sources (key 7, v0.18).
+MAX_SOURCES = 64
+
+
+def _parse_sources(value) -> list:
+    """Sources (v0.18): 1 to 64 [ledger, record], none twice."""
+    _check(isinstance(value, list) and value, "a registration's sources are not a non-empty list")
+    _check(len(value) <= MAX_SOURCES, "a registration names more than 64 sources")
+    out = []
+    for item in value:
+        _check(isinstance(item, list) and len(item) == 2, "a source is not [ledger, record]")
+        source = (_id(item[0], "a source's ledger"), _id(item[1], "a source's record"))
+        _check(source not in out, "a registration names a source twice")
+        out.append(source)
+    return out
 
 
 def _parse_attachment(value) -> tuple:
@@ -347,7 +366,7 @@ def _parse_body(kind: int, body) -> dict:
         m = _map(body, "a log key rotation", {1})
         return {"key": crypto.parse_public_key(m[1], "the new log key")}
     if kind == RECORD_REGISTER:
-        m = _map(body, "a record registration", {1, 2, 3}, {4, 5, 6})
+        m = _map(body, "a record registration", {1, 2, 3}, {4, 5, 6, 7})
         attachments = []
         if 4 in m:
             _check(isinstance(m[4], list) and m[4], "a record's attachments are not a non-empty list")
@@ -362,7 +381,8 @@ def _parse_body(kind: int, body) -> dict:
                 "field_root": _bstr(m[2], "a field root", 32, 32),
                 "field_count": _uint(m[3], "a field count"),
                 "attachments": attachments, "metadata": metadata,
-                "supersedes": _id(m[6], "the superseded record") if 6 in m else None}
+                "supersedes": _id(m[6], "the superseded record") if 6 in m else None,
+                "sources": _parse_sources(m[7]) if 7 in m else []}
     if kind == RECORD_ENDORSE:
         m = _map(body, "an endorsement", {1, 2})
         return {"record": _id(m[1], "the record"), "role": _tstr(m[2], "a role")}
@@ -567,10 +587,13 @@ class Bundle:
     proofs: list
     anchors: list
     memberships: list = field(default_factory=list)  # v0.16: membership proofs, each an encoded bundle
+    sources: list = field(default_factory=list)  # v0.18: source proofs, each an encoded bundle
 
 
-# A bundle carries at most this many membership proofs (key 9, v0.16).
+# A bundle carries at most this many membership proofs (key 9, v0.16), and
+# this many source proofs (key 10, v0.18).
 MAX_MEMBERSHIP_PROOFS = 16
+MAX_SOURCE_PROOFS = 64
 
 
 def _nonempty_list(value, what: str) -> list:
@@ -588,7 +611,7 @@ def parse_bundle(data: bytes) -> Bundle:
     value = cbor.decode(data)
     _check(not is_contract_evidence(value), "this is an instance's contract evidence, not an evidence bundle: "
            "verify it as contract evidence")
-    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9})
+    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9, 10})
     _check(m[0] == 1 and _is_int(m[0]), "the bundle is not of format version 1")
     entries = []
     for item in _nonempty_list(m[2], "the bundle's entries"):
@@ -628,10 +651,17 @@ def parse_bundle(data: bytes) -> Bundle:
         memberships = _nonempty_list(m[9], "the list of membership proofs (key 9)")
         _check(len(memberships) <= MAX_MEMBERSHIP_PROOFS, "the bundle carries more than 16 membership proofs")
         _check(all(isinstance(p, bytes) for p in memberships), "a membership proof is not a byte string")
+    # v0.18: 1 to 64 source proofs, each an encoded evidence bundle,
+    # verified in evidence.py (section 11, step 10).
+    source_proofs = []
+    if 10 in m:
+        source_proofs = _nonempty_list(m[10], "the list of source proofs (key 10)")
+        _check(len(source_proofs) <= MAX_SOURCE_PROOFS, "the bundle carries more than 64 source proofs")
+        _check(all(isinstance(p, bytes) for p in source_proofs), "a source proof is not a byte string")
     return Bundle(subject=_id(m[1], "the bundle's subject"), entries=entries,
                   checkpoint=_bstr(m[3], "the checkpoint"), cosignatures=cosignatures,
                   disclosures=disclosures, openings=openings, proofs=proofs, anchors=anchors,
-                  memberships=list(memberships))
+                  memberships=list(memberships), sources=list(source_proofs))
 
 
 def parse_anchor(value) -> Anchor:

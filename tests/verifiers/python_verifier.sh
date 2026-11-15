@@ -441,6 +441,73 @@ else
     echo "Presence: SoftHSM not found, hardware-key presence skipped (the vectors cover passkeys)"
 fi
 
+# --- Scripts and sources (spec v0.18) -------------------------------------------
+# A registry's title and a bank's book are sources of the bank's report; the
+# title's evidence goes with the report as its source proof.
+echo "Sources and scripts"
+export KANHE_LEDGER="$WORK/sr"
+key srroot; key srlog
+SR_ID="$(run init --name "Land Registry" --root-key srroot.key --log-key srlog.key --json | json 'd["ledger_id"]')"
+SR_T1="$(issue --as srroot.key --type example.org.land-title/1 --field lot=456)"
+SR_T2="$(issue --as srroot.key --type example.org.land-title/1 --field lot=457)"
+SR_T3="$(issue --as srroot.key --type example.org.land-title/1 --field lot=458)"
+run checkpoint create --log-key srlog.key > /dev/null
+run export "$SR_T3" --log-key srlog.key --out sr-t3.cbor > /dev/null
+run export "$SR_T1" --log-key srlog.key --out sr-t1.cbor > /dev/null
+run export "$SR_T2" --log-key srlog.key --out sr-t2.cbor > /dev/null
+export KANHE_LEDGER="$WORK/sb"
+key sbroot; key sblog
+SB_ID="$(run init --name "Example Bank" --root-key sbroot.key --log-key sblog.key --json | json 'd["ledger_id"]')"
+SB_BOOK="$(issue --as sbroot.key --type example.org.loan-book/1 --field total=1000)"
+SB_REPORT="$(issue --as sbroot.key --type example.org.report/1 --field score=710 \
+    --source "$SB_BOOK" --source "$SR_ID:$SR_T1" --source "$SR_ID:$SR_T2" --source-proof sr-t1.cbor)"
+run checkpoint create --log-key sblog.key > /dev/null
+run export "$SB_REPORT" --log-key sblog.key --out s-report.cbor > /dev/null
+compare "a local source, a proven one on another ledger, one not provided" s-report.cbor verified --ledger-id "$SB_ID"
+damage "a state proof left out" s-report.cbor failed drop-proof 0 -- --ledger-id "$SB_ID"
+damage "without its source proof" s-report.cbor verified drop-source-proofs
+damage "a source proved twice" s-report.cbor failed duplicate-source-proof 0
+damage "a proof of a record it does not name" s-report.cbor failed add-source-proof sr-t3.cbor
+damage "a proof of a record of its own ledger" s-report.cbor failed add-source-proof s-report.cbor
+damage "a source proof that does not verify" s-report.cbor failed break-source-proof 0
+damage "a source proof carrying a source proof" s-report.cbor failed nest-source-proof 0
+mutate s-report.cbor s-two.cbor add-source-proof sr-t2.cbor
+compare "both sources on the other ledger proven" s-two.cbor verified
+run record revoke "$SB_BOOK" --as sbroot.key --reason restated > /dev/null
+run checkpoint create --log-key sblog.key > /dev/null
+run export "$SB_REPORT" --log-key sblog.key --out s-report-later.cbor > /dev/null
+compare "the local source revoked since" s-report-later.cbor verified --ledger-id "$SB_ID"
+if [ -n "$MODULE" ] && command -v softhsm2-util > /dev/null; then
+    softhsm_on
+    SURI="pkcs11:token=Kanhe;object=sukey?module-path=$MODULE"
+    run key generate --pkcs11 "$SURI" --out sukey.pub > /dev/null
+    key sperson; key sengine
+    SPERSON="$(actor --as sbroot.key --kind person --name "Risk Officer" --key sperson.pub)"
+    grant --as sbroot.key --to "$SPERSON" --allow record-register,record-revoke > /dev/null
+    run presence enroll --pkcs11 "$SURI" --label "Officer UKey" --out scred.json > /dev/null
+    run actor set-presence "$SPERSON" --as sbroot.key --credential scred.json > /dev/null
+    mkdir -p sscript && printf 'print(710)\n' > sscript/run.py
+    SSCRIPT="$(run script approve risk-model 3.2 run.py --root sscript --deterministic \
+        --as sperson.key --presence-key "$SURI" --json | json 'd["script"]["script"]')"
+    SENGINE="$(actor --as sbroot.key --kind device --name "Risk Engine" --key sengine.pub)"
+    grant --as sbroot.key --to "$SENGINE" --allow record-register,record-endorse > /dev/null
+    SB_BOOK2="$(issue --as sbroot.key --type example.org.loan-book/1 --field total=2000)"
+    SB_SCORE="$(issue --as sengine.key --type example.org.report/1 --field score=702 \
+        --script "$SSCRIPT" --source "$SB_BOOK2")"
+    run record endorse "$SB_SCORE" --as sengine.key --role checked --script "$SSCRIPT" > /dev/null
+    run checkpoint create --log-key sblog.key > /dev/null
+    run export "$SB_SCORE" --log-key sblog.key --out s-score.cbor > /dev/null
+    compare "a record by a script approved in person, named twice" s-score.cbor verified --ledger-id "$SB_ID"
+    damage "the state proofs left out" s-score.cbor failed drop-proofs
+    run script revoke "$SSCRIPT" --as sperson.key > /dev/null
+    run checkpoint create --log-key sblog.key > /dev/null
+    run export "$SB_SCORE" --log-key sblog.key --out s-score-later.cbor > /dev/null
+    compare "the script withdrawn since" s-score-later.cbor verified --ledger-id "$SB_ID"
+    softhsm_off
+else
+    echo "Scripts: SoftHSM not found, scripts approved in person skipped (the vectors cover them)"
+fi
+
 # --- Bundles packed from the independent test vectors ------------------------
 echo "Bundles packed from testvectors/ (passkeys, hardware keys, rotations, versions, mechanism types)"
 "$PYTHON" "$VERIFIER/tests/vector_bundles.py" vectors > /dev/null

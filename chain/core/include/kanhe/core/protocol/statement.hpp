@@ -190,6 +190,18 @@ struct Attachment {
     friend bool operator==(const Attachment&, const Attachment&) = default;
 };
 
+/// A record a registration was made from (spec v0.18): its ledger (this
+/// ledger's for a local source) and its id.
+struct Source {
+    Id ledger;
+    Id record;
+
+    friend bool operator==(const Source&, const Source&) = default;
+};
+
+/// At most this many sources a registration names (spec v0.18).
+inline constexpr std::size_t max_sources = 64;
+
 struct RecordRegisterBody {
     std::string record_type;
     Bytes field_root;
@@ -199,6 +211,8 @@ struct RecordRegisterBody {
     std::optional<cbor::Value> metadata;
     /// The record this one supersedes, as its new version (v0.10).
     std::optional<Id> supersedes;
+    /// The records it was made from (v0.18): none, or 1 to 64, no one twice.
+    std::vector<Source> sources;
 
     friend bool operator==(const RecordRegisterBody&, const RecordRegisterBody&) = default;
 };
@@ -360,6 +374,9 @@ struct Provenance {
     std::optional<std::string> model_version;
     std::optional<Bytes> input_commitment;
     std::vector<ToolPin> tools;
+    /// The kanhe.script/1 record of this ledger the content came from
+    /// (v0.18).
+    std::optional<Id> script;
 
     friend bool operator==(const Provenance&, const Provenance&) = default;
 };

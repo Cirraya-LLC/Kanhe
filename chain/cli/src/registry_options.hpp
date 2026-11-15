@@ -25,6 +25,9 @@ inline const OptionSpec model_version_option{"model-version", "VERSION",
                                              "AI provenance: model version"};
 inline const OptionSpec inputs_option{
     "inputs", "TEXT", "AI provenance: what the action was based on (only a hash is recorded)"};
+inline const OptionSpec script_option{
+    "script", "SCRIPT",
+    "Provenance: the approved script (kanhe script approve) this came from, by its id"};
 inline const OptionSpec log_key_option{"log-key", "KEY", "The ledger's log key file", true};
 /// For a party reached through its relay: what goes there is signed.
 inline const OptionSpec relay_log_key_option{
@@ -52,7 +55,7 @@ inline const std::set<std::string_view> local_only{"init",  "serve", "token",  "
                                                    "vault", "peer",  "access", "cluster"};
 /// Single commands of other groups that need the directory (its peers).
 inline const std::set<std::pair<std::string_view, std::string_view>> local_only_commands{
-    {"contract", "send"}, {"contract", "fetch"}, {"keeper", "due"}};
+    {"contract", "send"}, {"contract", "fetch"}, {"keeper", "due"}, {"record", "source"}};
 /// The cluster commands that talk to a member's API.
 inline std::vector<OptionSpec> cluster_api(std::vector<OptionSpec> extra) {
     std::vector<OptionSpec> options{
@@ -156,9 +159,9 @@ inline std::vector<OptionSpec> paged(std::vector<OptionSpec> options) {
 
 inline std::vector<OptionSpec> signing(std::vector<OptionSpec> extra) {
     std::vector<OptionSpec> options{
-        ledger_option,        as_option,        delegation_option,      model_option,
-        model_version_option, inputs_option,    passphrase_file_option, presence_option,
-        presence_key_option,  no_browser_option};
+        ledger_option,        as_option,           delegation_option, model_option,
+        model_version_option, inputs_option,       script_option,     passphrase_file_option,
+        presence_option,      presence_key_option, no_browser_option};
     options.insert(options.end(), extra.begin(), extra.end());
     return options;
 }

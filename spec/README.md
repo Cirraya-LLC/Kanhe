@@ -1,6 +1,6 @@
 # The Kanhe protocol
 
-Revision v0.17 (draft). Wire protocol version 1.
+Revision v0.18 (draft). Wire protocol version 1.
 
 This document explains the protocol in prose. The normative definitions are:
 
@@ -14,6 +14,8 @@ The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119.
 Bo, the language contracts are written in, has its own reference: [`bo.md`](bo.md).
 
 Records handed over as W3C Verifiable Credentials, which change nothing in the protocol, have a profile of their own: [`credentials.md`](credentials.md).
+
+**Changes in v0.18.** Where a record came from. A record of the new mechanism type `kanhe.script/1` is the organization's approval of one version of a script, by its files' digests, given by a person in person (section 6). A statement's provenance may name the script its content came from (key 5), and a registration may name the records it was made from, on this ledger or another (key 7, its **sources**). A bundle carries the scripts its events name and its local sources as involved objects, so that a script withdrawn or a source revoked or replaced since cannot be left out, and may carry the evidence of sources on other ledgers (key 10, **source proofs**). A report states each script and each source, with its status when the record was registered and now (section 11). A source revoked or replaced since is a warning on the record, never its revocation. The ledger rules change for the new type and keys only; the wire protocol stays version 1, and a log and a bundle without them verify as before. `state_rules_version` 5.
 
 **Changes in v0.17.** The protocol is Kanhe, formerly CexChain. Every protocol string changes with the name: the reserved record-type prefix is `kanhe.` (six bytes), so the mechanism types are `kanhe.access-request/1` to `kanhe.membership/1`, and the content types and every other string the protocol signs or hashes say `kanhe` where they said `cexchain`. Objects under the old name are not Kanhe objects and verify as nothing here; the wire protocol stays version 1, since the content types already tell the two apart. `state_rules_version` 4. The earlier revisions below are written under the new name.
 
@@ -145,7 +147,7 @@ A statement payload (`statement-payload` in the CDDL) holds:
 | 6 | nonce | 16 random bytes |
 | 7 | body | depends on the type |
 | 8 | proof of presence | section 7 |
-| 9 | provenance | for AI agents: model, version, input commitment, tools pinned by digest |
+| 9 | provenance | for AI agents: model, version, input commitment, tools pinned by digest; for any statement, the script its content came from (v0.18) |
 
 Statement types:
 
@@ -180,6 +182,7 @@ A ledger accepts a statement only if every rule below holds at its registration 
 - `issued at` is no later than `now` plus 5 minutes.
 - The signer is a registered, unrevoked actor, and the statement is signed with that actor's current key. The COSE `kid` MUST match it.
 - An agent's statements MUST name a model in their provenance.
+- A statement whose provenance names a script (key 5, v0.18) is refused unless that script is a `kanhe.script/1` record of this ledger, not revoked.
 
 **Authority**
 
@@ -212,6 +215,8 @@ A ledger accepts a statement only if every rule below holds at its registration 
 - **Revoked objects** (v0.12). A revoked actor or delegation takes no statement about it: revoking it again, rotating a revoked actor's key or setting its presence credentials, granting a delegation to it, and registering an agent with it as the responsible person are refused.
 - **Records.** A registration's type must not begin with `kanhe.` unless it is one of the protocol's mechanism types (v0.9; section 6). Records follow their type's lifecycle (section 6). Transitions must start from the record's current state and be allowed by its type, so a record of the generic lifecycle takes none. Endorsement roles must be allowed by the type: any role under the generic lifecycle, none for a mechanism type. An actor endorses a record at most once per role. A revoked record accepts no further statements, except a registration that supersedes it.
 - **Versions** (v0.10). A registration that supersedes a record (section 6) is refused unless that record is a record of this ledger, neither of the two types is a mechanism type, the record was not superseded before, and the signer's scope covers that record's type as well as its own (the organization needs no scope). The record may be revoked.
+- **Scripts** (v0.18). A registration of `kanhe.script/1` is refused unless its signer is a person who proves presence, user-verified (section 7), whatever the signer's scope: an approval is a person's act.
+- **Sources** (v0.18). A registration that names sources (key 7) is refused if it is of a mechanism type, and unless each source on this ledger (its ledger id is this ledger's) is a record of this ledger, of a generic type, neither revoked nor superseded at `now`. A source on another ledger is checked for its shape only.
 - **Contracts.** Deploys, calls, and retires follow the rules of section 15. A call is registered only if its contract, run on the call, accepts it. An answer (v0.8) answers an open request of its instance, at most once.
 
 ## 6. Records and private data
@@ -231,7 +236,7 @@ What a type's fields mean, which roles matter, and when a document stops countin
 
 **Versions** (v0.10). A registration may name the record it supersedes (key 6): a new version of a form, a policy, or a price list. A record is superseded at most once, and a registration supersedes at most one record, so a record's versions form one chain, oldest first; the types may differ (`example.org.form/1`, then `example.org.form/2`). A superseded record keeps its state, and may still be endorsed and revoked: it is what was in force until then. A revoked record may still be superseded, so that a version withdrawn by mistake can be replaced. Mechanism types neither supersede nor are superseded. The registration is a statement about both records (section 9), so a complete bundle of an old version shows whether a newer one replaced it (section 11). Anything with rules of its own, such as states that change or parties who must agree, is a contract instance (section 15), which may name records in its state.
 
-**Mechanism types.** Six types belong to the protocol's own mechanisms, each with its lifecycle. None takes endorsements:
+**Mechanism types.** Seven types belong to the protocol's own mechanisms, each with its lifecycle. None takes endorsements, versions, or sources:
 
 | Type | Initial state | Transitions | Used in |
 |---|---|---|---|
@@ -241,8 +246,9 @@ What a type's fields mean, which roles matter, and when a document stops countin
 | `kanhe.contract-consent/1` | given | given → withdrawn | consents to contract calls (section 15) |
 | `kanhe.claim/1` (v0.14) | confirmed | none (revoke the record) | claims, below |
 | `kanhe.membership/1` (v0.16) | active | active → suspended, suspended → active, active → ended, suspended → ended | trust nodes, below |
+| `kanhe.script/1` (v0.18) | approved | none (revoke the record to withdraw the approval) | scripts, below |
 
-**The `kanhe.` prefix is reserved** (v0.9). A registration whose type begins with the six bytes `kanhe.` and is not one of the six is refused, so that nobody can pass off a type as the protocol's. This covers the types that earlier revisions built in and v0.9 removed: `kanhe.certificate/1`, `kanhe.delivery/1`, and `kanhe.agreement/1` (v0.1), and `kanhe.receivable/1`, `kanhe.warehouse-receipt/1`, and `kanhe.asset-consent/1` (v0.5). The rule applies to registrations only: a scope may list any type, and a type nobody can register covers nothing.
+**The `kanhe.` prefix is reserved** (v0.9). A registration whose type begins with the six bytes `kanhe.` and is not one of the seven is refused, so that nobody can pass off a type as the protocol's. This covers the types that earlier revisions built in and v0.9 removed: `kanhe.certificate/1`, `kanhe.delivery/1`, and `kanhe.agreement/1` (v0.1), and `kanhe.receivable/1`, `kanhe.warehouse-receipt/1`, and `kanhe.asset-consent/1` (v0.5). The rule applies to registrations only: a scope may list any type, and a type nobody can register covers nothing.
 
 Record-transition (type 18) stays for the mechanism types: it is how a party withdraws an access request or a consent, and how a trust node suspends, resumes, or ends a membership. On a record of the generic lifecycle it is always refused.
 
@@ -266,6 +272,18 @@ The ledger checks the metadata's shape and refuses other keys. It cannot check t
 - `until` (optional, ms, above 0): after it the membership has lapsed.
 
 The ledger checks the metadata's shape and refuses other keys. A membership is active when registered; the trust node suspends it, resumes it, and ends it (the member left, or did not renew) by transitions, and revokes it for cause. It has no versions: a renewal is a new membership, which may overlap the old one, and each is judged by its own history. A membership's registration and transitions are statements about the membership only: the member's ledger is another ledger, unchanged.
+
+**Scripts** (v0.18). A script record is the organization's approval of one version of a script, a program that makes records or answers (a risk model, an executor's command), identified by its files' digests: "risk-model 3.2, these two files, approved in person by Chan Tai Man". It is a `kanhe.script/1` record whose public metadata (key 5) is `script` in the CDDL:
+- `name`: 1 to 128 bytes, such as `risk-model`; `version`: 1 to 64 bytes, such as `3.2`.
+- `files`: 1 to 256 entries `[path, size, digest]`, strictly ascending by the bytewise order of the paths' UTF-8: `path` 1 to 1,024 bytes, relative, its segments separated by `/`, each non-empty and neither `.` nor `..`; `size` the content's length in bytes; `digest` the ledger's hash (SHA-256 or SM3) of the content, 32 bytes. Anyone can check a file with `sha256sum`: there is no construction of our own.
+- `deterministic`: whether the organization states that the same inputs give the same output, so that an auditor may run it again and compare (section 11).
+- `runtime` (optional): 1 to 128 bytes, what runs it, such as `python 3.12`.
+
+The ledger checks the metadata's shape and refuses other keys, and requires a person present to sign it (section 5). A script is approved when registered and has no transitions: revoking the record withdraws the approval, and a new version is a new record, so a new approval. Its own fields (at least one, as every record's) are the organization's: the reference implementation commits a note and the approver's name.
+
+A statement names the script its content came from in its provenance (key 5 of `provenance`): a report a device registered, an executor's answer to a request. Provenance is no longer for agents only; an agent's statements still name a model.
+
+**Sources** (v0.18). A registration may name the records it was made from (key 7 of `record-register-body`): 1 to 64 entries `[ledger, record]`, each a ledger id (this ledger's own for a **local** source) and a record id, no entry twice. A local source must be a live record of a generic type when the registration is registered (section 5); a source on another ledger is that ledger's to show (section 11). The registration is a statement about the new record only: a source's history does not change, so a source revoked or replaced later is reported on the record made from it, never revokes it. Whoever relies on the record decides what a stale source means.
 
 **The vault** is informative and local to an implementation. The reference implementation keeps each record's values and salts sealed with HPKE (RFC 9180, base mode, DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-256-GCM) to the ledger's vault key. Each sealed file is bound to its ledger and record.
 
@@ -391,25 +409,26 @@ A ledger can also be witnessed by the witnesses of open transparency networks th
 An evidence bundle (`evidence-bundle`) holds:
 
 - the record id, or an instance's id (section 15);
-- log entries with their receipts, in ascending order, starting with genesis: the record's statements (with the registration that supersedes it, if any; not the record it supersedes) and every statement they depend on (signers' registrations and key rotations, delegation chains, referenced actors), and every rotation of the organization's keys below the checkpoint's size. For a claim (v0.14), also its source's statements (with the registration that superseded the source, if any) and theirs. For an instance created by a call, also its ancestors' calls up to the one that created each next generation (section 15);
+- log entries with their receipts, in ascending order, starting with genesis: the record's statements (with the registration that supersedes it, if any; not the record it supersedes) and every statement they depend on (signers' registrations and key rotations, delegation chains, referenced actors), and every rotation of the organization's keys below the checkpoint's size. For a claim (v0.14), also its source's statements (with the registration that superseded the source, if any) and theirs. For a record whose registration names local sources, and for events whose provenance names a script (v0.18), also those records' statements (with the registration that superseded a source, if any) and theirs. For an instance created by a call, also its ancestors' calls up to the one that created each next generation (section 15);
 - the signed checkpoint all receipts lead to, and witness cosignatures of it;
 - optional field disclosures and attachment openings (salts; the contents travel alongside);
 - state proofs for every involved object;
 - optional anchors (v0.11): signed checkpoints at or before the bundle's checkpoint, each with time-stamp tokens over its payload (section 10.1), open-network witnesses' cosignatures of its note (v0.13, section 10.2), or both, and, for an earlier one, the RFC 9162 consistency proof from its size to the bundle's checkpoint;
 - optional membership proofs (v0.16): 1 to 16 evidence bundles, each the complete evidence of a `kanhe.membership/1` record on a trust node's ledger that names this bundle's ledger as its `member` (section 6). A proof carries no membership proofs of its own.
+- optional source proofs (v0.18): 1 to 64 evidence bundles, each the complete evidence of one of the record's sources on another ledger, on that ledger. A proof may carry membership proofs, and carries no source proofs of its own: a source's own sources are named in its proof, and their evidence is theirs to fetch, one level at a time.
 
 A verifier MUST:
 
 1. Take the ledger's identity, hash, and first keys from the genesis entry. If it expects a particular ledger, check the ledger id.
 2. Check every receipt's inclusion proof against the checkpoint (same size and root), with indices strictly ascending from 0.
-3. Replay the included statements under the ledger rules (section 5), at their registration times. This follows the organization's key rotations. A registration that supersedes a record the bundle does not hold (v0.10) is checked under every rule except those about that record: that record's own bundle shows the link. A claim's source (v0.14) has no such exception: a claim's bundle without its source fails.
+3. Replay the included statements under the ledger rules (section 5), at their registration times. This follows the organization's key rotations. A registration that supersedes a record the bundle does not hold (v0.10) is checked under every rule except those about that record: that record's own bundle shows the link. A claim's source (v0.14) has no such exception: a claim's bundle without its source fails. Nor have the record's own local sources and scripts (v0.18), which step 7 requires; but a statement of a related object that names sources or a script the bundle does not hold (a source's own sources, its script) is checked under every rule except those about them.
 4. Verify the checkpoint and every receipt's signature with the log key in effect at the checkpoint's size, and each state commitment with the one in effect at its index. A bundle that leaves out a log key rotation fails here, since keys never repeat.
 5. Check disclosed fields against the record's field root and count, and the contents provided for opened attachments against their sizes and commitments: a content that does not match fails the evidence. A content given for an attachment the bundle does not open is reported as not provided (v0.12).
 6. Count cosignatures only by witnesses it trusts, each witness once, network witnesses' among them (step 8). A cosignature over another checkpoint, and one by a trusted witness that does not verify, fail the evidence; one by a witness it does not trust is counted and relied on for nothing (v0.12).
 7. If the last entry the checkpoint covers is a state commitment (included with its receipt):
    - check it as replay would;
    - verify every state proof against its root;
-   - for the record and each involved object, require a proof whose leaf equals that object's leaf in the replayed state. The involved objects are each event's signer, an agent signer's responsible person, and every delegation in the chain with its grantor; for an instance, also its contract; for a claim (v0.14), also its source, whose statements count as events too. For an instance created by a call, its ancestors' included calls count as events too, and the ancestors themselves need no proof (section 15).
+   - for the record and each involved object, require a proof whose leaf equals that object's leaf in the replayed state. The involved objects are the record's **related objects**: for a claim (v0.14), its source; for a record whose registration names sources (v0.18), each local source; for an event of the record whose provenance names a script (v0.18), that script. Their statements count as events too, and bring in no further related objects. Then each event's signer, an agent signer's responsible person, and every delegation in the chain with its grantor; for an instance, also its contract. For an instance created by a call, its ancestors' included calls count as events too, and the ancestors themselves need no proof (section 15).
 
    A missing or differing proof fails the evidence, and so do state proofs in a bundle that does not include that commitment (v0.12). Only then is the report **complete**: nothing, such as a later revocation, was left out.
 8. For each anchor (v0.11):
@@ -424,6 +443,13 @@ A verifier MUST:
 
    A proof that fails any of this fails the evidence. Its trust node is **trusted** if its ledger is on the verifier's list (below); a proof from any other ledger is reported and relied on for nothing.
 
+10. For each source proof (v0.18):
+   - verify it as an evidence bundle under steps 1 to 9, for the ledger its own genesis names, with no attachment contents and the verifier's own trusted witnesses, network witnesses, time-stamp authorities, and trust nodes, as for a membership proof (step 9). A proof that carries source proofs is refused before anything in it is checked. It MUST verify, be complete, and be about a record that the record's registration names as a source on that ledger, which is not this bundle's ledger. Two proofs of one source fail the evidence. A source on another ledger without a proof is reported as not provided: the record still verifies;
+   - take the source's status at a time T from its history in the proof, at registration times: **not yet registered** if T is before its registration; else **revoked** if it was revoked at or before T; else **replaced** if a registration that superseded it was registered at or before T; else **live**. A proof shows the history up to its checkpoint only;
+   - state it at two times: when this bundle's record was registered, and at the proof's checkpoint's time.
+
+   A local source's status is taken the same way from this bundle (live when the record was registered, by the ledger rules).
+
 **Trust nodes** (v0.16). A verifier has a list of the trust nodes it believes, each a ledger id and the name the verifier gives it, each ledger once. A report names a trust node by that name, never by anything the evidence says, the node's organization name included, so a look-alike node gains nothing. A verifier with an empty list trusts no trust node, and still reports every proof.
 
 A report states:
@@ -434,6 +460,8 @@ A report states:
 - the disclosed fields and attachment checks;
 - the witnesses, and each network cosignature, in the bundle's order: its witness, the size it cosigned, its time, and whether the witness is trusted (v0.13). A ledger witness is one by its key, a network witness by its verifier key, so each is counted once;
 - the time-stamp tokens, and for each event the time by which a trusted authority saw it (v0.11);
+- for each script the record's events name (v0.18), once, in the order first named: its `name`, `version`, `files` (path, size, digest), `deterministic`, and `runtime`; who approved it, how they proved presence, and when; and whether it was withdrawn since (when). Each event that names a script names it;
+- for each source the record's registration names (v0.18), in its order: its ledger (this ledger, or another, with the organization its proof's genesis names and, if a membership proof of it is trusted, its trust node), its record id and, where known, its type; its status when the record was registered and at the checkpoint (a source on another ledger: at its proof's checkpoint), with when it changed; and whether its evidence was provided. A source revoked or replaced since the record was registered is a warning on the record;
 - for each membership proof (v0.16), in the bundle's order: the trust node's ledger id, whether it is trusted, and the name the verifier's list gives it; the membership's id, `kind`, `name`, verified or self-declared, `registration`, `jurisdiction`, and `until`; and its state when the record was registered and at the proof's checkpoint, with that checkpoint's time;
 - whether it is complete.
 
@@ -1008,6 +1036,7 @@ A server holds the log key to sign checkpoints, receipts, and evidence. Across a
 | `protocol-v0.14.json` | claims (v0.14, sections 6 and 11): claim metadata, valid with its encoding and its condition in words (the specification's example among them), and refused, each for the one rule it breaks; an employer's ledger whose clerk and organization claim conditions on employment records: claims accepted on live records of a generic type, and refused on a record that does not exist, on another claim, on a revoked record, on a superseded one, with `as_of` after the registration, and with an unknown key; claims that take no endorsement or transition and are withdrawn by revoking them; sources revoked and replaced after the claims, with what a report states of each claim; the state, in which a claim's registration is in the claim's history only, and the log under a checkpoint |
 | `protocol-v0.15.json` | asking about a condition (v0.15, section 12): access request metadata of both forms, with their encodings, and refused metadata, each for the one rule it breaks; claims checked as answers to requests, accepted, or refused for the one rule of acceptance (items 3 and 4) they break, values equal as numbers or amounts but encoded otherwise among the refused |
 | `protocol-v0.16.json` | trust nodes (v0.16, sections 6 and 11): membership metadata with its encodings, and refused metadata, each for the one rule it breaks; where a membership stood at given times, from its registration, transitions, revocation, and `until`; replay of a trust node's log, with the ledger's refusals; evidence bundles carrying membership proofs, verified with their reports, or refused for the one rule of step 9 they break |
+| `protocol-v0.18.json` | scripts and sources (v0.18, sections 5, 6, and 11): script metadata, valid and refused, each for the one rule it breaks; where a source stood at a time; a script approved in person, and refused without presence, without user verification, and by the organization; statements naming a script, refused when it is missing, withdrawn, or not a script; registrations naming local sources and sources on another ledger, refused for a missing, revoked, superseded, or mechanism-type source, and on a mechanism type; source lists and provenance that do not parse (an empty list, a source twice, more than 64, a source of the wrong shape, a script id that is not an id); the state, and the log under a checkpoint. Evidence with scripts, sources, and source proofs comes from the reference implementation's tests, which both verifiers report alike |
 | `vm-v1.json` | contract execution (section 14): modules in and out of the profile, invocations with their outputs, traps, and fuel, and random integer programs, all from an independent reference interpreter (`tools/testvectors/wasm_ref.py`) |
 | `evidence-v1.json` | conformance (sections 11 and 15): record evidence and contract evidence forged from this specification independently of both verifiers, each with the options to verify it with, the verdict this specification decides (a failure names the section and step that decide it), and facts its report must show. A verifier passes it: `tests/verifiers/conformance.py` runs `kanhe verify` and `contract verify` on every case, and the Python verifier (`verifiers/python`) its own command line |
 | `bo-v1.json` | the Bo language ([`bo.md`](bo.md), section 18): contracts' sources in each language, their interfaces and bo-source bundles, the code `kanhe-bo` builds and its bounds (informative), calls with their outcomes (normative; answers to requests among them, with input key 9, and accepts with key 7), and sources that must not build with their errors' codes |

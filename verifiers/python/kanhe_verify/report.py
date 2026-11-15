@@ -165,7 +165,8 @@ def provenance_json(p) -> dict | None:
         return None
     return {"model": p.model, "model_version": p.model_version,
             "input_commitment": p.input_commitment.hex() if p.input_commitment is not None else None,
-            "tools": [{"name": n, "digest": d.hex()} for n, d in p.tools]}
+            "tools": [{"name": n, "digest": d.hex()} for n, d in p.tools],
+            "script": p.script.hex() if p.script is not None else None}
 
 
 def presence_json(r) -> dict | None:
@@ -211,6 +212,70 @@ def claim_json(report: Report, claim: claims.Claim) -> dict:
             "text": claims.words(claim.condition), "holds": claim.holds, "as_of": iso_time(claim.as_of),
             "until": iso_time(claim.until), "lapsed": lapsed(report, claim), "subject": claim.subject,
             "for": [x.hex() for x in claim.for_] if claim.for_ is not None else None}
+
+
+def script_json(report: Report, s) -> dict:
+    """What a report states of a script the record's events name (section
+    11, v0.18): its values, who approved it in person and when, and when it
+    was withdrawn, if it was."""
+    v = s.values
+    return {"id": s.id.hex(), "name": v.name, "version": v.version,
+            "files": [{"path": p, "size": n, "digest": d.hex()} for p, n, d in v.files],
+            "deterministic": v.deterministic, "runtime": v.runtime,
+            "approved_by": actor_json(report.ledger, s.approved_by), "presence": presence_json(s.presence),
+            "approved_at": iso_time(s.approved_at), "withdrawn_at": iso_time(s.withdrawn_at)}
+
+
+def source_json(s) -> dict:
+    """What a report states of a source (section 11, v0.18): its ledger and
+    record, whether it is local and its evidence provided; where known, its
+    type, its ledger's organization and trust node, and its status when the
+    record was registered and at the checkpoint, with when it changed."""
+    return {"ledger": s.ledger.hex(), "record": s.record.hex(), "local": s.local, "provided": s.provided,
+            "type": s.type if s.provided else None, "organization": s.organization,
+            "trust_node": s.trust_node, "record_time": iso_time(s.record_time),
+            "at_record": s.at_record if s.provided else None,
+            "checkpoint_time": iso_time(s.checkpoint_time) if s.provided else None,
+            "at_checkpoint": s.at_checkpoint if s.provided else None,
+            "changed_at": iso_time(s.changed_at), "replaced_by": s.replaced_by.hex() if s.replaced_by else None}
+
+
+_SOURCE_WORDS = {"not_yet": "not yet registered", "live": "live", "revoked": "REVOKED", "replaced": "REPLACED"}
+
+
+def provenance_text(report: Report) -> list:
+    """The scripts the record's events name and the sources it was made
+    from (v0.18)."""
+    lines = []
+    for s in report.scripts:
+        v = s.values
+        who = report.ledger.actors[s.approved_by].name
+        lines.append(f"  Script       {v.name} {v.version} ({len(v.files)} file{'' if len(v.files) == 1 else 's'}"
+                     f"{', deterministic' if v.deterministic else ''}{', ' + v.runtime if v.runtime else ''}), "
+                     f"approved {'in person ' if s.presence is not None else ''}by {who} on "
+                     f"{human_time(s.approved_at)}; "
+                     + (f"WITHDRAWN on {human_time(s.withdrawn_at)}" if s.withdrawn_at is not None else
+                        "still approved"))
+    stale = False
+    for s in report.sources:
+        if not s.provided:
+            lines.append(f"  Source       record {s.record.hex()[:12]} of ledger {s.ledger.hex()[:12]}: "
+                         "evidence not provided")
+            continue
+        where = "this ledger" if s.local else (
+            f"{s.organization}'s ledger (id {s.ledger.hex()[:12]})"
+            + (f", per trust node {s.trust_node}" if s.trust_node else ""))
+        now = _SOURCE_WORDS[s.at_checkpoint] + (f" on {human_time(s.changed_at)}" if s.changed_at else "")
+        if s.replaced_by:
+            now += f" by {s.replaced_by.hex()[:12]}"
+        lines.append(f"  Source       {s.type} (id {s.record.hex()[:12]}) on {where}: "
+                     f"{_SOURCE_WORDS[s.at_record]} when this record was registered; {now} at "
+                     f"{human_time(s.checkpoint_time)}")
+        stale = stale or s.at_checkpoint in ("revoked", "replaced")
+    if stale:
+        lines.append("  ! A source was revoked or replaced since this record was registered: the record stands "
+                     "as it is; whoever relies on it decides what that means.")
+    return lines
 
 
 def membership_json(m) -> dict:
@@ -312,6 +377,8 @@ def to_json(report: Report) -> dict:
         "disclosed_fields": {name: json_value(value) for name, value in report.disclosed},
         "attachments": [{"name": n, "media_type": m, "size": s, "status": st} for n, m, s, st in report.attachments],
         "memberships": [membership_json(m) for m in report.memberships],
+        "scripts": [script_json(report, s) for s in report.scripts],
+        "sources": [source_json(s) for s in report.sources],
         "complete": report.complete,
         "state_commitment": None if report.commitment is None else {
             "index": report.commitment_index, "state_root": report.commitment.root.hex(),
@@ -382,6 +449,7 @@ def to_text(report: Report) -> str:
             lines += _claim_text(report, record.claim)
     for m in report.memberships:
         lines += membership_text(m, "record" if record is not None else "instance")
+    lines += provenance_text(report)
     lines += ["", "  History"]
     for applied in report.events:
         summary, _, _ = _event_text(ledger, record, applied)
@@ -393,6 +461,10 @@ def to_text(report: Report) -> str:
         if provenance is not None and provenance.model:
             version = f" {provenance.model_version}" if provenance.model_version else ""
             lines.append(f"           AI provenance: {provenance.model}{version}")
+        if provenance is not None and provenance.script is not None:
+            named = next((x for x in report.scripts if x.id == provenance.script), None)
+            lines.append(f"           by the script {named.values.name} {named.values.version}" if named else
+                         f"           by the script {provenance.script.hex()[:12]}")
         if report.existed_by.get(applied.index) is not None:
             lines.append(f"           existed by {human_time(report.existed_by[applied.index])}")
     if report.disclosed:

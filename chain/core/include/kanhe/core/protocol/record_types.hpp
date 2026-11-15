@@ -11,7 +11,8 @@
 /// chooses, with the one generic lifecycle: initial state "registered", no
 /// transitions, endorsements in any role (once per actor and role), and
 /// revocable. The protocol's own mechanisms (access, consents to contract
-/// calls, claims) have five types of their own, each with its lifecycle; no
+/// calls, claims, memberships, scripts) have seven types of their own, each
+/// with its lifecycle; no
 /// other type may begin with the reserved prefix "kanhe." (spec v0.9).
 namespace kanhe::protocol {
 
@@ -35,7 +36,7 @@ struct RecordType {
 /// The mechanism type `name`, or nullptr for a type of the generic lifecycle.
 [[nodiscard]] const RecordType* find_record_type(std::string_view name) noexcept;
 
-/// The five mechanism types.
+/// The seven mechanism types.
 [[nodiscard]] std::span<const RecordType> builtin_record_types() noexcept;
 
 inline constexpr std::string_view generic_initial_state = "registered";

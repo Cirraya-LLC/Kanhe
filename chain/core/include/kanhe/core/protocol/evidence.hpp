@@ -21,6 +21,7 @@
 #include <kanhe/core/protocol/network.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state_tree.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 
@@ -90,6 +91,9 @@ struct EvidenceBundle {
     /// Membership proofs (v0.16): encoded bundles of memberships, on trust
     /// nodes' ledgers, that name this bundle's ledger; at most 16.
     std::vector<Bytes> memberships;
+    /// Source proofs (v0.18): encoded bundles, each the complete evidence of
+    /// one of the record's sources on another ledger; at most 64.
+    std::vector<Bytes> source_proofs;
 
     friend bool operator==(const EvidenceBundle&, const EvidenceBundle&) = default;
 };
@@ -390,6 +394,67 @@ struct NetworkCosignatureCheck {
                            const NetworkCosignatureCheck&) = default;
 };
 
+/// At most this many source proofs a bundle carries (v0.18).
+inline constexpr std::size_t max_source_proofs = 64;
+
+/// Where a source stood at a time (v0.18, section 11, step 10).
+enum class SourceStatus : std::uint8_t {
+    not_yet, ///< not registered yet then
+    live,
+    revoked,
+    replaced, ///< superseded by a newer version
+};
+[[nodiscard]] std::string_view source_status_name(SourceStatus status) noexcept;
+/// Where a record stood at `t`, from when it was registered, revoked, and
+/// replaced (nullopt if never): not yet registered before its registration;
+/// else revoked, if it was at or before `t`; else replaced, likewise; else
+/// live.
+[[nodiscard]] SourceStatus source_status_at(Timestamp registered, std::optional<Timestamp> revoked,
+                                            std::optional<Timestamp> replaced,
+                                            Timestamp t) noexcept;
+
+/// A script the record's events name (v0.18), as the bundle shows it.
+struct ScriptReport {
+    Id id;
+    Script script;
+    /// Who approved it (a person), how they proved presence, and when.
+    ActorSummary approved_by;
+    std::optional<PresenceCheck> presence;
+    Timestamp approved_at = 0;
+    /// Revoked since: the approval withdrawn (known for certain only in a
+    /// complete report).
+    std::optional<Timestamp> withdrawn_at;
+
+    friend bool operator==(const ScriptReport&, const ScriptReport&) = default;
+};
+
+/// A source the record's registration names (v0.18).
+struct SourceReport {
+    Source source;
+    /// On this ledger: its statements are in the bundle.
+    bool local = false;
+    /// Its evidence is here: always for a local source; for another
+    /// ledger's, when the bundle carries its source proof.
+    bool provided = false;
+    std::string type;
+    /// Another ledger's organization, as its proof's genesis names it, and
+    /// the trust node (the verifier's name for it) a trusted membership
+    /// proof in it vouches by.
+    std::optional<std::string> organization;
+    std::optional<std::string> trust_node;
+    /// Where it stood when the record was registered, and at the checkpoint
+    /// (a source on another ledger: its proof's), with those times.
+    Timestamp record_time = 0;
+    SourceStatus at_record = SourceStatus::live;
+    Timestamp checkpoint_time = 0;
+    SourceStatus at_checkpoint = SourceStatus::live;
+    /// When it was revoked or replaced, and by which newer version.
+    std::optional<Timestamp> changed_at;
+    std::optional<Id> replaced_by;
+
+    friend bool operator==(const SourceReport&, const SourceReport&) = default;
+};
+
 struct EvidenceReport {
     Id ledger_id;
     std::string organization;
@@ -460,6 +525,10 @@ struct EvidenceReport {
     };
     /// In the bundle's order.
     std::vector<MembershipReport> memberships;
+    /// The scripts the record's events name, each once, first named first;
+    /// and the sources its registration names, in its order (v0.18).
+    std::vector<ScriptReport> scripts;
+    std::vector<SourceReport> sources;
     /// If the bundle is about a contract instance.
     std::optional<InstanceReport> instance;
     /// The record's events, or the instance's calls (for a child, its
@@ -478,15 +547,17 @@ struct EvidenceReport {
 };
 
 /// The objects whose complete history a bundle about `record` must prove:
-/// the record (or instance, and then its contract), a claim's source
-/// (v0.14), and for each of its events (`events`, the statements in its
-/// history; for a child instance, its ancestors' calls first, see
-/// `instance_events`; for a claim, its source's after its own) the signer,
-/// an agent signer's accountable person, and every delegation in the chain
-/// with its grantor. In first-seen order. Never an instance's ancestors
-/// (v0.7).
+/// the record (or instance, and then its contract), its `related` records
+/// (`related_records` of its own events: a claim's source, v0.14; its local
+/// sources and the scripts its events name, v0.18), and for each of its
+/// events (`events`, the statements in its history; for a child instance,
+/// its ancestors' calls first, see `instance_events`; then each related
+/// record's statements) the signer, an agent signer's accountable person,
+/// and every delegation in the chain with its grantor. In first-seen order.
+/// Never an instance's ancestors (v0.7).
 [[nodiscard]] std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
-                                               std::span<const Statement> events);
+                                               std::span<const Statement> events,
+                                               std::span<const Id> related);
 
 /// Verifies a bundle completely: every receipt against the signed checkpoint,
 /// every included statement replayed under the ledger rules, every disclosed

@@ -19,6 +19,7 @@
 #include <variant>
 
 #include <kanhe/core/protocol/claims.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state_tree.hpp>
 #include <kanhe/ledger/ledger.hpp>
 #include <kanhe/ledger/parallel.hpp>
@@ -3009,26 +3010,33 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
             }
             events.push_back(std::move(parsed->statement));
         }
-        // A claim's source (v0.14): its statements count as events too.
-        const auto source = protocol::claim_source(events);
-        const protocol::RecordState* source_state = source ? state.record(*source) : nullptr;
-        for (const std::uint64_t index : source_state != nullptr ? source_state->history.to_vector()
-                                                                 : std::vector<std::uint64_t>{}) {
-            auto bytes = impl_->log.read(index);
-            if (!bytes) {
-                return std::unexpected(bytes.error());
+        // The records its own events name (a claim's source, v0.14; its
+        // local sources and the scripts its events name, v0.18): their
+        // statements count as events too.
+        const std::vector<protocol::Id> related = protocol::related_records(events, id());
+        for (const protocol::Id& r : related) {
+            const protocol::RecordState* related_state = state.record(r);
+            if (related_state == nullptr) {
+                continue;
             }
-            auto entry = protocol::decode_log_entry(*bytes);
-            if (!entry) {
-                return std::unexpected(entry.error());
+            for (const std::uint64_t index : related_state->history.to_vector()) {
+                auto bytes = impl_->log.read(index);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                auto entry = protocol::decode_log_entry(*bytes);
+                if (!entry) {
+                    return std::unexpected(entry.error());
+                }
+                auto parsed = protocol::parse_statement(*impl_->provider, entry->statement, hash());
+                if (!parsed) {
+                    return std::unexpected(parsed.error());
+                }
+                events.push_back(std::move(parsed->statement));
             }
-            auto parsed = protocol::parse_statement(*impl_->provider, entry->statement, hash());
-            if (!parsed) {
-                return std::unexpected(parsed.error());
-            }
-            events.push_back(std::move(parsed->statement));
         }
-        for (const protocol::Id& id : protocol::involved_objects(state, record_id, events)) {
+        for (const protocol::Id& id :
+             protocol::involved_objects(state, record_id, events, related)) {
             auto proof = prove(*impl_, id);
             if (!proof) {
                 return fail(Errc::not_found, "no checkpoint covers the record's statements yet");

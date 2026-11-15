@@ -574,7 +574,7 @@ TEST_CASE("the console's home and things views read the node's ledger", "[consol
             ledger.org(),
             ledger.statement(ledger.org_id(), std::nullopt,
                              kanhe::protocol::RecordRegisterBody{
-                                 "example.thing/1", root, 1, {}, std::nullopt, std::nullopt}));
+                                 "example.thing/1", root, 1, {}, std::nullopt, std::nullopt, {}}));
     }
     ConsoleWorld w;
     const std::string token = w.session_for("Vera", console::Role::viewer);
@@ -601,10 +601,11 @@ TEST_CASE("a document's page and the list show its versions", "[console][views]"
     kanhe::test::World ledger;
     const kanhe::Bytes root(32, 7);
     auto version = [&](std::optional<kanhe::protocol::Id> old) {
-        return ledger.ok(ledger.org(),
-                         ledger.statement(ledger.org_id(), std::nullopt,
-                                          kanhe::protocol::RecordRegisterBody{
-                                              "example.form/1", root, 1, {}, std::nullopt, old}));
+        return ledger.ok(
+            ledger.org(),
+            ledger.statement(ledger.org_id(), std::nullopt,
+                             kanhe::protocol::RecordRegisterBody{
+                                 "example.form/1", root, 1, {}, std::nullopt, old, {}}));
     };
     const auto v1 = version(std::nullopt);
     const auto v2 = version(v1);
@@ -1384,7 +1385,7 @@ TEST_CASE("after the first run, the owner approves with the passkey", "[console]
     const auto record = served.session.submit(
         f.w.keys.open("root"),
         kanhe::protocol::RecordRegisterBody{
-            "example.thing/1", kanhe::Bytes(32, 7), 1, {}, std::nullopt, std::nullopt},
+            "example.thing/1", kanhe::Bytes(32, 7), 1, {}, std::nullopt, std::nullopt, {}},
         std::nullopt);
     f.w.clock.set(kanhe::ledger::SystemClock{}.now());
     const std::string token = f.made["session"].get<std::string>();

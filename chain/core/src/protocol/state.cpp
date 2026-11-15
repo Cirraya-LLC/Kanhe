@@ -10,6 +10,7 @@
 #include <kanhe/core/protocol/memberships.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/core/protocol/record_types.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state.hpp>
 
 #include "reader.hpp"
@@ -456,9 +457,26 @@ Status LedgerState::validate(const crypto::Provider& provider,
         (!statement.provenance || !statement.provenance->model)) {
         return fail(Errc::rejected, "statements by agents must name their model in provenance");
     }
+    // The script a statement's provenance names (v0.18): an approved script
+    // of this ledger. A bundle may leave out a related object's script
+    // (section 11, step 3): its own bundle shows it.
+    if (statement.provenance && statement.provenance->script) {
+        const RecordState* script = record(*statement.provenance->script);
+        if (script == nullptr) {
+            if (!bundle_) {
+                return fail(Errc::not_found,
+                            "the script its provenance names is not a record of this ledger");
+            }
+        } else if (script->record_type != script_type) {
+            return fail(Errc::rejected, "its provenance names a record that is not a script");
+        } else if (script->revoked) {
+            return fail(Errc::rejected, "the script its provenance names was withdrawn");
+        }
+    }
     if (auto s = check_authority(statement, *signer, now); !s) {
         return s;
     }
+    bool user_verified = false;
     if (statement.presence) {
         if (signer->kind != ActorKind::person) {
             return fail(Errc::rejected, "only people prove presence");
@@ -480,6 +498,15 @@ Status LedgerState::validate(const crypto::Provider& provider,
             return fail(Errc::rejected, "changing your own key or passkeys needs a passkey that "
                                         "verifies you (PIN or biometric), not only a touch");
         }
+        user_verified = check->user_verified;
+    }
+    // A script's approval (v0.18) is a person's act, in person, whatever the
+    // signer's scope.
+    if (const auto* r = std::get_if<RecordRegisterBody>(&statement.body);
+        r != nullptr && r->record_type == script_type &&
+        (signer->kind != ActorKind::person || !statement.presence || !user_verified)) {
+        return fail(Errc::rejected, "a script is approved by a person in person: the signer "
+                                    "proves presence, user-verified (PIN or biometric)");
     }
     if (auto s = check_rules(provider, statement, *signer, now); !s) {
         return s;
@@ -795,6 +822,43 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                     return fail(Errc::rejected,
                                 "the record type is reserved: types beginning with \"kanhe.\" "
                                 "are the protocol's own");
+                }
+                // Sources (v0.18): none on a mechanism type; each local one
+                // a live record of a generic type. A bundle may leave out a
+                // related object's sources (section 11, step 3).
+                if (!b.sources.empty()) {
+                    if (find_record_type(b.record_type) != nullptr) {
+                        return fail(Errc::rejected,
+                                    "a record of a mechanism type names no sources");
+                    }
+                    for (const Source& s : b.sources) {
+                        if (s.ledger != ledger_id_) {
+                            continue;
+                        }
+                        const RecordState* source = record(s.record);
+                        if (source == nullptr) {
+                            if (bundle_) {
+                                continue;
+                            }
+                            return fail(Errc::not_found, "a source is not a record of this ledger");
+                        }
+                        if (find_record_type(source->record_type) != nullptr) {
+                            return fail(Errc::rejected, "a source is a record of a generic type");
+                        }
+                        if (source->revoked || source->superseded_by) {
+                            return fail(Errc::rejected,
+                                        "a source is neither revoked nor superseded");
+                        }
+                    }
+                }
+                // Scripts (v0.18): the metadata's shape.
+                if (b.record_type == script_type) {
+                    if (!b.metadata) {
+                        return fail(Errc::malformed, "a script names its files");
+                    }
+                    if (auto script = decode_script(*b.metadata); !script) {
+                        return std::unexpected(script.error());
+                    }
                 }
                 // Claims (v0.14): the metadata's shape, and a source of
                 // this ledger, generic and live when the claim is made.

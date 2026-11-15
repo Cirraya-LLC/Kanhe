@@ -20,6 +20,7 @@ add_library(kanhe_node
     src/peers.cpp
     src/process.cpp
     src/published.cpp
+    src/sources.cpp
     src/trust.cpp
     src/replica.cpp
     src/request_query.cpp

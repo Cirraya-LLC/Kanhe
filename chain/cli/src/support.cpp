@@ -25,6 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #ifdef KANHE_HAVE_PKCS11
 #include <kanhe/crypto/pkcs11.hpp>
 #endif
@@ -301,12 +302,27 @@ client::Location location_of(const Args& args) {
 Session::Session(const Args& args) : client::Session(location_of(args)) {}
 
 std::optional<protocol::Provenance> Session::provenance(const Args& args) const {
-    if (!args.has("model") && !args.has("model-version") && !args.has("inputs")) {
+    if (!args.has("model") && !args.has("model-version") && !args.has("inputs") &&
+        !args.has("script")) {
         return std::nullopt;
     }
-    protocol::Provenance provenance{args.get("model"), args.get("model-version"), std::nullopt, {}};
+    protocol::Provenance provenance{
+        args.get("model"), args.get("model-version"), std::nullopt, {}, std::nullopt};
     if (const auto inputs = args.get("inputs")) {
         provenance.input_commitment = hash_text(provider(), state().hash(), *inputs);
+    }
+    // The script it came from (v0.18): one approved here.
+    if (const auto script = args.get("script")) {
+        const protocol::Id id = record_id(*script);
+        const protocol::RecordState* r = state().record(id);
+        if (r->record_type != protocol::script_type) {
+            throw UsageError{"--script names " + hex_id(id) + ", a " + r->record_type +
+                             ", not an approved script"};
+        }
+        if (r->revoked) {
+            throw CommandError{"the script " + hex_id(id) + " was withdrawn"};
+        }
+        provenance.script = id;
     }
     return provenance;
 }

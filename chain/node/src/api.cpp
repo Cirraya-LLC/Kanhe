@@ -36,6 +36,7 @@
 #include <kanhe/node/published.hpp>
 #include <kanhe/node/record_files.hpp>
 #include <kanhe/node/responses.hpp>
+#include <kanhe/node/sources.hpp>
 #include <kanhe/node/timestamps.hpp>
 #include <kanhe/node/tokens.hpp>
 #include <kanhe/node/trust.hpp>
@@ -1590,7 +1591,8 @@ struct LedgerApi::State {
     }
 
     /// Adds the membership proofs this ledger keeps (v0.16) to a bundle of
-    /// its own (trust.hpp).
+    /// its own (trust.hpp), and the proofs kept of its record's sources on
+    /// other ledgers (v0.18, sources.hpp).
     void with_memberships(protocol::EvidenceBundle& bundle) const {
         std::string type;
         ledger->read_state([&](const protocol::LedgerState& s) {
@@ -1599,6 +1601,7 @@ struct LedgerApi::State {
             }
         });
         add_membership_proofs(options.directory, type, bundle);
+        add_source_proofs(options.directory, bundle);
     }
 
     // ---- memberships (v0.16) ---------------------------------------------

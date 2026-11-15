@@ -4,6 +4,8 @@
 #include <print>
 
 #include <kanhe/core/protocol/record_types.hpp>
+#include <kanhe/crypto/openssl.hpp>
+#include <kanhe/node/sources.hpp>
 
 #include "commands.hpp"
 #include "output.hpp"
@@ -17,12 +19,51 @@ const protocol::RecordState& find_record(const Session& session, const Args& arg
     return *session.state().record(session.record_id(args.positional().front()));
 }
 
+/// The proofs given for a record's sources on other ledgers, each checked
+/// against them before anything is registered.
+std::vector<node::CheckedSourceProof> check_proofs(const Session& session,
+                                                   const std::vector<protocol::Source>& sources,
+                                                   const std::vector<std::string>& files) {
+    const crypto::openssl::Provider provider;
+    std::vector<node::CheckedSourceProof> out;
+    for (const std::string& file : files) {
+        auto checked = node::check_source_proof(provider, read_file(file), sources,
+                                                session.state().ledger_id());
+        if (!checked) {
+            throw CommandError{file + ": " + std::string(checked.error().detail)};
+        }
+        if (std::ranges::any_of(out, [&](const node::CheckedSourceProof& c) {
+                return c.source == checked->source;
+            })) {
+            throw UsageError{file + " proves a source another --source-proof proves already"};
+        }
+        out.push_back(std::move(*checked));
+    }
+    return out;
+}
+
 std::string join(const std::vector<std::string>& items, std::string_view separator) {
     std::string out;
     for (const std::string& item : items) {
         out += (out.empty() ? "" : std::string(separator)) + item;
     }
     return out;
+}
+
+/// A source as record show and record source list print it.
+std::string source_line(const Json& s) {
+    const std::string record = s["record"].get<std::string>();
+    if (s["local"].get<bool>()) {
+        return record + " (" +
+               (s["type"].is_null()
+                    ? std::string("not on this ledger")
+                    : s["type"].get<std::string>() + ", " + s["status"].get<std::string>()) +
+               ")";
+    }
+    return record + " on ledger " + s["ledger"].get<std::string>() +
+           (s["proof_kept"].is_null()     ? ""
+            : s["proof_kept"].get<bool>() ? " (its proof is kept)"
+                                          : " (no proof kept: record source prove)");
 }
 
 } // namespace
@@ -50,14 +91,34 @@ int cmd_record_issue(const Args& args) {
     if (const auto old = args.get("supersedes")) {
         request.supersedes = session.record_id(*old);
     }
+    for (const std::string& source : args.all("source")) {
+        request.sources.push_back(parse_source(session, source));
+    }
+    const std::vector<std::string> proof_files = args.all("source-proof");
+    if (!proof_files.empty() && session.remote()) {
+        throw UsageError{"source proofs are kept in the ledger's directory: run record source "
+                         "prove there"};
+    }
+    const auto proofs = check_proofs(session, request.sources, proof_files);
     const protocol::Id id = issue_record(session, *load_signer(args.need("as"), args), request);
+    for (const node::CheckedSourceProof& p : proofs) {
+        if (auto kept = node::keep_source_proof(session.directory(), id, p.source, p.proof);
+            !kept) {
+            throw CommandError{"the record is issued, but its source proof is not kept: " +
+                               std::string(kept.error().detail) + " (record source prove)"};
+        }
+    }
     const protocol::RecordState& record = *session.state().record(id);
     return report_submitted(
         args, session, id, {{"record", record_json(session, record)}},
-        std::format("issued {} {}\nstate: {}{}", record.record_type, hex_id(id), record.state,
+        std::format("issued {} {}\nstate: {}{}{}", record.record_type, hex_id(id), record.state,
                     request.supersedes
                         ? "\nsupersedes: " + hex_id(*request.supersedes) + " (now an old version)"
-                        : ""));
+                        : "",
+                    request.sources.empty()
+                        ? std::string()
+                        : std::format("\nsources: {} ({} proof{} kept)", request.sources.size(),
+                                      proofs.size(), proofs.size() == 1 ? "" : "s")));
 }
 
 int cmd_record_list(const Args& args) {
@@ -133,6 +194,18 @@ int cmd_record_show(const Args& args) {
     for (const protocol::Endorsement& e : record.endorsements) {
         std::println("endorsed:   as {} by {} (entry #{})", e.role, session.actor_name(e.actor),
                      e.index);
+    }
+    if (!r["script"].is_null()) {
+        const Json& s = r["script"];
+        std::println("script:     {}{}{}",
+                     s.contains("name") ? s["name"].get<std::string>() + " " +
+                                              s["version"].get<std::string>() + ", "
+                                        : std::string(),
+                     s["id"].get<std::string>(),
+                     s.value("withdrawn", false) ? " (withdrawn since)" : "");
+    }
+    for (const auto& s : r["sources"]) {
+        std::println("source:     {}", source_line(s));
     }
     std::println("history:    {} statements (kanhe record history {})", record.history.size(),
                  short_id(record.id));
@@ -406,6 +479,73 @@ int cmd_record_file_remove(const Args& args) {
     } else {
         std::println("removed the kept copy of {}; the record still commits to it",
                      file.attachment.name);
+    }
+    return exit_ok;
+}
+
+int cmd_record_source_list(const Args& args) {
+    Session session(args);
+    const protocol::RecordState& record = find_record(session, args);
+    const Json r = record_json(session, record);
+    if (args.json()) {
+        print_json({{"record", id_json(record.id)}, {"sources", r["sources"]}});
+        return exit_ok;
+    }
+    if (r["sources"].empty()) {
+        std::println("record {} names no sources", short_id(record.id));
+    }
+    for (const auto& s : r["sources"]) {
+        std::println("{}", source_line(s));
+    }
+    return exit_ok;
+}
+
+int cmd_record_source_prove(const Args& args) {
+    Session session(args);
+    const protocol::RecordState& record = find_record(session, args);
+    const auto body = client::registration_of(session, protocol::Id(record.id));
+    const std::vector<std::string> files(args.positional().begin() + 1, args.positional().end());
+    const auto proofs = check_proofs(session, body.sources, files);
+    Json out = Json::array();
+    for (const node::CheckedSourceProof& p : proofs) {
+        unwrap(node::keep_source_proof(session.directory(), protocol::Id(record.id), p.source,
+                                       p.proof),
+               "keeping the source proof");
+        const std::string status = p.report.revoked         ? "revoked"
+                                   : p.report.superseded_by ? "replaced"
+                                                            : "live";
+        out.push_back({{"ledger", id_json(p.source.ledger)},
+                       {"record", id_json(p.source.record)},
+                       {"organization", p.report.organization},
+                       {"type", p.report.record_type},
+                       {"status", status},
+                       {"checkpoint_time", iso_time(p.report.checkpoint.timestamp)}});
+        if (!args.json()) {
+            std::println("kept the proof of {} ({}, {}): {} as of {}", short_id(p.source.record),
+                         p.report.organization, p.report.record_type, status,
+                         format_time(p.report.checkpoint.timestamp));
+        }
+    }
+    if (args.json()) {
+        print_json({{"record", id_json(record.id)}, {"proofs", out}});
+    }
+    return exit_ok;
+}
+
+int cmd_record_source_forget(const Args& args) {
+    Session session(args);
+    const protocol::RecordState& record = find_record(session, args);
+    const protocol::Source source = parse_source(session, args.positional()[1]);
+    if (!node::remove_source_proof(session.directory(), protocol::Id(record.id), source)) {
+        throw CommandError{"no proof of that source is kept"};
+    }
+    if (args.json()) {
+        print_json(
+            {{"record", id_json(record.id)},
+             {"forgot", {{"ledger", id_json(source.ledger)}, {"record", id_json(source.record)}}}});
+    } else {
+        std::println("the proof of {} no longer goes with record {}'s evidence",
+                     short_id(source.record), short_id(record.id));
     }
     return exit_ok;
 }

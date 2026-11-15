@@ -313,7 +313,9 @@ TEST_CASE("v0.9 generic core: statement type 20 and the reserved prefix",
     }
     // Each mechanism type with its lifecycle, as the independent encoder
     // states it; none takes endorsements.
-    REQUIRE(protocol::builtin_record_types().size() == vectors()["mechanism_types"].size() + 2);
+    // Later revisions added claims (v0.14), memberships (v0.16), and scripts
+    // (v0.18) after them.
+    REQUIRE(protocol::builtin_record_types().size() == vectors()["mechanism_types"].size() + 3);
     CHECK(protocol::builtin_record_types()[4].name == protocol::claim_type);
     CHECK(protocol::builtin_record_types()[5].name == protocol::membership_type);
     for (const auto& mechanism : vectors()["mechanism_types"]) {

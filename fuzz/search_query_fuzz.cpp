@@ -69,9 +69,13 @@ struct World {
             cbor::Map metadata{
                 {cbor::Value::text("student"), cbor::Value::text("李明 " + std::to_string(n))},
                 {cbor::Value::text("year"), cbor::Value::text(std::to_string(2024 + n))}};
-            s.body = protocol::RecordRegisterBody{
-                "example.form/1", Bytes(32, n), 1, {}, cbor::Value::map(std::move(metadata)),
-                std::nullopt};
+            s.body = protocol::RecordRegisterBody{"example.form/1",
+                                                  Bytes(32, n),
+                                                  1,
+                                                  {},
+                                                  cbor::Value::map(std::move(metadata)),
+                                                  std::nullopt,
+                                                  {}};
             auto signed_statement =
                 protocol::sign_statement(*org, provider, crypto::HashAlg::sha256, s);
             require(signed_statement && ledger->submit(signed_statement->encoded).has_value());

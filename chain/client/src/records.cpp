@@ -308,6 +308,7 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
     body.field_root = Bytes(commitment.root.bytes().begin(), commitment.root.bytes().end());
     body.field_count = commitment.leaves.size();
     body.supersedes = request.supersedes;
+    body.sources = request.sources;
     std::vector<Bytes> kept;
     for (const std::filesystem::path& path : request.attachments) {
         const Bytes content = read_file(path);
@@ -559,6 +560,10 @@ std::string_view record_type_purpose(std::string_view type) {
     }
     if (type == "kanhe.membership/1") {
         return "a trust node's word on who runs another ledger (trust member add)";
+    }
+    if (type == "kanhe.script/1") {
+        return "a person's approval, in person, of one version of a script, by its files "
+               "(script approve)";
     }
     return {};
 }

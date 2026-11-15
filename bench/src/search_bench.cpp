@@ -66,7 +66,8 @@ int search_bench(const Options& options) {
                                                   3,
                                                   {},
                                                   cbor::Value::map(std::move(metadata)),
-                                                  std::nullopt};
+                                                  std::nullopt,
+                                                  {}};
             statements.push_back(
                 must(protocol::sign_statement(org, provider, crypto::HashAlg::sha256, s), "sign")
                     .encoded);

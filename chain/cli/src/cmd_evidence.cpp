@@ -2,7 +2,12 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <filesystem>
+#include <map>
 #include <print>
+#include <set>
+#include <system_error>
+#include <utility>
 
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/merkle.hpp>
@@ -514,6 +519,135 @@ int cmd_export(const Args& args) {
     return exit_ok;
 }
 
+namespace {
+
+/// A complete bundle found in --follow's directory, verified.
+struct Followed {
+    std::filesystem::path path;
+    protocol::EvidenceReport report;
+};
+
+/// By ledger and record id, in hex.
+using FollowKey = std::pair<std::string, std::string>;
+using FollowIndex = std::map<FollowKey, Followed>;
+
+/// Every file in `directory` (and below) that is complete evidence of a
+/// record, by its ledger and record; files that are not, or do not verify,
+/// are passed over.
+FollowIndex evidence_in(const crypto::Provider& provider, const std::filesystem::path& directory,
+                        const protocol::VerifyOptions& options) {
+    FollowIndex out;
+    std::error_code ec;
+    std::vector<std::filesystem::path> files;
+    for (std::filesystem::recursive_directory_iterator it(directory, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (it->is_regular_file(ec) && it->file_size(ec) <= 64U * 1024 * 1024) {
+            files.push_back(it->path());
+        }
+    }
+    if (ec) {
+        throw CommandError{"--follow: cannot read " + directory.string() + ": " + ec.message()};
+    }
+    std::ranges::sort(files);
+    for (const auto& path : files) {
+        const Bytes bytes = read_file(path);
+        if (!protocol::decode_bundle(bytes)) {
+            continue;
+        }
+        auto report = ledger::verify_bundle(provider, bytes, options, on_all_cores());
+        if (report && report->complete && !report->instance && !report->events.empty()) {
+            FollowKey key{hex_id(report->ledger_id), hex_id(report->record)};
+            out.try_emplace(std::move(key), Followed{path, std::move(*report)});
+        }
+    }
+    return out;
+}
+
+/// Where a source stood when the record was made (`at`) and at its own
+/// evidence's checkpoint, from that evidence, as step 10 reads a source
+/// proof.
+std::pair<protocol::SourceStatus, protocol::SourceStatus>
+statuses_of(const protocol::EvidenceReport& source, protocol::Timestamp at) {
+    std::optional<protocol::Timestamp> revoked;
+    std::optional<protocol::Timestamp> replaced;
+    for (const protocol::RecordEvent& e : source.events) {
+        if (e.type == protocol::StatementType::record_revoke && !revoked) {
+            revoked = e.registered_at;
+        }
+        if (e.new_version && !replaced) {
+            replaced = e.registered_at;
+        }
+    }
+    const protocol::Timestamp registered = source.events.front().registered_at;
+    return {protocol::source_status_at(registered, revoked, replaced, at),
+            protocol::source_status_at(registered, revoked, replaced, source.checkpoint.timestamp)};
+}
+
+std::string status_words(protocol::SourceStatus at_record, protocol::SourceStatus at_checkpoint) {
+    const std::string now(protocol::source_status_name(at_checkpoint));
+    return at_record == at_checkpoint
+               ? now
+               : std::string(protocol::source_status_name(at_record)) + " then, " + now + " since";
+}
+
+/// The chain of sources below `report`, level by level: each source with
+/// where it stood, and, if its own evidence is in the index, its sources in
+/// turn. `seen` stops a cycle; `warnings` counts sources revoked or
+/// replaced since.
+Json follow(const protocol::EvidenceReport& report, const FollowIndex& index,
+            std::set<FollowKey>& seen, std::size_t depth, std::size_t& warnings,
+            std::string& text) {
+    Json out = Json::array();
+    for (const protocol::SourceReport& s : report.sources) {
+        const FollowKey key{hex_id(s.source.ledger), hex_id(s.source.record)};
+        const auto found = index.find(key);
+        Json j{
+            {"ledger", hex_id(s.source.ledger)},
+            {"record", hex_id(s.source.record)},
+            {"local", s.local},
+            {"evidence", found != index.end() ? Json(found->second.path.string()) : Json(nullptr)},
+            {"sources", nullptr}};
+        std::string type = s.type;
+        std::string organization =
+            s.local ? report.organization : s.organization.value_or(std::string());
+        std::optional<std::pair<protocol::SourceStatus, protocol::SourceStatus>> status;
+        if (s.provided) {
+            status = {s.at_record, s.at_checkpoint};
+        } else if (found != index.end()) {
+            status = statuses_of(found->second.report, s.record_time);
+        }
+        if (found != index.end()) {
+            type = found->second.report.record_type;
+            organization = found->second.report.organization;
+        }
+        j["type"] = type.empty() ? Json(nullptr) : Json(type);
+        j["organization"] = organization.empty() ? Json(nullptr) : Json(organization);
+        j["at_record"] = status ? Json(verifier::source_status_key(status->first)) : Json(nullptr);
+        j["at_checkpoint"] =
+            status ? Json(verifier::source_status_key(status->second)) : Json(nullptr);
+        if (status && status->second != protocol::SourceStatus::live) {
+            ++warnings;
+        }
+        text +=
+            std::string(2 * depth, ' ') + "<- " + short_id(s.source.record) + " " +
+            (type.empty() ? "(type unknown)" : type) + ", " +
+            (s.local                ? "this ledger"
+             : organization.empty() ? "another ledger"
+                                    : organization) +
+            ": " +
+            (status ? status_words(status->first, status->second) : std::string("not provided")) +
+            (found != index.end() ? " [" + found->second.path.filename().string() + "]" : "") +
+            "\n";
+        if (found != index.end() && depth < 16 && seen.insert(key).second) {
+            j["sources"] = follow(found->second.report, index, seen, depth + 1, warnings, text);
+        }
+        out.push_back(std::move(j));
+    }
+    return out;
+}
+
+} // namespace
+
 int cmd_verify(const Args& args) {
     const crypto::openssl::Provider provider;
     protocol::VerifyOptions options;
@@ -568,9 +702,26 @@ int cmd_verify(const Args& args) {
                                    : 0;
     const bool too_few_timestamps = report->trusted_timestamp_authorities < min_timestamps;
     const bool verified = !mismatch && !too_few_witnesses && !too_few_timestamps;
+    // Where it came from (v0.18), followed through the sources' own
+    // evidence in a directory: each verified on its own, against its own
+    // ledger.
+    Json chain = nullptr;
+    std::string chain_text;
+    std::size_t warnings = 0;
+    if (const auto directory = args.get("follow")) {
+        protocol::VerifyOptions followed = options;
+        followed.expected_ledger.reset();
+        followed.attachment_contents.clear();
+        const FollowIndex index = evidence_in(provider, *directory, followed);
+        std::set<FollowKey> seen{{hex_id(report->ledger_id), hex_id(report->record)}};
+        chain = follow(*report, index, seen, 1, warnings, chain_text);
+    }
     if (args.json()) {
         Json out = report_json(*report, options.expected_ledger.has_value());
         out["verified"] = verified;
+        if (!chain.is_null()) {
+            out["chain"] = {{"sources", chain}, {"revoked_or_replaced", warnings}};
+        }
         if (mismatch) {
             out["error"] = "an attachment does not match its commitment";
         } else if (too_few_witnesses) {
@@ -583,6 +734,15 @@ int cmd_verify(const Args& args) {
         print_json(out);
     } else {
         std::print("{}", verifier::report_text(*report, options.expected_ledger.has_value()));
+        if (!chain.is_null()) {
+            std::println("\nWhere it came from (followed in {}):", *args.get("follow"));
+            std::print("  {} {}\n{}", short_id(report->record), report->record_type,
+                       chain_text.empty() ? "  (it names no sources)\n" : chain_text);
+            if (warnings > 0) {
+                std::println("WARNING: {} source{} in the chain {} revoked or replaced since",
+                             warnings, warnings == 1 ? "" : "s", warnings == 1 ? "was" : "were");
+            }
+        }
         if (mismatch) {
             std::println("\nVERIFICATION FAILED: an attachment does not match its commitment");
         }

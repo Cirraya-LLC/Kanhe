@@ -66,6 +66,7 @@ kanhe_program(kanhe
     src/cmd_presence.cpp
     src/cmd_qr.cpp
     src/cmd_records.cpp
+    src/cmd_scripts.cpp
     src/cmd_relay.cpp
     src/cmd_requests.cpp
     src/cmd_vault.cpp

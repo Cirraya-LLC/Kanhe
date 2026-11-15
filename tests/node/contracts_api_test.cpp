@@ -146,7 +146,8 @@ Bytes consent(World& party, const protocol::Id& home, crypto::HashAlg home_hash,
                             1,
                             {},
                             std::move(*metadata),
-                            std::nullopt}));
+                            std::nullopt,
+                            {}}));
     REQUIRE(party.ledger().checkpoint(party.log_key()));
     auto bundle = party.ledger().export_evidence(party.log_key(), record);
     REQUIRE(bundle);

@@ -44,6 +44,7 @@ add_executable(kanhe_tests
     core/protocol_v014_test.cpp
     core/protocol_v015_test.cpp
     core/protocol_v016_test.cpp
+    core/protocol_v018_test.cpp
     core/exchange_test.cpp
     core/vm_test.cpp
     crypto/openssl_test.cpp
@@ -56,6 +57,7 @@ add_executable(kanhe_tests
     ledger/concurrency_test.cpp
     ledger/evidence_test.cpp
     ledger/claims_test.cpp
+    ledger/scripts_test.cpp
     ledger/memberships_test.cpp
     ledger/ledger_test.cpp
     ledger/parallel_test.cpp
@@ -268,6 +270,10 @@ add_test(NAME files_end_to_end
 # Claims: conditions confirmed on a record's fields, without them.
 add_test(NAME claims_end_to_end
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/claims.sh $<TARGET_FILE:kanhe>)
+# Sources: records made from others, here and on another ledger, and their
+# chain.
+add_test(NAME sources_end_to_end
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/sources.sh $<TARGET_FILE:kanhe>)
 # Trust nodes: memberships, their proofs, and the evidence that carries them.
 add_test(NAME trust_end_to_end
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/trust.sh $<TARGET_FILE:kanhe>)
@@ -364,6 +370,10 @@ if(TARGET kanhe_crypto_pkcs11)
     if(KANHE_SOFTHSM_UTIL AND KANHE_SOFTHSM_MODULE)
         add_test(NAME cli_pkcs11
             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/pkcs11.sh $<TARGET_FILE:kanhe>
+                    ${KANHE_SOFTHSM_MODULE})
+        # Scripts, approved in person with a hardware key.
+        add_test(NAME scripts_end_to_end
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/scripts.sh $<TARGET_FILE:kanhe>
                     ${KANHE_SOFTHSM_MODULE})
         # A shipment's chain of custody (examples/), whose driver proves
         # presence with a hardware key: SoftHSM stands in for it.

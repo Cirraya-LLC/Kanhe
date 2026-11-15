@@ -22,6 +22,13 @@ Operations (indices are positions in the bundle's lists, from 0):
   add-cosignatures-of B    add the cosignatures another bundle B carries (of its checkpoint)
   subject HEX              name another record as the bundle's subject
 
+Source proofs (spec v0.18, bundle key 10):
+  drop-source-proofs       leave them all out
+  duplicate-source-proof N list the N-th one twice
+  add-source-proof FILE    add this bundle as a source proof
+  break-source-proof N     flip a bit of the N-th one's checkpoint signature
+  nest-source-proof N      give the N-th one a source proof of its own (itself)
+
 Open-network witnesses' cosignatures in anchors (spec v0.13; N counts them
 across the anchors, in order):
   break-network-cosignature N  flip the lowest bit of the N-th one's last byte (its signature)
@@ -176,6 +183,20 @@ def mutate(data: bytes, operation: str, argument: str | None) -> bytes:
         bundle.setdefault(4, []).extend(other.get(4, []))
     elif operation == "subject":
         bundle[1] = bytes.fromhex(argument)
+    elif operation == "drop-source-proofs":
+        bundle.pop(10, None)
+    elif operation == "duplicate-source-proof":
+        bundle[10].append(bundle[10][n])
+    elif operation == "add-source-proof":
+        bundle.setdefault(10, []).append(pathlib.Path(argument).read_bytes())
+    elif operation == "break-source-proof":
+        proof = cbor.decode(bundle[10][n])
+        proof[3] = _flip_signature(proof[3])
+        bundle[10][n] = cbor.encode(proof)
+    elif operation == "nest-source-proof":
+        proof = cbor.decode(bundle[10][n])
+        proof[10] = [bundle[10][n]]
+        bundle[10][n] = cbor.encode(proof)
     else:
         raise SystemExit(f"unknown operation {operation}")
     return cbor.encode(bundle)

@@ -285,8 +285,9 @@ int evidence_bench(const Options& options) {
     std::vector<Bytes> records;
     for (std::uint64_t i = 0; i < filler; ++i) {
         records.push_back(
-            home.sign(protocol::RecordRegisterBody{
-                          "example.document/1", Bytes(32, 7), 3, {}, std::nullopt, std::nullopt})
+            home
+                .sign(protocol::RecordRegisterBody{
+                    "example.document/1", Bytes(32, 7), 3, {}, std::nullopt, std::nullopt, {}})
                 .encoded);
     }
     home.submit_all(records, 512, nullptr);

@@ -23,7 +23,7 @@ Like a spreadsheet, the chain knows nothing of what you keep in it: a certificat
 record you define in the console, and the [examples](examples/) show how other things are
 built.
 
-> **Alpha: pre-release software.** The protocol specification (revision v0.17) is a draft and may change,
+> **Alpha: pre-release software.** The protocol specification (revision v0.18) is a draft and may change,
 > and so may interfaces and file formats; ledgers and evidence made with this version may need
 > to be made again with a later one. The code has not been audited yet; see
 > [Security](#security) for how to report a vulnerability and the known open items.
@@ -304,7 +304,8 @@ The `kanhe` tool controls every part of a ledger:
 | Ledger | `init`, `status`, `audit`, `log list`, `log show`, `log export`, `ledger keys`, `ledger genesis`, `ledger rotate-log-key`, `ledger rotate-root-key`, `ledger snapshot create\|show\|remove` |
 | Actors | `actor add`, `actor list`, `actor show`, `actor revoke`, `actor rotate-key`, `actor set-presence`, `presence enroll` |
 | Delegations | `delegation grant`, `delegation list`, `delegation show`, `delegation revoke` |
-| Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
+| Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record source list\|prove\|forget`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
+| Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke` |
 | Claims | `claim issue`, `claim list`, `claim show`, `claim revoke` |
 | Credentials | `credential key add\|list\|revoke`, `credential issue`, `credential list`, `credential show`, `credential revoke`, `credential status`, `credential did-document`, `credential verify` |
 | Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch` (a member's) |
@@ -588,6 +589,34 @@ kanhe record publish <claim-id> --url https://ledger.example.com   # a QR code's
 Conditions compare numbers, money (`HKD 30000.00`), dates, and text with `>`, `>=`, `<`, `<=`,
 `=`, `!=`, `between`, `in`, and `exists`; several `--if` must all hold. A condition that does not
 hold gets no claim unless `--allow-no`, so that asking reveals nothing more than silence.
+
+## Where a record came from
+
+A record can name the records it was made from, its **sources**, on its own ledger or on
+another organization's, and the **script** that made it: one version of a program, approved
+in person by a person of the organization, by its files' hashes. A risk score names the loan
+book and the land title it was computed from and the model that computed it; its evidence
+shows each, says where each source stood when the score was made and now, and warns if one
+was revoked or replaced since. The score itself stays as it is: whoever relies on it decides.
+
+```sh
+# Approved once, in person (a passkey, or a hardware key with its PIN):
+kanhe script approve risk-model 3.2 model/ run.py --deterministic --runtime "python 3.12" \
+    --as officer.key --presence-key "pkcs11:token=UKey;object=officer?module-path=/path/to/vendor.so"
+kanhe script check <script-id> ./deployed      # the files on disk, against the approval
+# Each record names its script and sources; another ledger's source comes with its evidence:
+kanhe record issue --as engine.key --type example.org.risk-score/1 --field score=710 \
+    --script <script-id> --source <loan-book-id> --source <registry-ledger-id>:<title-id> \
+    --source-proof title.cbor
+# Anyone, with the sources' own evidence in a folder, follows the chain level by level:
+kanhe verify score.cbor --follow sources/
+#   Script       risk-model 3.2 (2 files, deterministic, python 3.12), approved in person by ...
+#   Source       example.org.land-title/1 (id 9c1e...) on Land Registry's ledger: live when ...
+```
+
+A script is withdrawn with `script revoke`: records can no longer name it, and the evidence of
+those that did says so. A source on another ledger is shown by its proof (`record source prove`
+keeps a newer one), or as not provided.
 
 ## Trust nodes
 

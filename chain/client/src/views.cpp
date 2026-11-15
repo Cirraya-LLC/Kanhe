@@ -6,6 +6,8 @@
 
 #include <kanhe/client/views.hpp>
 #include <kanhe/core/protocol/record_types.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
+#include <kanhe/node/sources.hpp>
 
 namespace kanhe::client {
 
@@ -40,6 +42,14 @@ Json presence_credential_json(const protocol::PresenceCredential& c) {
 
 Json hex_json(ByteView bytes) {
     return to_hex(bytes);
+}
+
+Json sources_json(const std::vector<protocol::Source>& sources) {
+    Json out = Json::array();
+    for (const protocol::Source& s : sources) {
+        out.push_back({{"ledger", to_hex(s.ledger.bytes())}, {"record", to_hex(s.record.bytes())}});
+    }
+    return out;
 }
 
 Json id_json(const protocol::Id& id) {
@@ -244,6 +254,50 @@ Json record_json(const Session& session, const protocol::RecordState& record) {
         attachments.push_back({{"name", a.name}, {"media_type", a.media_type}, {"size", a.size}});
     }
     out["attachments"] = std::move(attachments);
+    // Where it came from (v0.18): the records it was made from, each local
+    // one as it stands now and each other ledger's with whether its proof
+    // is kept here; and the script its registration names.
+    Json sources = Json::array();
+    const auto kept = node::kept_source_proofs(session.directory(), record.id);
+    for (const protocol::Source& s : body.sources) {
+        Json j{{"ledger", id_json(s.ledger)},
+               {"record", id_json(s.record)},
+               {"local", s.ledger == session.state().ledger_id()}};
+        if (j["local"].get<bool>()) {
+            const protocol::RecordState* r = session.state().record(s.record);
+            j["type"] = r != nullptr ? Json(r->record_type) : Json(nullptr);
+            j["status"] = r == nullptr       ? Json(nullptr)
+                          : r->revoked       ? Json("revoked")
+                          : r->superseded_by ? Json("replaced")
+                                             : Json("live");
+        } else if (session.remote()) {
+            // Proofs are kept in the server's directory, not the mirror's.
+            j["proof_kept"] = nullptr;
+        } else {
+            j["proof_kept"] = std::ranges::any_of(
+                kept, [&](const node::KeptSourceProof& k) { return k.source == s; });
+        }
+        sources.push_back(std::move(j));
+    }
+    out["sources"] = std::move(sources);
+    out["script"] = nullptr;
+    if (registration.statement.provenance && registration.statement.provenance->script) {
+        const protocol::Id& id = *registration.statement.provenance->script;
+        Json script{{"id", id_json(id)}};
+        if (const protocol::RecordState* r = session.state().record(id)) {
+            const auto approval = session.statement(r->registered_at_index);
+            const auto* approved =
+                std::get_if<protocol::RecordRegisterBody>(&approval.statement.body);
+            if (approved != nullptr && approved->metadata) {
+                if (const auto s = protocol::decode_script(*approved->metadata)) {
+                    script["name"] = s->name;
+                    script["version"] = s->version;
+                }
+            }
+            script["withdrawn"] = r->revoked;
+        }
+        out["script"] = std::move(script);
+    }
     return out;
 }
 
@@ -303,7 +357,8 @@ Json body_json(const protocol::Body& body) {
                         {"field_count", b.field_count},
                         {"attachments", std::move(attachments)},
                         {"metadata", b.metadata ? cbor_json(*b.metadata) : Json(nullptr)},
-                        {"supersedes", b.supersedes ? id_json(*b.supersedes) : Json(nullptr)}};
+                        {"supersedes", b.supersedes ? id_json(*b.supersedes) : Json(nullptr)},
+                        {"sources", sources_json(b.sources)}};
             },
             [](const protocol::RecordEndorseBody& b) -> Json {
                 return {{"record", id_json(b.record)}, {"role", b.role}};
@@ -455,7 +510,11 @@ std::string body_summary(const Session& session, const protocol::Body& body,
             },
             [&](const protocol::RecordRegisterBody& b) {
                 return "issue " + b.record_type + id +
-                       (b.supersedes ? ", a new version of " + short_id(*b.supersedes) : "");
+                       (b.supersedes ? ", a new version of " + short_id(*b.supersedes) : "") +
+                       (b.sources.empty() ? ""
+                        : b.sources.size() == 1
+                            ? ", from 1 source"
+                            : ", from " + std::to_string(b.sources.size()) + " sources");
             },
             [&](const protocol::RecordEndorseBody& b) {
                 return "endorse " + short_id(b.record) + " as " + b.role;

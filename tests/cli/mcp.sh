@@ -124,6 +124,19 @@ NEWER="$(result 1 "['record_id']")"
 [ "$(result 2 "['latest_version']")" = "$NEWER" ] || fail "get_record latest_version"
 line 3 | contains 'superseded already' || fail "a record is superseded once"
 
+# Sources and scripts (spec v0.18): the agent names what a record was made
+# from; no script is approved here, and a record is no script.
+{
+    printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{%s,"name":"kanhe_issue_record","arguments":{"record_type":"example.document/1","fields":{"summary":"two inspections"},"sources":["%s","%s"]}}}\n' "$META" "${NEWER:0:12}" "$(printf '5%.0s' {1..64}):$(printf '6%.0s' {1..64})"
+    printf '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{%s,"name":"kanhe_list_scripts","arguments":{}}}\n' "$META"
+    printf '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{%s,"name":"kanhe_issue_record","arguments":{"record_type":"example.document/1","fields":{"summary":"x"},"script":"%s"}}}\n' "$META" "$NEWER"
+} | run mcp --ledger ledger --as agent.key > responses.txt 2> /dev/null
+SUMMARY="$(result 1 "['record_id']")"
+[ "$(run record source list "$SUMMARY" --ledger ledger --json | json 'len(d["sources"])')" = 2 ] ||
+    fail "two sources named through MCP"
+[ "$(result 2 "['scripts']")" = "[]" ] || fail "no scripts approved"
+line 3 | contains 'not an approved script' || fail "a record is no script"
+
 # Contracts: the agent reads them and verifies an instance's evidence.
 # The vectors' oracle contract writes the output its byte-string argument holds.
 python3 -c "import json, sys; open('oracle.wasm', 'wb').write(bytes.fromhex(json.load(open(sys.argv[1]))['contract']))" \

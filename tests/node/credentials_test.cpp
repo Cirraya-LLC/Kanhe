@@ -71,7 +71,8 @@ struct College {
             fields.leaves.size(),
             {},
             V::map({{V::text("note"), V::bytes(Bytes{1})}, {V::text("year"), V::integer(2026)}}),
-            std::nullopt};
+            std::nullopt,
+            {}};
         record = w.ok(w.org(), w.statement(w.org_id(), std::nullopt, r));
     }
 

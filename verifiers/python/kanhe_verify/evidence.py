@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import contracts, cose, crypto, memberships, merkle, network, protocol, rules, statetree, timestamps
+from . import contracts, cose, crypto, memberships, merkle, network, protocol, rules, scripts, statetree, timestamps
 from .errors import VerifyError
 from .protocol import AGENT
 
@@ -68,6 +68,35 @@ class MembershipProof:
 
 
 @dataclass
+class ScriptReport:
+    """A script the record's events name (v0.18)."""
+    id: bytes
+    values: scripts.Script
+    approved_by: bytes  # the person's actor id
+    presence: object  # presence.PresenceResult or None
+    approved_at: int
+    withdrawn_at: int | None
+
+
+@dataclass
+class SourceReport:
+    """A source the record's registration names (v0.18)."""
+    ledger: bytes
+    record: bytes
+    local: bool
+    provided: bool
+    record_time: int
+    type: str | None = None
+    organization: str | None = None
+    trust_node: str | None = None
+    at_record: str | None = None
+    checkpoint_time: int | None = None
+    at_checkpoint: str | None = None
+    changed_at: int | None = None
+    replaced_by: bytes | None = None
+
+
+@dataclass
 class Report:
     ledger: rules.Ledger
     id_checked: bool
@@ -90,6 +119,8 @@ class Report:
     notes: list = field(default_factory=list)
     network: list = field(default_factory=list)  # [NetworkCosignature], in the bundle's order
     memberships: list = field(default_factory=list)  # [MembershipProof], in the bundle's order (v0.16)
+    scripts: list = field(default_factory=list)  # [ScriptReport], first named first (v0.18)
+    sources: list = field(default_factory=list)  # [SourceReport], in the registration's order (v0.18)
 
 
 def fail(message: str):
@@ -118,11 +149,17 @@ def verify_bundle(data: bytes, *, ledger_id: bytes | None = None, witnesses: lis
 
 
 def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, attachments: dict,
-            network_witnesses: list, trust_nodes: dict, as_proof: bool) -> Report:
-    """Steps 1 to 9; for a membership proof (as_proof), steps 1 to 8 only,
+            network_witnesses: list, trust_nodes: dict, as_proof: bool, as_source: bool = False) -> Report:
+    """Steps 1 to 10; for a membership proof (as_proof), steps 1 to 8 only,
     and a proof that carries membership proofs of its own is refused before
-    anything else."""
+    anything else; for a source proof (as_source, v0.18), steps 1 to 9, and
+    one that carries source proofs of its own is refused before anything
+    else."""
     bundle = protocol.parse_bundle(data)
+    if as_source and bundle.sources:
+        fail("a source proof carries source proofs of its own (key 10)")
+    if as_proof and bundle.sources:
+        fail("a membership proof carries source proofs")
     if as_proof and bundle.memberships:
         fail("a membership proof carries membership proofs of its own (key 9)")
     checkpoint = protocol.parse_tree_head(bundle.checkpoint, cose.CHECKPOINT_TYPE, "the checkpoint")
@@ -211,10 +248,19 @@ def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, at
     trusted |= {("network",) + w for w, n in cosigned if n.trusted}
     untrusted |= {("network",) + w for w, n in cosigned if not n.trusted}
 
+    # The scripts the record's events name, and its sources (v0.18).
+    script_reports, source_reports = _provenance(ledger, subject, checkpoint)
+    if instance is not None and bundle.sources:
+        fail("an instance's bundle carries no source proofs")
+
     # Step 9: membership proofs.
     proofs = _check_memberships(ledger, subject, bundle.memberships, witnesses=witnesses,
                                 tsa_roots_pem=tsa_roots_pem, network_witnesses=network_witnesses,
                                 trust_nodes=trust_nodes)
+
+    # Step 10: source proofs (v0.18).
+    _check_sources(source_reports, bundle.sources, witnesses=witnesses, tsa_roots_pem=tsa_roots_pem,
+                   network_witnesses=network_witnesses, trust_nodes=trust_nodes)
 
     events = [ledger.applied[i] for i in event_indices(ledger, subject)]
     return Report(
@@ -223,7 +269,127 @@ def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, at
         witnesses_trusted=len(trusted), witnesses_untrusted=len(untrusted), tokens=tokens,
         trusted_authorities=authorities, existed_by=existed_by, complete=complete,
         commitment=commitment, commitment_index=size - 1 if commitment is not None else None,
-        entries=len(entries), network=[n for _, n in cosigned], memberships=proofs)
+        entries=len(entries), network=[n for _, n in cosigned], memberships=proofs,
+        scripts=script_reports, sources=source_reports)
+
+
+def related_records(ledger: rules.Ledger, subject, events: list) -> list:
+    """Section 11, step 7: the records the subject's own events name, its
+    related objects: a claim's source (v0.14); the local sources its own
+    registration names (v0.18); the scripts its events' provenance names
+    (v0.18). Each once, in that order, first named first."""
+    out = []
+
+    def add(record_id: bytes):
+        if record_id not in out:
+            out.append(record_id)
+
+    if isinstance(subject, rules.Record):
+        if subject.claim is not None:
+            add(subject.claim.source)
+        for ledger_id, record_id in subject.sources:
+            if ledger_id == ledger.id:
+                add(record_id)
+    for index in events:
+        provenance = ledger.applied[index].statement.provenance
+        if provenance is not None and provenance.script is not None:
+            add(provenance.script)
+    return out
+
+
+def _times(ledger: rules.Ledger, record: rules.Record) -> tuple:
+    """When a record of the bundle was registered, first revoked, and
+    replaced (with the newer version's id)."""
+    registered = ledger.applied[record.history[0]].registered_at
+    revoked = replaced = replaced_by = None
+    for index in record.history:
+        applied = ledger.applied[index]
+        if applied.statement.type == protocol.RECORD_REVOKE and revoked is None:
+            revoked = applied.registered_at
+        if applied.statement.type == protocol.RECORD_REGISTER and applied.id != record.id:
+            replaced, replaced_by = applied.registered_at, applied.id
+    return registered, revoked, replaced, replaced_by
+
+
+def _set_statuses(s: SourceReport, registered: int, revoked, replaced, replaced_by):
+    s.at_record = scripts.status(registered, revoked, replaced, s.record_time)
+    s.at_checkpoint = scripts.status(registered, revoked, replaced, s.checkpoint_time)
+    if s.at_checkpoint == scripts.REVOKED:
+        s.changed_at = revoked
+    elif s.at_checkpoint == scripts.REPLACED:
+        s.changed_at, s.replaced_by = replaced, replaced_by
+
+
+def _provenance(ledger: rules.Ledger, subject, checkpoint) -> tuple:
+    """Section 11, the report (v0.18): each script the subject's events
+    name, once, first named first, with who approved it in person and
+    whether it was withdrawn since; each source its registration names, a
+    local one's status from this bundle (another ledger's from its proof,
+    step 10)."""
+    script_reports = []
+    for index in event_indices(ledger, subject):
+        provenance = ledger.applied[index].statement.provenance
+        if provenance is None or provenance.script is None or \
+                any(s.id == provenance.script for s in script_reports):
+            continue
+        script = ledger.records.get(provenance.script)
+        if script is None or script.script is None:
+            fail("a script the record's events name is not in its evidence")
+        registered, revoked, _, _ = _times(ledger, script)
+        approval = ledger.applied[script.history[0]]
+        script_reports.append(ScriptReport(id=script.id, values=script.script, approved_by=approval.signer,
+                                           presence=approval.presence, approved_at=registered,
+                                           withdrawn_at=revoked))
+    source_reports = []
+    if isinstance(subject, rules.Record):
+        record_time = registration_time(ledger, subject)
+        for ledger_id, record_id in subject.sources:
+            s = SourceReport(ledger=ledger_id, record=record_id, local=ledger_id == ledger.id, provided=False,
+                             record_time=record_time)
+            if s.local:
+                source = ledger.records.get(record_id)
+                if source is None:
+                    fail("a local source is not in the record's evidence")
+                s.provided, s.type, s.checkpoint_time = True, source.type, checkpoint.timestamp
+                _set_statuses(s, *_times(ledger, source))
+            source_reports.append(s)
+    return script_reports, source_reports
+
+
+def _check_sources(sources: list, proofs: list, *, witnesses: list, tsa_roots_pem: bytes,
+                   network_witnesses: list, trust_nodes: dict):
+    """Section 11, step 10 (v0.18). Each proof is verified as an evidence
+    bundle under steps 1 to 9, for the ledger its own genesis names, with no
+    attachment contents and this bundle's trusted witnesses, network
+    witnesses, time-stamp authorities, and trust nodes. It must verify, be
+    complete, be about a record the registration names as a source on that
+    ledger (not this one), and carry no source proofs of its own; two proofs
+    of one source fail. A source without a proof is not provided."""
+    for n, encoded in enumerate(proofs, start=1):
+        what = f"source proof {n}"
+        try:
+            proof = _verify(encoded, ledger_id=None, witnesses=witnesses, tsa_roots_pem=tsa_roots_pem,
+                            attachments={}, network_witnesses=network_witnesses, trust_nodes=trust_nodes,
+                            as_proof=False, as_source=True)
+        except VerifyError as e:
+            fail(f"{what} does not verify: {e}")
+        if not proof.complete:
+            fail(f"{what} is not complete: its checkpoint does not end with a state commitment")
+        if proof.record is None:
+            fail(f"{what} is not about a record")
+        named = next((s for s in sources if not s.local and s.ledger == proof.ledger.id
+                      and s.record == proof.record.id), None)
+        if named is None:
+            fail(f"{what} is not of a source the record names on another ledger")
+        if named.provided:
+            fail(f"{what} is a second proof of one source")
+        named.provided, named.type, named.organization = True, proof.record.type, proof.ledger.name
+        for m in proof.memberships:
+            if m.trusted and m.at_checkpoint == memberships.ACTIVE:
+                named.trust_node = m.trust_node_name
+                break
+        named.checkpoint_time = proof.checkpoint.timestamp
+        _set_statuses(named, *_times(proof.ledger, proof.record))
 
 
 def registration_time(ledger: rules.Ledger, subject) -> int:
@@ -368,12 +534,17 @@ def involved_objects(ledger: rules.Ledger, subject) -> dict:
     events = event_indices(ledger, subject)
     if isinstance(subject, rules.Record):
         involved = {subject.id: statetree.RECORD}
-        if subject.claim is not None:
-            source = ledger.records[subject.claim.source]
-            involved[source.id] = statetree.RECORD
-            events = sorted(set(events) | set(source.history))
     else:
         involved = {subject.id: statetree.INSTANCE, subject.contract: statetree.CONTRACT}
+    # Its related objects (a claim's source, v0.14; its local sources and the
+    # scripts its events name, v0.18): their statements count as events too,
+    # and bring in no further related objects.
+    for record_id in related_records(ledger, subject, events):
+        related = ledger.records.get(record_id)
+        if related is None:
+            fail("the bundle does not hold a record its record's events name")
+        involved[record_id] = statetree.RECORD
+        events = sorted(set(events) | set(related.history))
     for index in events:
         applied = ledger.applied[index]
         signer = ledger.actors[applied.signer]

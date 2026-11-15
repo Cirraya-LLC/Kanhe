@@ -26,6 +26,8 @@ kanhe_add_fuzzer(protocol_parse_fuzz kanhe::crypto_openssl kanhe::ledger)
 kanhe_add_fuzzer(claim_fuzz)
 # Memberships' metadata (spec v0.16), inside every membership proof.
 kanhe_add_fuzzer(membership_fuzz)
+# Scripts' metadata (spec v0.18), inside the evidence of what they made.
+kanhe_add_fuzzer(script_fuzz)
 # Credentials (spec/credentials.md): a JWS, its JSON, the addresses it names,
 # base URLs, roles; and a status list's GZIP, from any issuer.
 kanhe_add_fuzzer(credential_fuzz kanhe::verifier)

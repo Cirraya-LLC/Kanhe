@@ -128,7 +128,7 @@ std::vector<std::size_t> InstanceReport::overdue_requests() const {
 }
 
 std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
-                                 std::span<const Statement> events) {
+                                 std::span<const Statement> events, std::span<const Id> related) {
     std::vector<Id> out;
     auto add = [&](const Id& id) {
         if (!std::ranges::contains(out, id)) {
@@ -139,8 +139,8 @@ std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
     if (const InstanceState* instance = state.instance(record)) {
         add(instance->contract);
     }
-    if (const auto source = claim_source(events)) {
-        add(*source);
+    for (const Id& id : related) {
+        add(id);
     }
     for (const Statement& statement : events) {
         if (!statement.actor_id) {
@@ -269,6 +269,16 @@ Result<Bytes> encode_bundle(const EvidenceBundle& bundle) {
             proofs.push_back(cbor::Value::bytes(proof));
         }
         map.push_back(entry(9, cbor::Value::array(std::move(proofs))));
+    }
+    if (!bundle.source_proofs.empty()) {
+        if (bundle.source_proofs.size() > max_source_proofs) {
+            return fail(Errc::invalid_argument, "a bundle carries at most 64 source proofs");
+        }
+        cbor::Array proofs;
+        for (const Bytes& proof : bundle.source_proofs) {
+            proofs.push_back(cbor::Value::bytes(proof));
+        }
+        map.push_back(entry(10, cbor::Value::array(std::move(proofs))));
     }
     return cbor::encode(cbor::Value::map(std::move(map)));
 }
@@ -466,6 +476,16 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
             bundle.memberships.push_back(std::move(proof));
         }
     }
+    if (const cbor::Value* list_value = reader.get(10)) {
+        KANHE_TRY(const cbor::Array* list, non_empty_list(*list_value));
+        if (list->size() > max_source_proofs) {
+            return fail(Errc::malformed, "a bundle carries at most 64 source proofs");
+        }
+        for (const cbor::Value& item : *list) {
+            KANHE_TRY(Bytes proof, detail::as_bytes_value(item));
+            bundle.source_proofs.push_back(std::move(proof));
+        }
+    }
     KANHE_CHECK(reader.finish());
     return bundle;
 }
@@ -645,6 +665,91 @@ Result<EvidenceReport> check_anchors(const crypto::Provider& provider, const Led
     return report;
 }
 
+/// A source's status at the record's registration and at a checkpoint,
+/// from when it was registered, revoked, and replaced.
+void set_statuses(SourceReport& s, Timestamp registered, std::optional<Timestamp> revoked,
+                  std::optional<Timestamp> replaced, std::optional<Id> replaced_by) {
+    s.at_record = source_status_at(registered, revoked, replaced, s.record_time);
+    s.at_checkpoint = source_status_at(registered, revoked, replaced, s.checkpoint_time);
+    if (s.at_checkpoint == SourceStatus::revoked) {
+        s.changed_at = revoked;
+    } else if (s.at_checkpoint == SourceStatus::replaced) {
+        s.changed_at = replaced;
+        s.replaced_by = std::move(replaced_by);
+    }
+}
+
+/// Step 10 (v0.18): each source proof is a complete bundle of its own
+/// ledger, about one of the record's sources there; it says where the
+/// source stood when the record was registered and at its checkpoint.
+Result<EvidenceReport> check_sources(const crypto::Provider& provider, const EvidenceBundle& bundle,
+                                     const VerifyOptions& options, EvidenceReport report) {
+    if (bundle.source_proofs.empty()) {
+        return report;
+    }
+    VerifyOptions inner;
+    inner.trusted_witnesses = options.trusted_witnesses;
+    inner.trusted_timestamp_roots = options.trusted_timestamp_roots;
+    inner.trusted_network_witnesses = options.trusted_network_witnesses;
+    inner.trust_nodes = options.trust_nodes;
+    inner.modules = options.modules;
+    for (const Bytes& proof : bundle.source_proofs) {
+        auto decoded = decode_bundle(proof);
+        if (!decoded) {
+            return verification_failure("a source proof is malformed");
+        }
+        if (!decoded->source_proofs.empty()) {
+            return verification_failure("a source proof carries source proofs");
+        }
+        auto checked = detail::verify_bundle_as_given(provider, proof, inner);
+        if (!checked) {
+            return verification_failure("a source proof does not verify");
+        }
+        if (!checked->complete) {
+            return verification_failure("a source proof is not complete");
+        }
+        if (checked->instance || checked->events.empty()) {
+            return verification_failure("a source proof is not a record's");
+        }
+        const auto named = std::ranges::find_if(report.sources, [&](const SourceReport& s) {
+            return !s.local && s.source.ledger == checked->ledger_id &&
+                   s.source.record == checked->record;
+        });
+        if (named == report.sources.end()) {
+            return verification_failure(
+                "a source proof is not of a source the record names on another ledger");
+        }
+        if (named->provided) {
+            return verification_failure("a source is proven twice");
+        }
+        SourceReport& s = *named;
+        s.provided = true;
+        s.type = checked->record_type;
+        s.organization = checked->organization;
+        for (const auto& m : checked->memberships) {
+            if (m.trusted && m.at_checkpoint == Standing::active) {
+                s.trust_node = m.trust_node_name;
+                break;
+            }
+        }
+        std::optional<Timestamp> revoked;
+        std::optional<Timestamp> replaced;
+        std::optional<Id> replaced_by;
+        for (const RecordEvent& e : checked->events) {
+            if (e.type == StatementType::record_revoke && !revoked) {
+                revoked = e.registered_at;
+            }
+            if (e.new_version && !replaced) {
+                replaced = e.registered_at;
+                replaced_by = e.new_version;
+            }
+        }
+        s.checkpoint_time = checked->checkpoint.timestamp;
+        set_statuses(s, checked->events.front().registered_at, revoked, replaced, replaced_by);
+    }
+    return report;
+}
+
 /// Step 9 (v0.16): each membership proof is a complete bundle of its own
 /// ledger, about a membership that names this bundle's ledger; it says where
 /// the membership stood when the record was registered (an instance's
@@ -746,10 +851,39 @@ Result<EvidenceReport> finish_report(const crypto::Provider& provider, const Led
               count_witnesses(provider, state, checkpoint, bundle, options, std::move(report)));
     KANHE_TRY(report, check_anchors(provider, state, checkpoint, bundle, included, options,
                                     std::move(report)));
-    return check_memberships(provider, bundle, options, std::move(report));
+    KANHE_TRY(report, check_memberships(provider, bundle, options, std::move(report)));
+    return check_sources(provider, bundle, options, std::move(report));
 }
 
 } // namespace
+
+SourceStatus source_status_at(Timestamp registered, std::optional<Timestamp> revoked,
+                              std::optional<Timestamp> replaced, Timestamp t) noexcept {
+    if (t < registered) {
+        return SourceStatus::not_yet;
+    }
+    if (revoked && *revoked <= t) {
+        return SourceStatus::revoked;
+    }
+    if (replaced && *replaced <= t) {
+        return SourceStatus::replaced;
+    }
+    return SourceStatus::live;
+}
+
+std::string_view source_status_name(SourceStatus status) noexcept {
+    switch (status) {
+    case SourceStatus::not_yet:
+        return "not yet registered";
+    case SourceStatus::live:
+        return "live";
+    case SourceStatus::revoked:
+        return "revoked";
+    case SourceStatus::replaced:
+        return "replaced";
+    }
+    return "unknown";
+}
 
 Result<crypto::Digest> CheckedProvider::do_digest(crypto::HashAlg alg,
                                                   std::span<const ByteView> parts) const {
@@ -1107,6 +1241,108 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
         report.claim = std::move(c);
     }
 
+    // The record's own events, and the records they name (v0.18, step 7):
+    // a claim's source, its local sources, the scripts its events name.
+    std::vector<Statement> own_events;
+    for (const std::uint64_t index : history) {
+        own_events.push_back(included_at(index)->statement.statement);
+    }
+    const std::vector<Id> related = related_records(own_events, state->ledger_id());
+    // A related record's statement, which the bundle must hold.
+    auto statement_at = [&](std::uint64_t index) -> const Included* {
+        const auto it = included_at(index);
+        return it != included.end() && it->index == index ? &*it : nullptr;
+    };
+    // When a record of the bundle was registered, revoked, and replaced.
+    struct Times {
+        Timestamp registered = 0;
+        std::optional<Timestamp> revoked;
+        std::optional<Timestamp> replaced;
+        std::optional<Id> replaced_by;
+    };
+    auto times_of = [&](const RecordState& r) -> std::optional<Times> {
+        Times t;
+        const Included* registered = statement_at(r.registered_at_index);
+        if (registered == nullptr) {
+            return std::nullopt;
+        }
+        t.registered = registered->log_entry.registered_at;
+        for (const std::uint64_t index : r.history) {
+            const Included* item = statement_at(index);
+            if (item == nullptr) {
+                return std::nullopt;
+            }
+            if (std::holds_alternative<RecordRevokeBody>(item->statement.statement.body) &&
+                !t.revoked) {
+                t.revoked = item->log_entry.registered_at;
+            }
+        }
+        if (r.superseded_by) {
+            const Included* item = statement_at(r.superseded_at_index);
+            if (item == nullptr) {
+                return std::nullopt;
+            }
+            t.replaced = item->log_entry.registered_at;
+            t.replaced_by = Id(*r.superseded_by);
+        }
+        return t;
+    };
+    // The scripts its events name (v0.18), each once.
+    for (const RecordEvent& event : report.events) {
+        if (!event.provenance || !event.provenance->script ||
+            std::ranges::contains(report.scripts, *event.provenance->script, &ScriptReport::id)) {
+            continue;
+        }
+        const Id& id = *event.provenance->script;
+        const RecordState* script = state->record(id);
+        const Included* registered =
+            script != nullptr ? statement_at(script->registered_at_index) : nullptr;
+        const auto* body =
+            registered != nullptr
+                ? std::get_if<RecordRegisterBody>(&registered->statement.statement.body)
+                : nullptr;
+        const auto times = script != nullptr ? times_of(*script) : std::nullopt;
+        auto decoded = body != nullptr && body->metadata
+                           ? decode_script(*body->metadata)
+                           : Result<Script>(fail(Errc::not_found, "no script"));
+        if (!decoded || !times) {
+            return verification_failure("a script the record's events name is not in its evidence");
+        }
+        report.scripts.push_back(ScriptReport{
+            .id = id,
+            .script = std::move(*decoded),
+            .approved_by = summarize(*state, *registered->statement.statement.actor_id),
+            .presence = presence.contains(registered->index)
+                            ? std::optional(presence.at(registered->index))
+                            : std::nullopt,
+            .approved_at = times->registered,
+            .withdrawn_at = times->revoked,
+        });
+    }
+    // The sources its registration names (v0.18), in its order: a local
+    // one from this bundle, another ledger's from its proof (step 10).
+    if (registration != nullptr && !report.events.empty()) {
+        for (const Source& source : registration->sources) {
+            SourceReport s;
+            s.source = source;
+            s.record_time = report.events.front().registered_at;
+            s.checkpoint_time = checkpoint.checkpoint.timestamp;
+            s.local = source.ledger == state->ledger_id();
+            if (s.local) {
+                const RecordState* r = state->record(source.record);
+                const auto times = r != nullptr ? times_of(*r) : std::nullopt;
+                if (!times) {
+                    return verification_failure("a local source is not in the record's evidence");
+                }
+                s.provided = true;
+                s.type = r->record_type;
+                set_statuses(s, times->registered, times->revoked, times->replaced,
+                             times->replaced_by);
+            }
+            report.sources.push_back(std::move(s));
+        }
+    }
+
     // Completeness: every involved object's history, as replayed from the
     // bundle, must be exactly the history the checkpoint's state root commits
     // to. A left-out statement (a later revocation, say) shows as a mismatch.
@@ -1118,15 +1354,22 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     if (last != included.end()) {
         const crypto::Digest* state_root = &last->commitment->commitment.state_root;
         report.state_commitment = last->commitment->commitment;
-        std::vector<Statement> events;
-        for (const std::uint64_t index : history) {
-            events.push_back(included_at(index)->statement.statement);
-        }
-        // A claim's source (v0.14): its statements count as events too
-        // (each one included: the replayed state knows no other).
-        if (const auto source = claim_source(events); source && state->record(*source)) {
-            for (const std::uint64_t index : state->record(*source)->history.to_vector()) {
-                events.push_back(included_at(index)->statement.statement);
+        // The related records' statements count as events too (each one
+        // included: the replayed state knows no other).
+        std::vector<Statement> events = own_events;
+        for (const Id& id : related) {
+            const RecordState* r = state->record(id);
+            if (r == nullptr) {
+                return verification_failure(
+                    "the bundle does not include a record its record's events name");
+            }
+            for (const std::uint64_t index : r->history.to_vector()) {
+                const Included* item = statement_at(index);
+                if (item == nullptr) {
+                    return verification_failure(
+                        "the bundle leaves out a statement of a record its record's events name");
+                }
+                events.push_back(item->statement.statement);
             }
         }
         std::map<IdKey, const StateProof*> proven;
@@ -1139,7 +1382,7 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
                     "a state proof does not match the ledger's state commitment");
             }
         }
-        for (const Id& id : involved_objects(*state, bundle.record, events)) {
+        for (const Id& id : involved_objects(*state, bundle.record, events, related)) {
             const auto proof = proven.find(key_of(id));
             if (proof == proven.end()) {
                 return verification_failure(

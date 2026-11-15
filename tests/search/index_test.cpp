@@ -55,7 +55,7 @@ cbor::Value metadata(std::vector<std::pair<std::string, cbor::Value>> entries) {
 
 protocol::RecordRegisterBody form(const std::string& type, cbor::Value meta,
                                   std::optional<protocol::Id> supersedes = std::nullopt) {
-    return {type, Bytes(32, 0x42), 3, {}, std::move(meta), supersedes};
+    return {type, Bytes(32, 0x42), 3, {}, std::move(meta), supersedes, {}};
 }
 
 std::vector<std::string> types_of(const search::Page<search::RecordRow>& page) {

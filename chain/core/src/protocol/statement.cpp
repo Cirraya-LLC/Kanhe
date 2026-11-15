@@ -590,6 +590,14 @@ Result<cbor::Value> encode_body(const Body& body) {
                 if (b.supersedes) {
                     map.push_back(entry(6, id_value(*b.supersedes)));
                 }
+                if (!b.sources.empty()) {
+                    cbor::Array sources;
+                    for (const Source& s : b.sources) {
+                        sources.push_back(
+                            cbor::Value::array({id_value(s.ledger), id_value(s.record)}));
+                    }
+                    map.push_back(entry(7, cbor::Value::array(std::move(sources))));
+                }
                 return cbor::Value::map(std::move(map));
             },
             [](const RecordEndorseBody& b) -> Result<cbor::Value> {
@@ -687,6 +695,9 @@ cbor::Value encode_provenance(const Provenance& provenance) {
                 cbor::Value::array({text_value(tool.name), cbor::Value::bytes(tool.digest)}));
         }
         map.push_back(entry(4, cbor::Value::array(std::move(tools))));
+    }
+    if (provenance.script) {
+        map.push_back(entry(5, id_value(*provenance.script)));
     }
     return cbor::Value::map(std::move(map));
 }
@@ -923,6 +934,31 @@ Result<Body> decode_body(StatementType type, const cbor::Value& value) {
             b.metadata = *metadata;
         }
         KANHE_TRY(b.supersedes, reader.opt_id(6));
+        if (const cbor::Value* sources = reader.get(7)) {
+            // Sources (v0.18): 1 to 64 [ledger, record], none twice.
+            KANHE_TRY(const cbor::Array* items, detail::as_array(*sources));
+            if (items->empty()) {
+                return fail(Errc::non_canonical, "an empty source list must be omitted");
+            }
+            if (items->size() > max_sources) {
+                return fail(Errc::limit_exceeded, "a registration names at most 64 sources");
+            }
+            for (const cbor::Value& item : *items) {
+                const cbor::Array* parts = item.as_array();
+                if (parts == nullptr || parts->size() != 2) {
+                    return fail(Errc::malformed, "a source is [ledger, record]");
+                }
+                KANHE_TRY(Bytes ledger, detail::as_bytes_value((*parts)[0]));
+                KANHE_TRY(Bytes record, detail::as_bytes_value((*parts)[1]));
+                KANHE_TRY(Id ledger_id, to_id(ledger));
+                KANHE_TRY(Id record_id, to_id(record));
+                Source source{ledger_id, record_id};
+                if (std::ranges::contains(b.sources, source)) {
+                    return fail(Errc::malformed, "a registration names a source twice");
+                }
+                b.sources.push_back(source);
+            }
+        }
         body = std::move(b);
         break;
     }
@@ -1087,6 +1123,7 @@ Result<Provenance> decode_provenance(const cbor::Value& value) {
             provenance.tools.push_back(std::move(tool));
         }
     }
+    KANHE_TRY(provenance.script, reader.opt_id(5));
     KANHE_CHECK(reader.finish());
     return provenance;
 }

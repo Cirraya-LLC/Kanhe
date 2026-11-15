@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import claims, contracts, cose, crypto, memberships, presence, protocol
+from . import claims, contracts, cose, crypto, memberships, presence, protocol, scripts
 from .errors import VerifyError
 from .protocol import (ACTOR_REGISTER, ACTOR_REVOKE, ACTOR_ROTATE_KEY, ACTOR_SET_PRESENCE, AGENT,
                        CONTRACT_CALL, CONTRACT_DEPLOY, CONTRACT_RETIRE, DELEGATION_GRANT, DELEGATION_REVOKE,
@@ -39,6 +39,7 @@ MECHANISM_TYPES = {
     "kanhe.contract-consent/1": ("given", {("given", "withdrawn")}),
     claims.CLAIM_TYPE: ("confirmed", set()),  # v0.14: withdrawn by revoking it
     memberships.MEMBERSHIP_TYPE: (memberships.INITIAL, memberships.TRANSITIONS),  # v0.16; revoked for cause
+    scripts.SCRIPT_TYPE: (scripts.INITIAL, set()),  # v0.18: withdrawn by revoking it
 }
 
 KIND_NAMES = {ORGANIZATION: "organization", PERSON: "person", AGENT: "agent", protocol.DEVICE: "device"}
@@ -85,6 +86,8 @@ class Record:
     history: list = field(default_factory=list)
     claim: claims.Claim | None = None  # a kanhe.claim/1 record's metadata (v0.14)
     membership: memberships.Membership | None = None  # a kanhe.membership/1 record's metadata (v0.16)
+    script: scripts.Script | None = None  # a kanhe.script/1 record's metadata (v0.18)
+    sources: list = field(default_factory=list)  # v0.18: [(ledger, record)] it was made from
 
 
 @dataclass
@@ -241,11 +244,25 @@ class Ledger(contracts.ContractRules):
                               f"the statement at {index} is not signed with its actor's current key")
         if signer.kind == AGENT and (statement.provenance is None or statement.provenance.model is None):
             fail(f"the agent's statement at {index} names no model in its provenance")
+        # The script a statement's provenance names (v0.18): an approved
+        # script of this ledger. One the bundle does not hold is a related
+        # object's (section 11, step 3): its own bundle shows it.
+        if statement.provenance is not None and statement.provenance.script is not None:
+            script = self.records.get(statement.provenance.script)
+            if script is not None and script.type != scripts.SCRIPT_TYPE:
+                fail(f"the statement at {index} names a record that is not a script in its provenance")
+            if script is not None and script.revoked:
+                fail(f"the statement at {index} names a withdrawn script in its provenance")
         proven = None
         if statement.presence is not None:
             if signer.kind != PERSON:
                 fail(f"the statement at {index} carries proof of presence, but only people prove presence")
             proven = presence.verify(self.h, statement, signer.credentials)
+        # A script's approval (v0.18) is a person's act, in person,
+        # user-verified, whatever the signer's scope.
+        if statement.type == RECORD_REGISTER and statement.fields["record_type"] == scripts.SCRIPT_TYPE:
+            if signer.kind != PERSON or proven is None or not proven.user_verified:
+                fail(f"the script at {index} is not approved by a person in person, user-verified")
 
         record_types = self._record_types(statement)
         chain = self._authorize(statement, signer, proven, now, record_types, index)
@@ -496,13 +513,16 @@ class Ledger(contracts.ContractRules):
                     fail("a record of a mechanism type is not superseded")
                 if old.superseded_by is not None:
                     fail("the record was superseded already")
+        self._check_sources(kind, f["sources"])
         claim = self._check_claim(applied, f) if kind == claims.CLAIM_TYPE else None
         membership = self._check_membership(f) if kind == memberships.MEMBERSHIP_TYPE else None
+        script = scripts.parse(f["metadata"]) if kind == scripts.SCRIPT_TYPE else None
         initial = MECHANISM_TYPES[kind][0] if kind in MECHANISM_TYPES else GENERIC_INITIAL
         self.records[applied.id] = Record(
             id=applied.id, type=kind, field_root=f["field_root"], field_count=f["field_count"],
             attachments=f["attachments"], metadata=f["metadata"], supersedes=f["supersedes"],
-            registrant=signer.id, state=initial, history=[applied.index], claim=claim, membership=membership)
+            registrant=signer.id, state=initial, history=[applied.index], claim=claim, membership=membership,
+            script=script, sources=list(f["sources"]))
         if old is not None:
             # The registration is a statement about both records (section 9).
             old.superseded_by = applied.id
@@ -529,6 +549,27 @@ class Ledger(contracts.ContractRules):
         if source.superseded_by is not None:
             fail("a claim's source is superseded")
         return claim
+
+    def _check_sources(self, kind: str, sources: list):
+        """Section 5, sources (v0.18): none on a mechanism type; each local
+        one (its ledger is this one) a record of a generic type, neither
+        revoked nor superseded now. One the bundle does not hold is a related
+        object's own source (section 11, step 3): its own bundle shows it.
+        A source on another ledger is checked for its shape only."""
+        if sources and kind in MECHANISM_TYPES:
+            fail("a record of a mechanism type names no sources")
+        for ledger, record_id in sources:
+            if ledger != self.id:
+                continue
+            source = self.records.get(record_id)
+            if source is None:
+                continue
+            if source.type in MECHANISM_TYPES:
+                fail("a source is a record of a mechanism type")
+            if source.revoked:
+                fail("a source is revoked")
+            if source.superseded_by is not None:
+                fail("a source is superseded")
 
     def _check_membership(self, f: dict) -> memberships.Membership:
         """Section 6, memberships (v0.16): the metadata's shape and keys, and

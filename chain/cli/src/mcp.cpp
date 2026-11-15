@@ -27,6 +27,7 @@
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/record_types.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/http.hpp>
 #include <kanhe/node/peers.hpp>
@@ -390,6 +391,18 @@ private:
             p.input_commitment = Bytes(digest.bytes().begin(), digest.bytes().end());
         }
         p.tools.push_back({"mcp:" + tool.name, unwrap(from_hex(tool.digest), "tool digest")});
+        // The approved script the work came from (spec v0.18).
+        if (const auto script = optional_text(arguments, "script")) {
+            const protocol::Id id = session.record_id(*script);
+            const protocol::RecordState* r = session.state().record(id);
+            if (r->record_type != protocol::script_type) {
+                throw ToolError{"script names a " + r->record_type + ", not an approved script"};
+            }
+            if (r->revoked) {
+                throw ToolError{"that script was withdrawn"};
+            }
+            p.script = id;
+        }
         return p;
     }
 
@@ -668,6 +681,17 @@ private:
                {"description",
                 "Optional: the record (id or unique prefix) this one replaces, as its new "
                 "version."}}},
+             {"sources",
+              {{"type", "array"},
+               {"items", {{"type", "string"}}},
+               {"description",
+                "Optional: the records it was made from: a record of this ledger (id or unique "
+                "prefix), or LEDGER:RECORD (full ids) on another; up to 64. One of this ledger "
+                "must be current (neither revoked nor replaced)."}}},
+             {"script",
+              {{"type", "string"},
+               {"description",
+                "Optional: the approved script (kanhe_list_scripts) that produced it."}}},
              {"inputs", inputs_property}},
             json::array({"record_type", "fields"}), writes,
             [this](const Tool& tool, const json& arguments) {
@@ -688,9 +712,52 @@ private:
                 if (arguments.contains("supersedes")) {
                     request.supersedes = session.record_id(text_arg(arguments, "supersedes"));
                 }
+                if (arguments.contains("sources")) {
+                    if (!arguments["sources"].is_array()) {
+                        throw ToolError{"sources must be a list of records"};
+                    }
+                    for (const json& source : arguments["sources"]) {
+                        if (!source.is_string()) {
+                            throw ToolError{"sources must be a list of records"};
+                        }
+                        request.sources.push_back(parse_source(session, source.get<std::string>()));
+                    }
+                }
                 const protocol::Id id = issue_record(session, *key_, request);
                 return json{{"record_id", hex_id(id)},
                             {"state", session.state().record(id)->state}};
+            });
+
+        add("kanhe_list_scripts",
+            "The scripts your organization approved: each one version of a program, by its "
+            "files' hashes, approved by a person in person. Name one as the script of a record "
+            "you issue when that program produced it.",
+            {{"name",
+              {{"type", "string"}, {"description", "Optional: only versions of this script."}}}},
+            json::array(), read_only, [this](const Tool&, const json& arguments) {
+                Session session(args_);
+                const auto name = optional_text(arguments, "name");
+                json scripts = json::array();
+                for (const auto& [key, record] : session.state().records()) {
+                    if (record.record_type != protocol::script_type || record.revoked) {
+                        continue;
+                    }
+                    const auto body = client::registration_of(session, protocol::Id(record.id));
+                    const auto script =
+                        body.metadata
+                            ? protocol::decode_script(*body.metadata)
+                            : Result<protocol::Script>(fail(Errc::malformed, "no metadata"));
+                    if (!script || (name && script->name != *name)) {
+                        continue;
+                    }
+                    scripts.push_back({{"script", hex_id(protocol::Id(record.id))},
+                                       {"name", script->name},
+                                       {"version", script->version},
+                                       {"files", script->files.size()},
+                                       {"deterministic", script->deterministic},
+                                       {"approved_by", session.actor_name(record.registrant)}});
+                }
+                return json{{"scripts", scripts}};
             });
 
         add("kanhe_endorse_record",

@@ -88,7 +88,8 @@ std::string standing_key(protocol::Standing s) {
 TEST_CASE("v0.16 memberships: the six mechanism types, and metadata read and written",
           "[protocol][vectors][v016]") {
     const auto& types = vectors()["mechanism_types"];
-    REQUIRE(protocol::builtin_record_types().size() == types.size());
+    // v0.18 added the script after them.
+    REQUIRE(protocol::builtin_record_types().size() == types.size() + 1);
     for (std::size_t i = 0; i < types.size(); ++i) {
         INFO(text(types[i]["type"]));
         const protocol::RecordType* type = protocol::find_record_type(text(types[i]["type"]));
@@ -105,7 +106,7 @@ TEST_CASE("v0.16 memberships: the six mechanism types, and metadata read and wri
         CHECK(transitions == expected);
         CHECK(type->roles.empty());
     }
-    CHECK(protocol::builtin_record_types().back().name == protocol::membership_type);
+    CHECK(protocol::builtin_record_types()[types.size() - 1].name == protocol::membership_type);
 
     for (const auto& c : vectors()["membership_metadata"]["valid"]) {
         INFO(text(c["name"]));

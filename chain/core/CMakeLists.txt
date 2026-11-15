@@ -26,6 +26,7 @@ add_library(kanhe_core
     src/protocol/keys.cpp
     src/protocol/log.cpp
     src/protocol/memberships.cpp
+    src/protocol/scripts.cpp
     src/protocol/network.cpp
     src/protocol/presence.cpp
     src/protocol/reader.cpp

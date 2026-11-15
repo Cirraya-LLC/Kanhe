@@ -47,6 +47,8 @@ using Json = nlohmann::ordered_json;
 
 /// The verification report as JSON. `ledger_checked` says whether the
 /// verifier compared the ledger id with one learned out of band.
+/// A source's status as the JSON report gives it (v0.18): one word.
+[[nodiscard]] std::string_view source_status_key(protocol::SourceStatus status);
 [[nodiscard]] Json report_json(const protocol::EvidenceReport& report, bool ledger_checked);
 /// The verification report as text for a terminal.
 [[nodiscard]] std::string report_text(const protocol::EvidenceReport& report, bool ledger_checked);

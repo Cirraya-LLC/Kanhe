@@ -225,7 +225,8 @@ Json provenance_json(const protocol::Provenance& p) {
             {"model_version", optional_text(p.model_version)},
             {"input_commitment",
              p.input_commitment ? Json(to_hex(*p.input_commitment)) : Json(nullptr)},
-            {"tools", std::move(tools)}};
+            {"tools", std::move(tools)},
+            {"script", p.script ? Json(hex_id(*p.script)) : Json(nullptr)}};
 }
 
 Json checkpoint_json(const protocol::Checkpoint& c) {
@@ -377,6 +378,124 @@ std::string memberships_text(const protocol::EvidenceReport& r) {
     return out;
 }
 
+Json presence_json(const std::optional<protocol::PresenceCheck>& presence) {
+    if (!presence) {
+        return nullptr;
+    }
+    return {{"method", presence->method == protocol::PresenceMethod::hardware_key ? "hardware-key"
+                                                                                  : "webauthn"},
+            {"user_verified", presence->user_verified},
+            {"origin", presence->origin},
+            {"rp_id", presence->rp_id},
+            {"label", presence->label ? Json(*presence->label) : Json(nullptr)}};
+}
+
+Json scripts_json(const protocol::EvidenceReport& r) {
+    Json out = Json::array();
+    for (const protocol::ScriptReport& s : r.scripts) {
+        Json files = Json::array();
+        for (const protocol::ScriptFile& f : s.script.files) {
+            files.push_back({{"path", f.path}, {"size", f.size}, {"digest", to_hex(f.digest)}});
+        }
+        out.push_back(
+            {{"id", hex_id(s.id)},
+             {"name", s.script.name},
+             {"version", s.script.version},
+             {"files", std::move(files)},
+             {"deterministic", s.script.deterministic},
+             {"runtime", optional_text(s.script.runtime)},
+             {"approved_by", actor_json(s.approved_by)},
+             {"presence", presence_json(s.presence)},
+             {"approved_at", iso_time(s.approved_at)},
+             {"withdrawn_at", s.withdrawn_at ? Json(iso_time(*s.withdrawn_at)) : Json(nullptr)}});
+    }
+    return out;
+}
+
+Json sources_json(const protocol::EvidenceReport& r) {
+    Json out = Json::array();
+    for (const protocol::SourceReport& s : r.sources) {
+        const bool known = s.provided;
+        out.push_back(
+            {{"ledger", hex_id(s.source.ledger)},
+             {"record", hex_id(s.source.record)},
+             {"local", s.local},
+             {"provided", s.provided},
+             {"type", known ? Json(s.type) : Json(nullptr)},
+             {"organization", optional_text(s.organization)},
+             {"trust_node", optional_text(s.trust_node)},
+             {"record_time", iso_time(s.record_time)},
+             {"at_record", known ? Json(source_status_key(s.at_record)) : Json(nullptr)},
+             {"checkpoint_time", known ? Json(iso_time(s.checkpoint_time)) : Json(nullptr)},
+             {"at_checkpoint", known ? Json(source_status_key(s.at_checkpoint)) : Json(nullptr)},
+             {"changed_at", s.changed_at ? Json(iso_time(*s.changed_at)) : Json(nullptr)},
+             {"replaced_by", s.replaced_by ? Json(hex_id(*s.replaced_by)) : Json(nullptr)}});
+    }
+    return out;
+}
+
+/// The scripts its events name and the sources it was made from (v0.18).
+std::string provenance_text(const protocol::EvidenceReport& r) {
+    std::string out;
+    for (const protocol::ScriptReport& s : r.scripts) {
+        const auto& p = s.script;
+        out += std::format(
+            "  Script       {} {} ({} file{}{}{}), approved {}by {} on {}; {}\n", p.name, p.version,
+            p.files.size(), p.files.size() == 1 ? "" : "s",
+            p.deterministic ? ", deterministic" : "", p.runtime ? ", " + *p.runtime : std::string(),
+            s.presence ? "in person " : "", s.approved_by.name, format_time(s.approved_at),
+            s.withdrawn_at ? "WITHDRAWN on " + format_time(*s.withdrawn_at)
+                           : std::string("still approved"));
+    }
+    bool stale = false;
+    for (const protocol::SourceReport& s : r.sources) {
+        if (!s.provided) {
+            out += std::format("  Source       record {} of ledger {}: evidence not provided\n",
+                               short_id(s.source.record), short_id(s.source.ledger));
+            continue;
+        }
+        std::string where = s.local ? std::string("this ledger")
+                                    : std::format("{}'s ledger (id {}){}",
+                                                  s.organization.value_or("another organization"),
+                                                  short_id(s.source.ledger),
+                                                  s.trust_node ? ", per trust node " + *s.trust_node
+                                                               : std::string());
+        std::string now;
+        switch (s.at_checkpoint) {
+        case protocol::SourceStatus::live:
+            now = "live";
+            break;
+        case protocol::SourceStatus::revoked:
+            now = "REVOKED";
+            break;
+        case protocol::SourceStatus::replaced:
+            now = "REPLACED";
+            break;
+        case protocol::SourceStatus::not_yet:
+            now = "not yet registered";
+            break;
+        }
+        if (s.changed_at) {
+            now += " on " + format_time(*s.changed_at);
+        }
+        if (s.replaced_by) {
+            now += " by " + short_id(*s.replaced_by);
+        }
+        out += std::format("  Source       {} (id {}) on {}: {} when this record was registered; "
+                           "{} at {}\n",
+                           s.type, short_id(s.source.record), where,
+                           protocol::source_status_name(s.at_record), now,
+                           format_time(s.checkpoint_time));
+        stale = stale || s.at_checkpoint == protocol::SourceStatus::revoked ||
+                s.at_checkpoint == protocol::SourceStatus::replaced;
+    }
+    if (stale) {
+        out += "  ! A source was revoked or replaced since this record was registered: the record "
+               "stands as it is;\n    whoever relies on it decides what that means.\n";
+    }
+    return out;
+}
+
 Json claim_json(const protocol::EvidenceReport::ClaimReport& c) {
     Json condition = Json::array();
     for (const protocol::ClaimTerm& t : c.claim.condition) {
@@ -399,6 +518,11 @@ Json claim_json(const protocol::EvidenceReport::ClaimReport& c) {
 
 } // namespace
 
+std::string_view source_status_key(protocol::SourceStatus status) {
+    return status == protocol::SourceStatus::not_yet ? "not_yet"
+                                                     : protocol::source_status_name(status);
+}
+
 Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
     Json events = Json::array();
     for (const protocol::RecordEvent& e : r.events) {
@@ -415,16 +539,7 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
              {"actor", actor_json(e.actor)},
              {"authority", std::move(authority)},
              {"provenance", e.provenance ? provenance_json(*e.provenance) : Json(nullptr)},
-             {"presence",
-              e.presence
-                  ? Json{{"method", e.presence->method == protocol::PresenceMethod::hardware_key
-                                        ? "hardware-key"
-                                        : "webauthn"},
-                         {"user_verified", e.presence->user_verified},
-                         {"origin", e.presence->origin},
-                         {"rp_id", e.presence->rp_id},
-                         {"label", e.presence->label ? Json(*e.presence->label) : Json(nullptr)}}
-                  : Json(nullptr)},
+             {"presence", presence_json(e.presence)},
              {"detail", e.detail},
              {"new_version", e.new_version ? Json(hex_id(*e.new_version)) : Json(nullptr)},
              {"existed_by", e.existed_by ? Json(iso_time(*e.existed_by)) : Json(nullptr)}});
@@ -456,6 +571,8 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
         {"witnesses", witnesses_json(r)},
         {"timestamps", timestamps_json(r)},
         {"memberships", memberships_json(r)},
+        {"scripts", scripts_json(r)},
+        {"sources", sources_json(r)},
         {"record",
          {{"id", hex_id(r.record)},
           {"type", r.record_type},
@@ -538,10 +655,20 @@ std::string report_text(const protocol::EvidenceReport& r, bool ledger_checked) 
                              display_value(m.value)));
         }
     }
+    out += provenance_text(r);
     line("\n  History");
     for (const protocol::RecordEvent& event : r.events) {
         line(std::format("    #{:<4} {}  {}", event.index, format_time(event.registered_at),
                          event_line(event)));
+        if (event.provenance && event.provenance->script) {
+            const auto script = std::ranges::find(r.scripts, *event.provenance->script,
+                                                  &protocol::ScriptReport::id);
+            line(script != r.scripts.end()
+                     ? std::format("           by the script {} {}", script->script.name,
+                                   script->script.version)
+                     : std::format("           by the script {}",
+                                   short_id(*event.provenance->script)));
+        }
         if (!event.authority.empty()) {
             std::string chain;
             for (const protocol::ActorSummary& link : event.authority) {

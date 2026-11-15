@@ -62,9 +62,10 @@ TEST_CASE("v0.14 claims: the type, and metadata read, written, and worded",
     CHECK(type->initial_state == text(vectors()["claim_type"]["initial"]));
     CHECK(type->transitions.empty());
     CHECK(type->roles.empty());
-    // v0.16 added the membership after them.
-    REQUIRE(protocol::builtin_record_types().size() == vectors()["mechanism_types"].size() + 1);
-    CHECK(protocol::builtin_record_types().back().name == protocol::membership_type);
+    // v0.16 added the membership after them, and v0.18 the script.
+    REQUIRE(protocol::builtin_record_types().size() == vectors()["mechanism_types"].size() + 2);
+    CHECK(protocol::builtin_record_types()[vectors()["mechanism_types"].size()].name ==
+          protocol::membership_type);
 
     for (const auto& c : vectors()["claim_metadata"]["valid"]) {
         INFO(text(c["name"]));
