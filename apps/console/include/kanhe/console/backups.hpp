@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -28,7 +29,19 @@
 /// are, not the protocol's.
 namespace kanhe::console {
 
-inline constexpr std::string_view sealed_backup_extension = ".cexbackup";
+inline constexpr std::string_view sealed_backup_extension = ".kanhebackup";
+/// The extension before the rename: such backups are still listed, kept in
+/// turn, and restored.
+inline constexpr std::string_view earlier_backup_extension = ".cexbackup";
+/// The sealed-backup extension `name` ends with, if any.
+[[nodiscard]] constexpr std::optional<std::string_view> backup_extension(std::string_view name) {
+    for (const std::string_view e : {sealed_backup_extension, earlier_backup_extension}) {
+        if (name.ends_with(e)) {
+            return e;
+        }
+    }
+    return std::nullopt;
+}
 /// A backup a day, while the console is unlocked and a folder is set.
 inline constexpr protocol::Timestamp backup_interval = 24 * 60 * 60'000;
 /// The newest this many are kept, and the newest of each of this many

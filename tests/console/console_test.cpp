@@ -2839,6 +2839,34 @@ TEST_CASE("a relay carries sealed requests and answers between witnessed ledgers
     REQUIRE(opened);
     CHECK(opened->path == "/v1/genesis");
     CHECK(opened->token == "kht_peer-token");
+    // A relayed request becomes an HTTP request again: what could not be
+    // one as it is, or could be more than one, is no relayed request.
+    const auto opens = [&](std::string method, std::string path, std::string type,
+                           std::string token) {
+        const kanhe::client::RelayRequest odd{std::move(method), std::move(path),
+                                              std::move(type),   {},
+                                              std::move(token),  request.answer_key};
+        const kanhe::client::RelayEnvelope sealed{
+            b,
+            a,
+            id,
+            *kanhe::client::seal_relay_request(bob_relay_key->public_key(), b, a, id, odd),
+            std::nullopt,
+            t + 60'000};
+        return kanhe::client::open_relay_request(*bob_relay_key, sealed).has_value();
+    };
+    CHECK(opens("POST", "/v1/access/requests?to=1", "application/cbor", "kht_peer-token"));
+    CHECK(opens("DELETE", "/v1/relay/messages/00", "", ""));
+    CHECK_FALSE(opens("POST /console/api/unlock HTTP/1.1\r\nHost: 127.0.0.1:8400\r\n\r\nGET",
+                      "/v1/genesis", "", ""));
+    CHECK_FALSE(opens("get", "/v1/genesis", "", ""));
+    CHECK_FALSE(opens("CONNECT", "/v1/genesis", "", ""));
+    CHECK_FALSE(opens("GET", "/console/api/session", "", ""));
+    CHECK_FALSE(opens("GET", "/v1/genesis HTTP/1.1\r\nHost: x", "", ""));
+    CHECK_FALSE(opens("GET", "/v1/gen esis", "", ""));
+    CHECK_FALSE(opens("GET", "/v1/genesis", "text/plain\r\nOrigin: http://127.0.0.1", ""));
+    CHECK_FALSE(opens("GET", "/v1/genesis", "", "kht_x\r\nOrigin: http://127.0.0.1"));
+    CHECK_FALSE(opens("GET", "/v1/genesis", "", "kht x"));
 
     // Alice waits for the answer: a long poll that the answer ends.
     REQUIRE_FALSE(call("GET", mailbox_a + "&wait=20", {}, auth(alice_log, a, t), t));
@@ -3378,7 +3406,7 @@ TEST_CASE("backups: sealed for the recovery code, written once a day, restored w
         files.push_back(e.path());
     }
     REQUIRE(files.size() == 1);
-    CHECK(files[0].extension() == ".cexbackup");
+    CHECK(files[0].extension() == ".kanhebackup");
     const auto sealed = kanhe::client::read_file(files[0]);
     CHECK(console::sealed_backup_info(sealed).ledger == served.session.state().ledger_id());
     // Home shows it; a member may not back up.
@@ -3424,10 +3452,12 @@ TEST_CASE("backups: sealed for the recovery code, written once a day, restored w
         const auto date =
             std::chrono::sys_days{std::chrono::year{2026} / 9 / 1} + std::chrono::days{day};
         const std::chrono::year_month_day ymd{date};
-        names.push_back(prefix + std::format("{:04}{:02}{:02}-010000.cexbackup",
-                                             static_cast<int>(ymd.year()),
-                                             static_cast<unsigned>(ymd.month()),
-                                             static_cast<unsigned>(ymd.day())));
+        // Made before the rename, the older ones have the old extension.
+        names.push_back(prefix +
+                        std::format("{:04}{:02}{:02}-010000", static_cast<int>(ymd.year()),
+                                    static_cast<unsigned>(ymd.month()),
+                                    static_cast<unsigned>(ymd.day())) +
+                        (day < 20 ? ".cexbackup" : ".kanhebackup"));
         put(many.path / names.back(), {1, 2, 3});
     }
     put(many.path / "someone-elses.cexbackup", {1});

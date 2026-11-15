@@ -179,8 +179,8 @@ const slotKinds = () =>
     assert.equal(JSON.parse(run("kanhe-console", "settings", "show", "--json")).language, null);
     // A backup now, sealed in the folder; the recovery code restores it elsewhere.
     await page.getByRole("button", { name: "Back up now" }).click();
-    await page.getByText(/^Last backup: .*\.cexbackup\)$/).first().waitFor();
-    const sealed = fs.readdirSync(suggested).filter((f) => f.endsWith(".cexbackup"));
+    await page.getByText(/^Last backup: .*\.kanhebackup\)$/).first().waitFor();
+    const sealed = fs.readdirSync(suggested).filter((f) => f.endsWith(".kanhebackup"));
     assert.equal(sealed.length >= 1, true, "a sealed backup in the folder");
     fs.writeFileSync(path.join(work, "code.txt"), `${code}\n`);
     const restored = JSON.parse(run("kanhe-console", "restore", path.join(suggested, sealed[0]), "--ledger",

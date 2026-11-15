@@ -268,9 +268,9 @@ std::vector<std::filesystem::path> prune_backups(const std::filesystem::path& fo
     for (auto it = std::filesystem::directory_iterator(folder, ec);
          !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
         const std::string name = it->path().filename().string();
-        if (it->is_regular_file() && name.starts_with(prefix) &&
-            name.ends_with(sealed_backup_extension) &&
-            name.size() == prefix.size() + 15 + sealed_backup_extension.size()) {
+        const auto extension = backup_extension(name);
+        if (it->is_regular_file() && name.starts_with(prefix) && extension &&
+            name.size() == prefix.size() + 15 + extension->size()) {
             found.emplace_back(name, it->path());
         }
     }

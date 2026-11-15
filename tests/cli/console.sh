@@ -423,7 +423,7 @@ expect_exit 1 kanhe-console backup now --ledger "$SCRIPTED" --unlock-file unlock
 grep -q "no backup folder" out.txt || fail "a backup needs a folder"
 run kanhe-console backup now --ledger "$SCRIPTED" --unlock-file unlock.txt --folder backups --json > backup.json
 SEALED=$(json 'd["file"]' < backup.json)
-case "$SEALED" in */kanhe-*.cexbackup) ;; *) fail "a sealed backup's name" ;; esac
+case "$SEALED" in */kanhe-*.kanhebackup) ;; *) fail "a sealed backup's name" ;; esac
 [ "$(run kanhe-console backup list --ledger "$SCRIPTED" --folder backups --json | json 'len(d)')" = 1 ] ||
     fail "console backup list"
 run kanhe-console activity --ledger "$SCRIPTED" --json | json 'd[0]["action"]' | grep -qx "backups.write" ||

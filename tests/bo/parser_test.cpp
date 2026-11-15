@@ -395,6 +395,12 @@ TEST_CASE("places, limits, and the empty source", "[bo][parser]") {
         chain += "  otherwise if b reject \"b\"\n";
     }
     CHECK(codes(parse_text(chain)) == "parse.too-deep");
+    // Words after their argument wrap it, one more level each.
+    std::string tails = "can go\n  requires 1 day";
+    for (std::size_t i = 0; i < 20'000; ++i) {
+        tails += " before due";
+    }
+    CHECK(codes(parse_text(tails + "\n")) == "parse.too-deep");
     // Many problems: the first 100, and a note.
     std::string many;
     for (int i = 0; i < 150; ++i) {

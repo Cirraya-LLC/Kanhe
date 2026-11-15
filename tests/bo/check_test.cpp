@@ -374,6 +374,13 @@ TEST_CASE("fields: types, constants, parties, and the vocabulary's meanings", "[
           "check.precision");
     CHECK(check_codes("use commerce\nuse services\ncontract C\nparties we\nservice S\n"
                       "  traffic monthly 2TB, overage per item HKD 1\n") == "check.mixed-units");
+    // One label to a price: a run of them once recursed a word at a time,
+    // copying the rest each time (a hostile source's memory, or its stack).
+    std::string labels = "use commerce\ncontract C\nparties we\nthing T\n  price";
+    for (int i = 0; i < 2000; ++i) {
+        labels += " price";
+    }
+    CHECK(check_codes(labels + " HKD 1\n") == "check.phrase");
     // Amounts need a unit; parts take the amount's.
     CHECK(check_codes("use finance\ncontract C\nparties we\nasset A\n  amount\n") ==
           "check.field-needs-type");

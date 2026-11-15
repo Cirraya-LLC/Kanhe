@@ -637,8 +637,15 @@ std::optional<Expr> Parser::operand() {
         fail_expected("parse.expected-value");
         return std::nullopt;
     }
-    // Words after their argument: 7 days `before due`, 各部分 `總和`.
+    // Words after their argument: 7 days `before due`, 各部分 `總和`. Each
+    // wraps what came before, so each counts toward the depth: the checker
+    // and the tree's destructor recurse through them.
+    std::size_t tails = 0;
     while (peek().kind == TokenKind::word && peek().piece == Piece::tail) {
+        if (expr_depth_ + ++tails > max_parse_depth) {
+            fail(peek().span, "parse.too-deep", {{"limit", std::to_string(max_parse_depth)}});
+            return std::nullopt;
+        }
         const Token& tail = take();
         Expr applied;
         applied.kind = ExprKind::apply;

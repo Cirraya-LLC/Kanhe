@@ -730,6 +730,11 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
             web->handle(r, std::move(respond));
         };
         options.extensions.push_back(parts->served->extension(dir));
+        // The console's witness of its parties' ledgers, as the person
+        // console has it.
+        options.witness = [web = parts->web](ByteView request) {
+            return web->witness_cosign(request);
+        };
         serve_credentials(options, *parts->keys, parts->web);
     };
     defaults.after_open = [parts](node::LedgerApi& api) {
@@ -747,6 +752,9 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
                 api->propose_call(std::move(proposal), std::move(respond));
             },
             [api = &api] { return api->registrar_calls(); });
+        web.set_cosignatures([api = &api](Bytes body, auto respond) {
+            api->add_cosignature(std::move(body), std::move(respond));
+        });
         web.set_checkpointer(
             [api = &api](auto respond) { api->checkpoint_now(std::move(respond)); });
         web.set_node_api([api = &api](node::http::Request request, auto respond) {
@@ -759,6 +767,9 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
                 api->submit_statement(std::move(body), std::move(respond));
             }
         });
+        // Its background work, as the person console's: the parties' calls,
+        // claims answered by its machine, backups, its relay.
+        web.start_polling();
     };
     // Beyond this computer only over TLS: served here, or by an https
     // proxy in front (--public-url https://...).
@@ -1470,8 +1481,7 @@ int cmd_console_backup_list(const Args& args) {
     std::error_code ec;
     for (auto it = std::filesystem::directory_iterator(*folder, ec);
          !ec && it != std::filesystem::directory_iterator(); it.increment(ec)) {
-        if (it->is_regular_file() &&
-            it->path().filename().string().ends_with(console::sealed_backup_extension)) {
+        if (it->is_regular_file() && console::backup_extension(it->path().filename().string())) {
             files.push_back(it->path());
         }
     }

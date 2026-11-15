@@ -67,7 +67,8 @@ std::optional<std::string> attempt(F&& f) {
 } // namespace
 
 std::string Console::api_url() const {
-    const std::lock_guard lock(api_mutex_);
+    // origins_ is written under mutex_ (set_origins), as the server starts.
+    const std::lock_guard lock(mutex_);
     return origins_.empty() ? std::string() : origins_.front().text();
 }
 

@@ -117,9 +117,9 @@ vectors (`testvectors/`), the [examples](examples/), the tests, and the tools. B
   - Delegated scope can only narrow.
   - Human actions carry proof of presence. An action without it is attributed to a machine.
 - **Crypto agility.** These algorithm families can coexist in one ledger, chosen per signature:
-  - international algorithms (Ed25519, ECDSA P-256)
-  - Chinese national standards (SM2, SM3, SM4)
-  - post-quantum algorithms (ML-DSA, SLH-DSA)
+  - international algorithms (Ed25519 and ECDSA P-256 signatures, SHA-2 hashes)
+  - Chinese national standards (SM2 signatures, SM3 hashes)
+  - post-quantum signatures (ML-DSA)
 - **Built on open standards.** Deterministic CBOR (RFC 8949), COSE signatures (RFC 9052), Merkle
   trees and proofs as in RFC 9162, C2SP's witness protocols (tlog-witness, tlog-cosignature) for
   [open witness networks](#open-witness-networks), RFC 3161 time stamps, WebAuthn passkeys,

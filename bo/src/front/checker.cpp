@@ -4400,8 +4400,14 @@ void Checker::phrase_value(const ast::Expr& e, m::Expr& out) {
         out.type = unit_price(ops[2].literal.unit, unit_info(ops[1].concept_entry)->dimension);
         return;
     }
-    // overage per GB HKD 0.10, setup fee HKD 500: a labelled price.
+    // overage per GB HKD 0.10, setup fee HKD 500: a labelled price. One
+    // label: what follows it is read again as a phrase, so a run of labels
+    // would recurse once a word, copying the rest each time.
     if (is_label(head)) {
+        if (is_label(ops[1])) {
+            phrase_error();
+            return;
+        }
         out.operands.push_back(plain(head));
         ast::Expr rest;
         if (ops.size() == 2) {
