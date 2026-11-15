@@ -317,17 +317,35 @@ async function verdict(page) {
     await page.route("https://college.example/**", answerCollege);
     await page.setInputFiles("#bundle-file", path.join(dir, "credential.jwt"));
     v = await verdict(page);
-    assert.equal(v.kind, "ok", v.title + ": " + v.detail);
-    assert.equal(v.title, "Valid credential");
-    assert.match(v.detail, /Cirraya Test Factory/);
+    // Only the site's word for the ledger: amber, with the site, and the
+    // ledger's own name for itself marked as not confirmed.
+    assert.equal(v.kind, "warn", v.title + ": " + v.detail);
+    assert.equal(v.title, "Valid, from college.example");
+    assert.match(v.detail, /calls itself "Cirraya Test Factory"; that name is not confirmed/);
     const credentialSummary = await page.textContent("#summary");
+    assert.match(credentialSummary, /Issuer's sitecollege\.example/);
     assert.match(credentialSummary, /Inspection certificate/);
     assert.match(credentialSummary, /Credentials, a device of the issuer's/);
     assert.match(credentialSummary, /not revoked, as the ledger says/);
     assert.match(credentialSummary, /names this key and this ledger/);
     assert.equal(await page.locator("#fields script").count(), 0);
+    // With the ledger ID the issuer gave: valid, from the issuer by name.
+    await page.fill("#ledger", ledgerId);
+    await page.dispatchEvent("#ledger", "change");
+    await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "Valid credential");
+    v = await verdict(page);
+    assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+    assert.match(v.detail, /from "Cirraya Test Factory"/);
     await page.selectOption("#language", "zh-Hant");
     await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u6191\u8b49\u6709\u6548");
+    await page.close();
+    // A link naming another record refuses the credential.
+    page = await open("file://" + pagePath + "#r=" + "0".repeat(64));
+    await page.route("https://college.example/**", answerCollege);
+    await page.setInputFiles("#bundle-file", path.join(dir, "credential.jwt"));
+    v = await verdict(page);
+    assert.equal(v.kind, "bad", v.title + ": " + v.detail);
+    assert.match(v.detail, /a different record/);
     await page.close();
     // A credential whose evidence cannot be fetched says so.
     page = await open("file://" + pagePath);

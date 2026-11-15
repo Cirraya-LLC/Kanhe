@@ -35,7 +35,9 @@ struct CredentialEntry {
     std::uint64_t index = 0;
 };
 
-/// Every credential entry, in the log order of their endorsements.
+/// Every credential entry, in the log order of their endorsements: those by
+/// credential devices only (see `credential_device`). Any endorser may write
+/// a role that reads as one; only a credential key's makes it an entry.
 [[nodiscard]] std::vector<CredentialEntry> credential_entries(const protocol::LedgerState& state);
 
 /// The entry `actor` gave `record`, if it endorsed it as a credential.
@@ -59,9 +61,15 @@ credential_entry_of(std::span<const CredentialEntry> entries, const protocol::Id
 [[nodiscard]] Bytes status_bits(const protocol::LedgerState& state,
                                 std::span<const CredentialEntry> entries, std::uint64_t list);
 
-/// Whether `actor` is a credential key: an unrevoked device with an ES256
-/// key whose delegations (at least one, unrevoked) cover record endorsements
-/// and nothing else.
+/// Whether `actor` is or was a credential key (spec/credentials.md section
+/// 2): a device with an ES256 key, every delegation ever granted to it (at
+/// least one) covering record endorsements and nothing else. Revoked or not:
+/// the credentials it issued keep their entries (section 3).
+[[nodiscard]] bool credential_device(const protocol::LedgerState& state,
+                                     const protocol::ActorState& actor);
+
+/// Whether `actor` is a credential key now, to issue with: an unrevoked
+/// credential device with at least one unrevoked delegation.
 [[nodiscard]] bool is_credential_key(const protocol::LedgerState& state,
                                      const protocol::ActorState& actor);
 

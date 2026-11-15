@@ -59,6 +59,10 @@ std::vector<CredentialEntry> credential_entries(const protocol::LedgerState& sta
     for (const auto& [key, record] : state.records()) {
         (void)key;
         for (const protocol::Endorsement& e : record.endorsements) {
+            const protocol::ActorState* endorser = state.actor(e.actor.id());
+            if (endorser == nullptr || !credential_device(state, *endorser)) {
+                continue;
+            }
             if (const auto entry = verifier::parse_credential_role(e.role)) {
                 out.push_back({.record = record.id.id(),
                                .actor = e.actor.id(),
@@ -149,15 +153,15 @@ Bytes status_bits(const protocol::LedgerState& state, std::span<const Credential
     return bits;
 }
 
-bool is_credential_key(const protocol::LedgerState& state, const protocol::ActorState& actor) {
-    if (actor.revoked || actor.kind != protocol::ActorKind::device ||
+bool credential_device(const protocol::LedgerState& state, const protocol::ActorState& actor) {
+    if (actor.kind != protocol::ActorKind::device ||
         actor.key.algorithm != crypto::SigAlg::esp256) {
         return false;
     }
     bool any = false;
     for (const auto& [key, d] : state.delegations()) {
         (void)key;
-        if (d.grantee != actor.id.id() || d.revoked) {
+        if (d.grantee != actor.id.id()) {
             continue;
         }
         if (d.scope.statement_types !=
@@ -167,6 +171,21 @@ bool is_credential_key(const protocol::LedgerState& state, const protocol::Actor
         any = true;
     }
     return any;
+}
+
+bool is_credential_key(const protocol::LedgerState& state, const protocol::ActorState& actor) {
+    // A key that ever held more than endorsements is never one: what it
+    // issued would not count as credentials (credential_entries).
+    if (actor.revoked || !credential_device(state, actor)) {
+        return false;
+    }
+    for (const auto& [key, d] : state.delegations()) {
+        (void)key;
+        if (d.grantee == actor.id.id() && !d.revoked) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Result<std::vector<crypto::PublicKey>> credential_keys(
@@ -232,6 +251,11 @@ http::Response credential_response(
     if (actor == nullptr || actor->revoked) {
         return open_error(503, "unavailable",
                           "the server's credential key is not an active actor of this ledger");
+    }
+    if (!credential_device(state, *actor)) {
+        return open_error(503, "unavailable",
+                          "the server's credential key is not a credential key of this ledger: a "
+                          "device whose delegations cover record endorsements and nothing else");
     }
     const std::vector<CredentialEntry> entries = credential_entries(state);
     if (path == "/.well-known/did.json" || path == "/did.json") {

@@ -443,6 +443,71 @@ TEST_CASE("a credential key that rotates keeps its credentials verifying", "[cre
     CHECK(methods[0]["id"].get<std::string>() < methods[1]["id"].get<std::string>());
 }
 
+TEST_CASE("only a credential key's endorsements are entries, keys, and bits", "[credentials]") {
+    College c;
+    const verifier::StatusEntry entry{.list = 1, .index = 7};
+    c.endorse(entry, c.device);
+    // A member of staff, with an ES256 key and the right to endorse, and a
+    // device that may also register records: neither is a credential key,
+    // whatever role it writes.
+    const KeyPair staff = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    const protocol::Id staff_id =
+        c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt,
+                                        protocol::ActorRegisterBody{protocol::ActorKind::person,
+                                                                    "Staff", staff.public_key(),
+                                                                    std::nullopt, std::nullopt}));
+    const protocol::Id staff_may = c.w.grant(c.w.org(), c.w.org_id(), std::nullopt, staff_id,
+                                             scope({StatementType::record_endorse}));
+    const KeyPair broad = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    const protocol::Id broad_id =
+        c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt,
+                                        protocol::ActorRegisterBody{protocol::ActorKind::device,
+                                                                    "Scanner", broad.public_key(),
+                                                                    std::nullopt, std::nullopt}));
+    const protocol::Id broad_may =
+        c.w.grant(c.w.org(), c.w.org_id(), std::nullopt, broad_id,
+                  scope({StatementType::record_register, StatementType::record_endorse}));
+    // Another record, endorsed with the diploma's own entry, then revoked:
+    // it must not set the diploma's bit.
+    protocol::RecordRegisterBody other{
+        "example.org.diploma/1",
+        Bytes(c.fields.root.bytes().begin(), c.fields.root.bytes().end()),
+        c.fields.leaves.size(),
+        {},
+        V::map({{V::text("year"), V::integer(2025)}}),
+        std::nullopt,
+        {}};
+    const protocol::Id other_id =
+        c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt, other));
+    c.w.ok(staff,
+           c.w.statement(staff_id, staff_may,
+                         protocol::RecordEndorseBody{other_id, verifier::credential_role(entry)}));
+    c.w.ok(broad, c.w.statement(broad_id, broad_may,
+                                protocol::RecordEndorseBody{c.record, "credential/1/9"}));
+    c.w.ok(c.w.org(),
+           c.w.statement(c.w.org_id(), std::nullopt, protocol::RecordRevokeBody{other_id, "test"}));
+
+    const auto& state = c.w.ledger().state();
+    CHECK(node::credential_device(state, *state.actor(c.device_id)));
+    CHECK_FALSE(node::credential_device(state, *state.actor(staff_id)));
+    CHECK_FALSE(node::credential_device(state, *state.actor(broad_id)));
+    CHECK_FALSE(node::is_credential_key(state, *state.actor(broad_id)));
+    const auto entries = c.entries();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].actor == c.device_id);
+    CHECK_FALSE(verifier::status_bit(node::status_bits(state, entries, 1), 7));
+    const auto keys = node::credential_keys(
+        state, entries, std::nullopt,
+        [&](std::uint64_t index) -> kanhe::Result<protocol::SignedStatement> {
+            const auto entry_bytes = c.w.ledger().entry(index);
+            const auto log_entry = protocol::decode_log_entry(*entry_bytes);
+            return protocol::parse_statement(provider(), log_entry->statement, c.w.hash());
+        });
+    REQUIRE(keys);
+    REQUIRE(keys->size() == 1);
+    CHECK(keys->front() == c.device.public_key());
+}
+
 TEST_CASE("what cannot be a claim is named", "[credentials]") {
     College c;
     const Bytes bundle = c.evidence();
