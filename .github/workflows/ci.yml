@@ -147,7 +147,13 @@ jobs:
     needs: changes
     if: needs.changes.outputs.chain == 'true' || needs.changes.outputs.apps == 'true'
     runs-on: ubuntu-latest
-    container: gcc:16-trixie
+    # ThreadSanitizer needs a memory layout that the hosts' address
+    # randomization can break (Ubuntu 26.04 runners); it then runs itself
+    # again without randomization, a call Docker's default seccomp profile
+    # refuses inside the container.
+    container:
+      image: gcc:16-trixie
+      options: --security-opt seccomp=unconfined
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v7
