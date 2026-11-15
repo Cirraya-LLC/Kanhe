@@ -767,9 +767,6 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
                 api->submit_statement(std::move(body), std::move(respond));
             }
         });
-        // Its background work, as the person console's: the parties' calls,
-        // claims answered by its machine, backups, its relay.
-        web.start_polling();
     };
     // Beyond this computer only over TLS: served here, or by an https
     // proxy in front (--public-url https://...).

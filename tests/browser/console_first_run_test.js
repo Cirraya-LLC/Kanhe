@@ -164,10 +164,20 @@ const slotKinds = () =>
     await page.getByRole("heading", { name: "Settings" }).waitFor();
     await page.getByText(/^[0-9a-f]{64}$/).waitFor();
     assert.equal(await page.getByLabel("Backup folder").inputValue(), suggested);
+    // What the ledger's settings say, once they say `want`: "Saved." from an
+    // earlier save may still show when the next is being saved.
+    const languageBecomes = async (want) => {
+      for (let i = 0; i < 100; ++i) {
+        const language = JSON.parse(run("kanhe-console", "settings", "show", "--json")).language;
+        if (language === want) return language;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return JSON.parse(run("kanhe-console", "settings", "show", "--json")).language;
+    };
     await page.getByLabel("Language for new browsers").selectOption("zh-Hans-CN");
     await page.getByRole("button", { name: "Save" }).click();
     await page.getByText("Saved.").waitFor();
-    assert.equal(JSON.parse(run("kanhe-console", "settings", "show", "--json")).language, "zh-Hans-CN");
+    assert.equal(await languageBecomes("zh-Hans-CN"), "zh-Hans-CN");
     const fresh = await browser.newContext({ locale: "en-GB" });
     const freshPage = await fresh.newPage();
     await freshPage.goto(base);
@@ -175,8 +185,7 @@ const slotKinds = () =>
     await fresh.close();
     await page.getByLabel("Language for new browsers").selectOption("");
     await page.getByRole("button", { name: "Save" }).click();
-    await page.getByText("Saved.").waitFor();
-    assert.equal(JSON.parse(run("kanhe-console", "settings", "show", "--json")).language, null);
+    assert.equal(await languageBecomes(null), null);
     // A backup now, sealed in the folder; the recovery code restores it elsewhere.
     await page.getByRole("button", { name: "Back up now" }).click();
     await page.getByText(/^Last backup: .*\.kanhebackup\)$/).first().waitFor();
