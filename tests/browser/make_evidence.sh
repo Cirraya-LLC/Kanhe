@@ -75,6 +75,22 @@ run claim issue "$PAYSLIP" --as root.key --if 'monthly_salary > HKD 30000.00' \
 run checkpoint create --log-key log.key > /dev/null
 run export "$(cat claim-id)" --log-key log.key --out claim.cbor > /dev/null
 
+# Sources (v0.18): a report made from a book here, revoked since, and a title
+# on a registry's ledger, its evidence kept as the source's proof.
+for k in reg-root reg-log; do run key generate --out "$k.key" > /dev/null; done
+REGISTRY="$(run init --org "Cirraya Land Registry" --root-key reg-root.key --log-key reg-log.key \
+    --ledger "$DIR/registry" | id_from)"
+TITLE="$(run record issue --ledger "$DIR/registry" --as reg-root.key --type example.org.land-title/1 \
+    --field lot=456 | id_from)"
+run checkpoint create --ledger "$DIR/registry" --log-key reg-log.key > /dev/null
+run export "$TITLE" --ledger "$DIR/registry" --log-key reg-log.key --out title.cbor > /dev/null
+BOOK="$(run record issue --as root.key --type example.org.loan-book/1 --field total=1000 | id_from)"
+run record issue --as root.key --type example.org.report/1 --field score=710 --source "$BOOK" \
+    --source "$REGISTRY:$TITLE" --source-proof title.cbor | id_from > sourced-id
+run record revoke "$BOOK" --as root.key --reason restated > /dev/null
+run checkpoint create --log-key log.key > /dev/null
+run export "$(cat sourced-id)" --log-key log.key --out sourced.cbor > /dev/null
+
 # Three organizations, each with its own ledger.
 for k in core-root core-log sup-root sup-log bank-root bank-log; do run key generate --out "$k.key" > /dev/null; done
 run init --org "Cirraya Core Enterprise" --root-key core-root.key --log-key core-log.key --ledger "$DIR/core" \

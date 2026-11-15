@@ -24,7 +24,7 @@ const recordId = text("record-id");
 function serve() {
   const files = { "/kanhe-verify.html": pagePath, "/bundle.cbor": path.join(dir, "bundle.cbor"),
                   "/contract.cbor": path.join(dir, "contract.cbor"), "/part.cbor": path.join(dir, "part.cbor"),
-                  "/claim.cbor": path.join(dir, "claim.cbor") };
+                  "/claim.cbor": path.join(dir, "claim.cbor"), "/sourced.cbor": path.join(dir, "sourced.cbor") };
   const server = http.createServer((req, res) => {
     const file = files[req.url];
     if (!file) { res.writeHead(404).end(); return; }
@@ -282,6 +282,23 @@ async function verdict(page) {
     await page.selectOption("#language", "en");
     await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "Confirmed");
     assert.match((await verdict(page)).detail, /confirms: monthly_salary is above HKD 30,000\.00 and status is one of "staff", "contractor"/);
+    await page.close();
+
+    // 11b. Sources (v0.18): what the record was made from, where each stood
+    // then and now, and the warning for the one revoked since.
+    page = await open(base + "/kanhe-verify.html#l=" + ledgerId + "&r=" + text("sourced-id") + "&b=" +
+      encodeURIComponent(base + "/sourced.cbor"));
+    v = await verdict(page);
+    assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+    let sourced = await page.textContent("#result");
+    assert.match(sourced, /example\.org\.loan-book\/1 on this ledger: live when this record was made; revoked as of/);
+    assert.match(sourced, /example\.org\.land-title\/1 on Cirraya Land Registry's ledger: live when this record was made; live as of/);
+    assert.match(sourced, /A source was revoked or replaced since this record was made/);
+    await page.selectOption("#language", "zh-Hant");
+    await page.waitForFunction(() => document.getElementById("verdict-title").textContent !== "Verified");
+    sourced = await page.textContent("#result");
+    assert.match(sourced, /\u300cCirraya Land Registry\u300d\u5e33\u672c\u4e0a\u985e\u578b\u70ba example\.org\.land-title\/1 \u7684\u8a18\u9304/);
+    assert.match(sourced, /\u5176\u5f8c\u6709\u4f9d\u64da\u7684\u8a18\u9304\u88ab\u64a4\u92b7\u6216\u53d6\u4ee3/);
     await page.close();
 
     // 12. A W3C credential chosen as a file (spec/credentials.md): the page
