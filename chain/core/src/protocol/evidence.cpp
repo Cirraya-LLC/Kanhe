@@ -510,10 +510,8 @@ Result<EvidenceReport> count_witnesses(const crypto::Provider& provider, const L
         if (!cosignature || cosignature->checkpoint != checkpoint.checkpoint) {
             return verification_failure("a cosignature does not cover the bundle's checkpoint");
         }
-        if (std::ranges::contains(counted, cosignature->kid)) {
-            continue;
-        }
-        counted.push_back(cosignature->kid);
+        // Each one by a trusted witness verifies, a repeated one too (step
+        // 6); only the counting is by witness.
         bool trusted = false;
         for (const crypto::PublicKey& witness : options.trusted_witnesses) {
             auto kid = key_id(provider, state.hash(), witness);
@@ -525,6 +523,10 @@ Result<EvidenceReport> count_witnesses(const crypto::Provider& provider, const L
                 break;
             }
         }
+        if (std::ranges::contains(counted, cosignature->kid)) {
+            continue;
+        }
+        counted.push_back(cosignature->kid);
         ++(trusted ? report.trusted_cosignatures : report.untrusted_cosignatures);
     }
     return report;
@@ -584,17 +586,35 @@ Result<EvidenceReport> check_anchors(const crypto::Provider& provider, const Led
                 return verification_failure("a network cosignature is malformed");
             }
             const Bytes id(cosignature.bytes.begin(), cosignature.bytes.begin() + 4);
-            const auto key = std::ranges::find_if(
-                options.trusted_network_witnesses, [&](const network::VerifierKey& k) {
-                    return k.name == cosignature.name && std::ranges::equal(k.id, id);
-                });
-            const bool trusted = key != options.trusted_network_witnesses.end();
-            if (trusted && !network::verify_cosignature(provider, *key, origin, at.tree_size,
-                                                        at.root, cosignature)) {
+            // Two trusted keys could share a name and a 4-byte key ID: the
+            // cosignature is that of the first one it verifies with, and a
+            // trusted witness is told apart by its whole verifier key.
+            bool trusted = false;
+            const network::VerifierKey* verified = nullptr;
+            for (const network::VerifierKey& k : options.trusted_network_witnesses) {
+                if (k.name != cosignature.name || !std::ranges::equal(k.id, id)) {
+                    continue;
+                }
+                trusted = true;
+                if (network::verify_cosignature(provider, k, origin, at.tree_size, at.root,
+                                                cosignature)) {
+                    verified = &k;
+                    break;
+                }
+            }
+            if (trusted && verified == nullptr) {
                 return verification_failure(
                     "a trusted network witness's cosignature does not verify");
             }
-            (trusted ? trusted_network : untrusted_network).emplace(cosignature.name, id);
+            if (verified != nullptr) {
+                Bytes identity = id;
+                identity.push_back(verified->type);
+                identity.insert(identity.end(), verified->key.bytes.begin(),
+                                verified->key.bytes.end());
+                trusted_network.emplace(cosignature.name, std::move(identity));
+            } else {
+                untrusted_network.emplace(cosignature.name, id);
+            }
             report.network_cosignatures.push_back(NetworkCosignatureCheck{
                 .witness = cosignature.name,
                 .size = at.tree_size,

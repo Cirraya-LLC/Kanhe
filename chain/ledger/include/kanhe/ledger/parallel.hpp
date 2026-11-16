@@ -18,8 +18,10 @@ namespace kanhe::ledger {
 /// a process-wide pool of worker threads and the calling thread, and returns
 /// when all are done. Counts below `serial_below` run on the calling thread
 /// alone (the default suits cheap pieces; heavy ones, such as contract runs,
-/// are worth spreading from 2). `work` must not throw. Calls from several
-/// threads at once are fine; nested calls run inline.
+/// are worth spreading from 2). If `work` throws, the ranges not yet begun
+/// are skipped, and the first exception is thrown here once every range
+/// begun has ended. Calls from several threads at once are fine; nested
+/// calls run inline.
 void parallel_for(std::size_t count,
                   const std::function<void(std::size_t begin, std::size_t end)>& work,
                   std::size_t serial_below = 8);

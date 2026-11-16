@@ -259,6 +259,15 @@ TEST_CASE("evidence verification catches tampering and omissions", "[evidence]")
         CHECK(twice_report->trusted_cosignatures == 1);
         CHECK(twice_report->untrusted_cosignatures == 0);
     }
+    SECTION("a trusted witness's repeated cosignature verifies too") {
+        // The same witness again, its signature broken: counting once does
+        // not mean checking once (step 6).
+        auto bad = good;
+        Bytes broken = good.cosignatures.front();
+        broken.back() = static_cast<std::uint8_t>(broken.back() ^ 1U);
+        bad.cosignatures.push_back(broken);
+        CHECK(verify_error(bad, options) == Errc::verification_failed);
+    }
     SECTION("a checkpoint that does not match the receipts") {
         // A newer checkpoint than the one the receipts were issued against.
         s.w.ok(s.w.org(), s.w.statement(s.w.org_id(), std::nullopt, s.w.record_body("other/1")));

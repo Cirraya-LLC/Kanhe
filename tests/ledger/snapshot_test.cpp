@@ -142,6 +142,32 @@ TEST_CASE("a snapshot that disagrees with its log is caught", "[ledger][snapshot
     CHECK_FALSE(opened->snapshot());
 }
 
+TEST_CASE("a snapshot's state holds what the rules keep true", "[ledger][snapshot]") {
+    World w;
+    const auto encoded = w.ledger().state().encode();
+    REQUIRE(encoded);
+    const auto decode = [&](const Bytes& bytes) {
+        return protocol::LedgerState::decode(
+            bytes, [&](std::uint64_t index) { return deploy_code(w.ledger(), index); });
+    };
+    REQUIRE(decode(*encoded));
+    // The root key's first epoch, moved off the genesis: no key would be
+    // in effect at the start. After the organization's name: the count of
+    // epochs (4 bytes), then the first one's index (8).
+    const std::string_view organization = "Test Org";
+    const auto name =
+        std::search(encoded->begin(), encoded->end(), organization.begin(), organization.end());
+    REQUIRE(name != encoded->end());
+    const auto index = static_cast<std::size_t>(name - encoded->begin()) + organization.size() + 4;
+    Bytes moved = *encoded;
+    for (const std::size_t at : {index, index + 7}) {
+        moved[at] = static_cast<std::uint8_t>(moved[at] ^ 1U);
+    }
+    const auto refused = decode(moved);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().detail.contains("key epochs"));
+}
+
 TEST_CASE("a ledger writes a snapshot by itself as its log grows", "[ledger][snapshot]") {
     World w;
     Cast c = build_cast(w);

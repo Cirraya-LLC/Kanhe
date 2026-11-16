@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <exception>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -29,16 +30,32 @@ struct Job {
     std::atomic<std::size_t> done{0};
     std::mutex mutex;
     std::condition_variable finished;
+    /// Set once a range threw: the rest are counted, not run.
+    std::atomic<bool> failed{false};
+    /// The first exception, under `mutex`.
+    std::exception_ptr error;
 
-    /// Runs ranges until none are left.
-    void run() {
+    /// Runs ranges until none are left. A range that throws never leaves
+    /// here: the caller waits for every range (they read its stack), then
+    /// throws the first exception itself.
+    void run() noexcept {
         while (true) {
             const std::size_t begin = next.fetch_add(chunk, std::memory_order_relaxed);
             if (begin >= count) {
                 return;
             }
             const std::size_t end = std::min(count, begin + chunk);
-            (*work)(begin, end);
+            if (!failed.load(std::memory_order_relaxed)) {
+                try {
+                    (*work)(begin, end);
+                } catch (...) {
+                    const std::lock_guard lock(mutex);
+                    if (!error) {
+                        error = std::current_exception();
+                    }
+                    failed.store(true, std::memory_order_relaxed);
+                }
+            }
             if (done.fetch_add(end - begin, std::memory_order_acq_rel) + (end - begin) == count) {
                 const std::lock_guard lock(mutex);
                 finished.notify_all();
@@ -151,6 +168,9 @@ void parallel_for(std::size_t count,
     job->run();
     std::unique_lock lock(job->mutex);
     job->finished.wait(lock, [&] { return job->done.load(std::memory_order_acquire) == count; });
+    if (job->error) {
+        std::rethrow_exception(job->error);
+    }
 }
 
 ForRanges on_pool() {

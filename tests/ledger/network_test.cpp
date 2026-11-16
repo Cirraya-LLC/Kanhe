@@ -109,6 +109,22 @@ TEST_CASE("a verifier counts trusted network witnesses' cosignatures of anchors"
     other.anchors[0].network_cosignatures[0] =
         ed.cosign("cirraya.com/kanhe/" + std::string(64, '0'), at.tree_size, at.root, seen);
     CHECK(failure(other, trusting({&ed})) == Errc::verification_failed);
+
+    // Two trusted keys with one name and one 4-byte key ID (made here; by
+    // chance, rare): the cosignature is the one's it verifies with, whichever
+    // comes first, and each key that verifies one is a witness of its own.
+    const NetworkWitness lookalike("witness.example/ed25519");
+    network::VerifierKey same_id = lookalike.vkey();
+    same_id.id = ed.vkey().id;
+    protocol::VerifyOptions both;
+    both.trusted_network_witnesses = {same_id, ed.vkey()};
+    other = *bundle;
+    other.anchors[0].network_cosignatures.resize(1);
+    report = verify(other, both);
+    REQUIRE(report);
+    CHECK(report->trusted_cosignatures == 1);
+    both.trusted_network_witnesses = {same_id};
+    CHECK(failure(other, both) == Errc::verification_failed);
 }
 
 TEST_CASE("an anchor holds tokens or network cosignatures, and SM3 ledgers none of the latter",

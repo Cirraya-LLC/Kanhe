@@ -669,6 +669,28 @@ LedgerState::decode(ByteView bytes,
     if (!in.done()) {
         return fail(Errc::malformed, "a snapshot's state is malformed");
     }
+    // What the rules keep true of a state, a snapshot's must hold too: the
+    // code relies on it. A key is in effect at every size: epochs from the
+    // genesis on, ascending.
+    for (const auto* epochs : {&s.root_keys_, &s.log_keys_}) {
+        if (epochs->empty() || epochs->front().index != 0 ||
+            std::ranges::adjacent_find(*epochs, [](const KeyEpoch& a, const KeyEpoch& b) {
+                return a.index >= b.index;
+            }) != epochs->end()) {
+            return fail(Errc::malformed, "a snapshot's key epochs are malformed");
+        }
+    }
+    // Every delegation chain ends, within the depth a grant allows.
+    for (const auto& [key, d] : s.delegations_) {
+        (void)key;
+        std::size_t links = 0;
+        for (const DelegationState* link = &d; link != nullptr;
+             link = link->parent ? s.delegation(*link->parent) : nullptr) {
+            if (++links > max_delegation_depth) {
+                return fail(Errc::malformed, "a snapshot's delegation chain does not end");
+            }
+        }
+    }
     return s;
 }
 

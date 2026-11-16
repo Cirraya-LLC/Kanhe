@@ -16,6 +16,7 @@
 #include <mutex>
 #include <optional>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -28,6 +29,7 @@
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/state.hpp>
+#include <kanhe/ledger/parallel.hpp>
 
 #include "support/ledger_world.hpp"
 #include "support/vectors.hpp"
@@ -545,4 +547,30 @@ TEST_CASE("ledger: pipelined groups give what one at a time gives, each answered
         }
     }
     CHECK(seen.load() > 0);
+}
+
+TEST_CASE("parallel_for: a range that throws is thrown once every range has ended",
+          "[ledger][parallel]") {
+    constexpr std::size_t count = 100'000;
+    for (int round = 0; round < 20; ++round) {
+        std::atomic<std::size_t> ran{0};
+        // Ranges from the middle on throw, on the pool's threads and the
+        // caller's alike; the first exception comes out.
+        CHECK_THROWS_AS(kanhe::ledger::parallel_for(
+                            count,
+                            [&](std::size_t begin, std::size_t end) {
+                                if (begin >= count / 2) {
+                                    throw std::runtime_error("from the second half");
+                                }
+                                ran += end - begin;
+                            },
+                            2),
+                        std::runtime_error);
+        CHECK(ran.load() <= count / 2 + count / 8);
+    }
+    // The pool goes on.
+    std::atomic<std::size_t> sum{0};
+    kanhe::ledger::parallel_for(
+        count, [&](std::size_t begin, std::size_t end) { sum += end - begin; }, 2);
+    CHECK(sum.load() == count);
 }
