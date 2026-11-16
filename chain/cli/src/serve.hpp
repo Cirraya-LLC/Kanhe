@@ -32,7 +32,8 @@ struct ServeDefaults {
     std::function<void(node::ApiOptions& options)> before_open;
     std::function<void(node::LedgerApi& api)> after_open;
     /// Once the server stopped (or failed) after `after_open`, before the
-    /// API closes: the application stops its threads that use it.
+    /// API and the server close: the application stops its threads that
+    /// use them.
     std::function<void()> before_close;
     /// The application's say on where the server may listen: it throws a
     /// UsageError to refuse an address beyond this computer without TLS.

@@ -686,6 +686,8 @@ int run_person_console(const Args& args, const std::filesystem::path& dir,
     }
     std::fflush(stdout);
     server.run();
+    // While the server is here: a delivery ending now answers through it.
+    web->stop_threads();
     std::error_code ignored;
     std::filesystem::remove(state / "pid", ignored);
     return exit_ok;

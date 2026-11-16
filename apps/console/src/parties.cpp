@@ -247,7 +247,34 @@ void Console::stop_threads() {
         const std::lock_guard lock(certify_mutex_);
         certifier = std::move(certifier_);
     }
-    // Its destructor asks it to stop and waits.
+    certifier = {}; // asks it to stop, and waits
+    tasks_.wait();
+}
+
+void Tasks::run(std::function<void()> work) {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    const std::lock_guard lock(mutex_);
+    // Those that ended go (their threads join at once).
+    running_.remove_if([](const Task& t) { return t.done->load(); });
+    running_.push_back(Task{done, std::jthread([done, work = std::move(work)] {
+                                work();
+                                done->store(true);
+                            })});
+}
+
+void Tasks::wait() {
+    // A task may start another (a delivery tried again): until none is left.
+    for (;;) {
+        std::list<Task> ending;
+        {
+            const std::lock_guard lock(mutex_);
+            ending.swap(running_);
+        }
+        if (ending.empty()) {
+            return;
+        }
+        ending.clear(); // joins each
+    }
 }
 
 void Console::poll_now() const {
@@ -451,15 +478,15 @@ void Console::exchange_send_route(const http::Request& request, Respond respond)
         respond(error(409, "conflict", "the home is not a party reached online: send the file"));
         return;
     }
-    source(*record, [home = *home, respond = std::move(respond),
-                     sender = &relay_sender_](Result<Bytes> bundle) mutable {
+    source(*record, [home = *home, respond = std::move(respond), sender = &relay_sender_,
+                     tasks = &tasks_](Result<Bytes> bundle) mutable {
         if (!bundle) {
             respond(error(503, "unavailable", bundle.error().detail));
             return;
         }
         // To the home's registrar, off the ledger's writer.
-        std::thread([home = std::move(home), bundle = std::move(*bundle),
-                     respond = std::move(respond), sender]() mutable {
+        tasks->run([home = std::move(home), bundle = std::move(*bundle),
+                    respond = std::move(respond), sender]() mutable {
             const client::RelaySenderScope scope(sender);
             nlohmann::json answer;
             const auto problem = attempt([&] {
@@ -471,7 +498,7 @@ void Console::exchange_send_route(const http::Request& request, Respond respond)
                 return;
             }
             respond(json(200, {{"sent", true}, {"home", answer}}));
-        }).detach();
+        });
     });
 }
 

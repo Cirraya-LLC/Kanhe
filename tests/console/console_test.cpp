@@ -5,6 +5,7 @@
 // Origin checks every request passes first.
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <filesystem>
@@ -16,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unistd.h>
 #include <vector>
 
@@ -1792,6 +1794,29 @@ TEST_CASE("a proof discloses the fields and files chosen, and verifies", "[conso
     CHECK(proof(f.w, viewer, {{"record", record}, {"disclose", {"taken"}}}).status == 403);
     CHECK(proof(f.w, owner, {{"record", record}, {"disclose", {"colour"}}}).status == 400);
     CHECK(proof(f.w, owner, {{"record", std::string(64, '0')}}).status == 404);
+}
+
+TEST_CASE("the console's tasks are all waited for, those they start too", "[console]") {
+    std::atomic<int> ended{0};
+    {
+        kanhe::console::Tasks tasks;
+        for (int i = 0; i < 8; ++i) {
+            tasks.run([&] {
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                // A delivery tried again starts another.
+                tasks.run([&] {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+                    ++ended;
+                });
+                ++ended;
+            });
+        }
+        tasks.wait();
+        CHECK(ended.load() == 16);
+        // Usable again, and waited for when it goes.
+        tasks.run([&] { ++ended; });
+    }
+    CHECK(ended.load() == 17);
 }
 
 #if defined(BO_PROGRAM)

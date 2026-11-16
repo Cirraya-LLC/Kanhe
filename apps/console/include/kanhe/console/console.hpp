@@ -3,12 +3,14 @@
 
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -63,6 +65,30 @@ inline constexpr std::string_view content_security_policy =
 
 /// An origin the console answers for: "http://localhost:7470",
 /// "https://ledger.example.com". Lower case, no path, no default port.
+/// Threads started for one piece of work each (a delivery sealed, a
+/// message to a party), off the ledger's writer and the server's threads:
+/// `wait` waits for every one, those they start included, so that none
+/// outlives what it uses (the ledger's API, the console, the server it
+/// answers). Thread-safe.
+class Tasks {
+public:
+    Tasks() = default;
+    Tasks(const Tasks&) = delete;
+    Tasks& operator=(const Tasks&) = delete;
+    ~Tasks() { wait(); }
+
+    void run(std::function<void()> work);
+    void wait();
+
+private:
+    struct Task {
+        std::shared_ptr<std::atomic<bool>> done;
+        std::jthread thread;
+    };
+    std::mutex mutex_;
+    std::list<Task> running_;
+};
+
 struct Origin {
     std::string scheme;
     std::string host;
@@ -779,6 +805,8 @@ private:
     mutable std::mutex poll_mutex_;
     mutable std::condition_variable_any poll_wake_;
     mutable bool poll_asked_ = false;
+    /// Deliveries and messages to parties on their own threads.
+    mutable Tasks tasks_;
     /// Last, so that they stop before everything they read goes.
     std::jthread poller_;
     std::jthread relayer_;

@@ -332,15 +332,21 @@ int serve(const Args& args, const ServeDefaults& defaults) {
         defaults.after_open(*api);
     }
     // After the API, so gone before it: however serve ends, the
-    // application's threads stop first.
+    // application's threads stop first (and, once serving, while the server
+    // they may still answer through is here: `now` below).
     struct Closing {
         const std::function<void()>& close;
-        ~Closing() {
-            if (close) {
-                close();
+        bool closed = false;
+        void now() {
+            if (!closed) {
+                closed = true;
+                if (close) {
+                    close();
+                }
             }
         }
-    } const closing{defaults.before_close};
+        ~Closing() { now(); }
+    } closing{defaults.before_close};
 
     node::ServerOptions server_options;
     const auto [host, port] =
@@ -502,6 +508,7 @@ int serve(const Args& args, const ServeDefaults& defaults) {
             });
     }
     server.run();
+    closing.now();
     return exit_ok;
 }
 

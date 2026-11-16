@@ -245,6 +245,7 @@ struct DeliveryJob {
     protocol::DeliveryContents contents;
     std::filesystem::path dir;
     Console::Respond respond;
+    Tasks* tasks = nullptr;
     int tries = 0;
 };
 
@@ -260,8 +261,8 @@ void deliver(const std::shared_ptr<DeliveryJob>& job) {
                 job->respond(error(503, "unavailable", record_bundle.error().detail));
                 return;
             }
-            std::thread([job, grant_bundle = std::move(grant_bundle),
-                         record_bundle = std::move(*record_bundle)] {
+            job->tasks->run([job, grant_bundle = std::move(grant_bundle),
+                             record_bundle = std::move(*record_bundle)] {
                 std::optional<Bytes> delivery;
                 const auto problem = attempt([&] {
                     auto bundle = client::unwrap(protocol::decode_bundle(record_bundle),
@@ -302,7 +303,7 @@ void deliver(const std::shared_ptr<DeliveryJob>& job) {
                 });
                 job->respond(stored ? error(500, "internal", *stored)
                                     : json(200, {{"delivered", true}}));
-            }).detach();
+            });
         });
     });
 }
@@ -1094,16 +1095,16 @@ void Console::access_send_route(const http::Request& request, Respond respond) c
     }
     const bool requesting = path == "/v1/access/requests";
     source(*record, [peer = *peer, path, requesting, dir, record = *record,
-                     respond = std::move(respond),
-                     sender = &relay_sender_](Result<Bytes> bundle) mutable {
+                     respond = std::move(respond), sender = &relay_sender_,
+                     tasks = &tasks_](Result<Bytes> bundle) mutable {
         if (!bundle) {
             respond(error(503, "unavailable", bundle.error().detail));
             return;
         }
         // To the party, off the ledger's writer.
-        std::thread([peer = std::move(peer), path = std::move(path), requesting,
-                     dir = std::move(dir), record, bundle = std::move(*bundle),
-                     respond = std::move(respond), sender]() mutable {
+        tasks->run([peer = std::move(peer), path = std::move(path), requesting,
+                    dir = std::move(dir), record, bundle = std::move(*bundle),
+                    respond = std::move(respond), sender]() mutable {
             const client::RelaySenderScope scope(sender);
             const auto problem = attempt([&] {
                 if (requesting) {
@@ -1119,7 +1120,7 @@ void Console::access_send_route(const http::Request& request, Respond respond) c
                 return;
             }
             respond(json(200, {{"sent", true}, {"peer", peer.name}}));
-        }).detach();
+        });
     });
 }
 
@@ -1210,7 +1211,7 @@ void Console::access_deliver_route(const http::Request& request, Respond respond
     }
     deliver(std::make_shared<DeliveryJob>(DeliveryJob{
         source, services_.provider, served->hash(), served->id(), *grant_id, std::move(*grant),
-        std::move(*vault), std::move(contents), dir, std::move(respond)}));
+        std::move(*vault), std::move(contents), dir, std::move(respond), &tasks_}));
 }
 
 void Console::deliver_answer(const Signed& signer, const nlohmann::json& body,
@@ -1267,15 +1268,15 @@ void Console::deliver_answer(const Signed& signer, const nlohmann::json& body,
     }
     source(*claim_id, [provider = services_.provider, own = served->id(), dir, now,
                        request = received->checked->value, request_id = claim->answers->second,
-                       asker = claim->answers->first,
-                       respond = std::move(respond)](Result<Bytes> bundle) mutable {
+                       asker = claim->answers->first, respond = std::move(respond),
+                       tasks = &tasks_](Result<Bytes> bundle) mutable {
         if (!bundle) {
             respond(error(503, "unavailable", bundle.error().detail));
             return;
         }
         // Checked as the asker will check it, then kept for it to fetch.
-        std::thread([provider, own, dir, now, request = std::move(request), request_id, asker,
-                     bundle = std::move(*bundle), respond = std::move(respond)] {
+        tasks->run([provider, own, dir, now, request = std::move(request), request_id, asker,
+                    bundle = std::move(*bundle), respond = std::move(respond)] {
             if (const auto self = protocol::check_claim_answer(*provider, bundle, own, asker,
                                                                request_id, request, now);
                 !self) {
@@ -1290,7 +1291,7 @@ void Console::deliver_answer(const Signed& signer, const nlohmann::json& body,
                 client::write_file(path, bundle, true);
             });
             respond(stored ? error(500, "internal", *stored) : json(200, {{"delivered", true}}));
-        }).detach();
+        });
     });
 }
 
