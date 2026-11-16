@@ -6,8 +6,10 @@
 // code (its TS, PKCS #7, and X.509 modules); this file only adapts it.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -49,6 +51,7 @@ using X509AlgorPtr = std::unique_ptr<X509_ALGOR, Deleter<&X509_ALGOR_free>>;
 using Asn1IntegerPtr = std::unique_ptr<ASN1_INTEGER, Deleter<&ASN1_INTEGER_free>>;
 using Asn1TimePtr = std::unique_ptr<ASN1_TIME, Deleter<&ASN1_TIME_free>>;
 using BioPtr = std::unique_ptr<BIO, Deleter<&BIO_free>>;
+using BioChainPtr = std::unique_ptr<BIO, Deleter<&BIO_free_all>>;
 
 /// Whatever OpenSSL queued while failing, dropped: callers say what failed.
 void forget_errors() noexcept {
@@ -117,18 +120,33 @@ void forget_errors() noexcept {
     return millis;
 }
 
-/// The accuracy a token states, in milliseconds, rounded up.
-[[nodiscard]] std::uint64_t accuracy_millis(const TS_ACCURACY* accuracy) noexcept {
+/// The accuracy a token states, in milliseconds, rounded up. RFC 3161's
+/// ranges hold (spec section 10.1, v0.19): seconds 0 or more, millis and
+/// micros, when present, 1 to 999; anything else is malformed, never zero.
+[[nodiscard]] Result<std::uint64_t> accuracy_millis(const TS_ACCURACY* accuracy) noexcept {
     if (accuracy == nullptr) {
         return 0;
     }
-    auto value = [](const ASN1_INTEGER* n) -> std::uint64_t {
+    auto value = [](const ASN1_INTEGER* n, std::uint64_t low,
+                    std::uint64_t high) -> std::optional<std::uint64_t> {
         std::uint64_t v = 0;
-        return n != nullptr && ASN1_INTEGER_get_uint64(&v, n) == 1 ? v : 0;
+        if (n == nullptr) {
+            return 0;
+        }
+        if (ASN1_INTEGER_get_uint64(&v, n) != 1 || v < low || v > high) {
+            forget_errors();
+            return std::nullopt;
+        }
+        return v;
     };
-    const std::uint64_t micros = value(TS_ACCURACY_get_micros(accuracy));
-    return value(TS_ACCURACY_get_seconds(accuracy)) * 1000 +
-           value(TS_ACCURACY_get_millis(accuracy)) + (micros + 999) / 1000;
+    constexpr std::uint64_t most_seconds = UINT64_MAX / 1000 - 1;
+    const auto seconds = value(TS_ACCURACY_get_seconds(accuracy), 0, most_seconds);
+    const auto millis = value(TS_ACCURACY_get_millis(accuracy), 1, 999);
+    const auto micros = value(TS_ACCURACY_get_micros(accuracy), 1, 999);
+    if (!seconds || !millis || !micros) {
+        return fail(Errc::malformed, "the time-stamp token's accuracy is out of RFC 3161's range");
+    }
+    return *seconds * 1000 + *millis + (*micros + 999) / 1000;
 }
 
 [[nodiscard]] std::string subject_of(X509* certificate) {
@@ -191,6 +209,30 @@ void forget_errors() noexcept {
     return ok;
 }
 
+/// Whether the token's one signature verifies with `signer`, the certificate
+/// it carries: its signed attributes and the TSTInfo they digest. No chain,
+/// no usage, no signing-certificate attribute: those are what trusting an
+/// authority adds (spec section 10.1).
+[[nodiscard]] bool signature_verifies(PKCS7* token, X509* signer) {
+    STACK_OF(PKCS7_SIGNER_INFO)* infos = PKCS7_get_signer_info(token);
+    if (infos == nullptr || sk_PKCS7_SIGNER_INFO_num(infos) != 1) {
+        forget_errors();
+        return false;
+    }
+    const BioChainPtr data(PKCS7_dataInit(token, nullptr));
+    if (!data) {
+        forget_errors();
+        return false;
+    }
+    std::array<char, 4096> buffer{};
+    while (BIO_read(data.get(), buffer.data(), static_cast<int>(buffer.size())) > 0) {
+    }
+    const bool ok =
+        PKCS7_signatureVerify(data.get(), token, sk_PKCS7_SIGNER_INFO_value(infos, 0), signer) > 0;
+    forget_errors();
+    return ok;
+}
+
 } // namespace
 
 Result<TimestampToken> Provider::do_read_timestamp(ByteView token,
@@ -207,13 +249,24 @@ Result<TimestampToken> Provider::do_read_timestamp(ByteView token,
         return fail(Errc::malformed, "the token holds no time-stamp information (TSTInfo)");
     }
 
+    if (TS_TST_INFO_get_version(info.get()) != 1) {
+        forget_errors();
+        return fail(Errc::malformed, "the time-stamp token's TSTInfo is not version 1");
+    }
     TimestampToken out;
     const auto time = unix_millis(TS_TST_INFO_get_time(info.get()));
     if (!time) {
         return std::unexpected(time.error());
     }
     out.time = *time;
-    out.accuracy = accuracy_millis(TS_TST_INFO_get_accuracy(info.get()));
+    const auto accuracy = accuracy_millis(TS_TST_INFO_get_accuracy(info.get()));
+    if (!accuracy) {
+        return std::unexpected(accuracy.error());
+    }
+    if (*accuracy > UINT64_MAX - out.time) {
+        return fail(Errc::malformed, "the time-stamp token's time and accuracy overflow");
+    }
+    out.accuracy = *accuracy;
     TS_MSG_IMPRINT* imprint = TS_TST_INFO_get_msg_imprint(info.get());
     const ASN1_OBJECT* algorithm = nullptr;
     X509_ALGOR_get0(&algorithm, nullptr, nullptr, TS_MSG_IMPRINT_get_algo(imprint));
@@ -239,14 +292,8 @@ Result<TimestampToken> Provider::do_read_timestamp(ByteView token,
     out.authority_key = std::move(*key);
 
     const auto at = static_cast<std::int64_t>(out.time / 1000);
-    // First as its own anchor: does the token verify at all?
-    X509StorePtr own(X509_STORE_new());
-    if (!own || X509_STORE_add_cert(own.get(), signer) != 1) {
-        forget_errors();
-        return fail(Errc::crypto_failure, "preparing to verify the token failed");
-    }
-    X509_STORE_set_flags(own.get(), X509_V_FLAG_PARTIAL_CHAIN);
-    if (!token_verifies(pkcs7.get(), std::move(own), at)) {
+    // First its signature alone: does the token verify at all?
+    if (!signature_verifies(pkcs7.get(), signer)) {
         return fail(Errc::verification_failed,
                     "the time-stamp token does not verify with its signing certificate");
     }

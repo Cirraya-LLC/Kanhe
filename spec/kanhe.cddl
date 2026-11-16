@@ -1,7 +1,7 @@
 ; SPDX-License-Identifier: Apache-2.0
 ; Copyright 2026 Cirraya
 ;
-; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.17 (draft); the
+; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.19 (draft); the
 ; wire protocol version (statement key 0) is 1.
 ;
 ; Revision history:
@@ -76,6 +76,9 @@
 ;         record-register key 7 names sources; a bundle carries its scripts
 ;         and local sources as involved objects, and source proofs (key 10).
 ;         Earlier objects remain valid.
+;   v0.19 no structure changes: rules written down (genesis, the order of a
+;         record's scripts and sources, time-stamp tokens' version and
+;         accuracy). Earlier objects remain valid where they kept them.
 ;
 ; Every structure is encoded as deterministic CBOR (RFC 8949 section 4.2.1) in
 ; the Kanhe profile: no floats, no indefinite lengths, no duplicate keys.

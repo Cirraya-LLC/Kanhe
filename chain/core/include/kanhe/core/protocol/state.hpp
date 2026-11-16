@@ -36,7 +36,7 @@ inline constexpr std::size_t max_delegation_depth = 16;
 /// The version of the rules a state is built by: raised whenever validation
 /// or application changes what a log replays to, so that a state written by
 /// earlier rules (a snapshot) is not taken for today's.
-inline constexpr std::uint32_t state_rules_version = 5;
+inline constexpr std::uint32_t state_rules_version = 6;
 
 // Ids in state objects are CompactIds: millions of objects.
 struct ActorState {
@@ -175,9 +175,13 @@ private:
 
 class LedgerState {
 public:
-    /// Builds the initial state from a verified genesis statement.
-    [[nodiscard]] static Result<LedgerState> from_genesis(const crypto::Provider& provider,
-                                                          const SignedStatement& genesis);
+    /// Builds the initial state from a verified genesis statement: signed by
+    /// its root key, which is not its log key, neither weak, with no proof of
+    /// presence (section 5). Given the time its log entry registered it,
+    /// also checks that it was issued no later than 5 minutes after.
+    [[nodiscard]] static Result<LedgerState>
+    from_genesis(const crypto::Provider& provider, const SignedStatement& genesis,
+                 std::optional<Timestamp> registered_at = std::nullopt);
 
     /// Checks whether `statement` may be registered at ledger time `now`:
     /// identity, signature, authority, and type-specific rules. A signature

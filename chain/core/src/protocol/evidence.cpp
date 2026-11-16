@@ -2,6 +2,7 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <set>
 #include <span>
@@ -639,7 +640,12 @@ Result<EvidenceReport> check_anchors(const crypto::Provider& provider, const Led
         }
         // The ledger dated nothing it had by then later than the authority's
         // time allows.
-        const Timestamp bound = *existed_by + timestamp_clock_slack;
+        // Saturating: a token's time and accuracy fit (the token's reading
+        // refuses more), the slack on top may not.
+        constexpr Timestamp latest_time = std::numeric_limits<Timestamp>::max();
+        const Timestamp bound = *existed_by > latest_time - timestamp_clock_slack
+                                    ? latest_time
+                                    : *existed_by + timestamp_clock_slack;
         const bool contradicted =
             at.timestamp > bound || std::ranges::any_of(included, [&](const Included& i) {
                 return i.index < at.tree_size && i.log_entry.registered_at > bound;
@@ -925,9 +931,10 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     if (genesis.id != genesis_entry.statement_id) {
         return verification_failure("the genesis entry has the wrong statement id");
     }
-    auto state = LedgerState::from_genesis(provider, genesis);
+    auto state = LedgerState::from_genesis(provider, genesis, genesis_entry.registered_at);
     if (!state) {
-        return verification_failure("the genesis statement does not verify");
+        // from_genesis's details are literals: kept as they are.
+        return verification_failure(state.error().detail);
     }
     state->replay_bundle();
     state->load_modules_with(options.modules);
@@ -1289,12 +1296,20 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     };
     // The scripts its events name (v0.18), each once.
     for (const RecordEvent& event : report.events) {
-        if (!event.provenance || !event.provenance->script ||
-            std::ranges::contains(report.scripts, *event.provenance->script, &ScriptReport::id)) {
+        if (!event.provenance || !event.provenance->script) {
             continue;
         }
         const Id& id = *event.provenance->script;
         const RecordState* script = state->record(id);
+        // Approved before it is named (v0.19): the replay let a script the
+        // bundle did not hold yet pass, so the order is checked here.
+        if (script != nullptr && script->registered_at_index >= event.index) {
+            return verification_failure(
+                "an event of the record names a script approved only after it");
+        }
+        if (std::ranges::contains(report.scripts, id, &ScriptReport::id)) {
+            continue;
+        }
         const Included* registered =
             script != nullptr ? statement_at(script->registered_at_index) : nullptr;
         const auto* body =
@@ -1333,6 +1348,11 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
                 const auto times = r != nullptr ? times_of(*r) : std::nullopt;
                 if (!times) {
                     return verification_failure("a local source is not in the record's evidence");
+                }
+                // Registered before the record that names it (v0.19).
+                if (r->registered_at_index >= report.events.front().index) {
+                    return verification_failure(
+                        "a local source is registered only after the record that names it");
                 }
                 s.provided = true;
                 s.type = r->record_type;

@@ -23,7 +23,7 @@ Like a spreadsheet, the chain knows nothing of what you keep in it: a certificat
 record you define in the console, and the [examples](examples/) show how other things are
 built.
 
-> **Alpha: pre-release software.** The protocol specification (revision v0.18) is a draft and may change,
+> **Alpha: pre-release software.** The protocol specification (revision v0.19) is a draft and may change,
 > and so may interfaces and file formats; ledgers and evidence made with this version may need
 > to be made again with a later one. The code has not been audited yet; see
 > [Security](#security) for how to report a vulnerability and the known open items.

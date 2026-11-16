@@ -329,10 +329,15 @@ def _provenance(ledger: rules.Ledger, subject, checkpoint) -> tuple:
     script_reports = []
     for index in event_indices(ledger, subject):
         provenance = ledger.applied[index].statement.provenance
-        if provenance is None or provenance.script is None or \
-                any(s.id == provenance.script for s in script_reports):
+        if provenance is None or provenance.script is None:
             continue
         script = ledger.records.get(provenance.script)
+        # Approved before it is named (v0.19): the replay let a script the
+        # bundle did not hold yet pass, so the order is checked here.
+        if script is not None and script.history[0] >= index:
+            fail("an event of the record names a script approved only after it")
+        if any(s.id == provenance.script for s in script_reports):
+            continue
         if script is None or script.script is None:
             fail("a script the record's events name is not in its evidence")
         registered, revoked, _, _ = _times(ledger, script)
@@ -350,6 +355,9 @@ def _provenance(ledger: rules.Ledger, subject, checkpoint) -> tuple:
                 source = ledger.records.get(record_id)
                 if source is None:
                     fail("a local source is not in the record's evidence")
+                # Registered before the record that names it (v0.19).
+                if source.history[0] >= subject.history[0]:
+                    fail("a local source is registered only after the record that names it")
                 s.provided, s.type, s.checkpoint_time = True, source.type, checkpoint.timestamp
                 _set_statuses(s, *_times(ledger, source))
             source_reports.append(s)

@@ -991,7 +991,7 @@ struct Ledger::Impl {
         if (genesis->id != first->statement_id) {
             return fail(Errc::malformed, "log entry 0 has the wrong statement id");
         }
-        auto state = protocol::LedgerState::from_genesis(provider, *genesis);
+        auto state = protocol::LedgerState::from_genesis(provider, *genesis, first->registered_at);
         if (!state) {
             return std::unexpected(state.error());
         }
@@ -1507,7 +1507,7 @@ Result<Ledger> Ledger::create_replica(FileSystem& fs, Clock& clock,
     }
     auto genesis = protocol::parse_statement(provider, first->statement);
     if (!genesis || genesis->id != first->statement_id ||
-        !protocol::LedgerState::from_genesis(provider, *genesis)) {
+        !protocol::LedgerState::from_genesis(provider, *genesis, first->registered_at)) {
         return fail(Errc::verification_failed, "the first entry is not a valid genesis");
     }
     // Kept byte for byte: the ledger's identity and tree commit to it.

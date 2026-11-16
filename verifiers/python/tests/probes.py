@@ -51,7 +51,8 @@ class Forge:
     receipts, and bundles holding every entry and every state proof."""
 
     def __init__(self, hash_alg: int = crypto.SHA256, root: str = "root", log: str = "log",
-                 genesis_log: str | None = None, name: str = "Probe Org", t0: int = T0):
+                 genesis_log: str | None = None, name: str = "Probe Org", t0: int = T0,
+                 genesis_issued_at: int | None = None):
         self.hash_alg = hash_alg
         self.h = crypto.hash_function(hash_alg)
         self.entries: list[bytes] = []
@@ -61,7 +62,7 @@ class Forge:
         self.time = t0
         body = {1: hash_alg, 2: name, 3: self.pub(root), 4: self.pub(genesis_log or log)}
         self.ledger_id = None
-        self.ledger_id = self.add(1, root, None, body, creates=1)
+        self.ledger_id = self.add(1, root, None, body, creates=1, issued_at=genesis_issued_at)
 
     def pub(self, name: str) -> list:
         return [crypto.ED25519, _key(name).public_key().public_bytes_raw()]
@@ -272,7 +273,37 @@ def cases():
     def genesis_same_keys():
         f = Forge(root="root", log="root")
         return f.bundle(f.record("root", f.ledger_id))
-    case("a genesis whose root key is also its log key", None, genesis_same_keys)
+    case("a genesis whose root key is also its log key", False, genesis_same_keys)
+
+    # Section 5 (v0.19): the genesis keeps the 5 minutes every statement keeps.
+    def genesis_issued(offset):
+        def build():
+            f = Forge(genesis_issued_at=T0 + offset)
+            return f.bundle(f.record("root", f.ledger_id))
+        return build
+    case("a genesis issued exactly 5 minutes after its registration", True, genesis_issued(5 * MINUTE))
+    case("a genesis issued 5 minutes and 1 ms after its registration", False,
+         genesis_issued(5 * MINUTE + 1))
+
+    # Section 11, step 3 (v0.19): a record's local source is registered before it.
+    def local_source(after):
+        def build():
+            f = Forge()
+            if not after:
+                source = f.record("root", f.ledger_id)
+                return f.bundle(f.record("root", f.ledger_id, extra={7: [[f.ledger_id, source]]}))
+            # The source's statement signed first, logged after the record naming it.
+            leaves = [cbor.encode(["note", bytes([0x5A]) * 16, "probe"])]
+            body = {1: "example.org.probe/1", 2: merkle.tree_hash(f.h, leaves), 3: 1}
+            signed, source = f.sign("root", STATEMENT_TYPE, cbor.encode(f.payload(16, f.ledger_id, body)))
+            record = f.record("root", f.ledger_id, extra={7: [[f.ledger_id, source]]})
+            f.leaves[source] = [3, source, [len(f.entries)]]
+            f.entries.append(cbor.encode({1: source, 2: f.time, 3: signed}))
+            f.time += MINUTE
+            return f.bundle(record)
+        return build
+    case("a record whose local source is registered before it", True, local_source(False))
+    case("a record whose local source is registered after it", False, local_source(True))
 
     def reused_key():
         f = Forge()

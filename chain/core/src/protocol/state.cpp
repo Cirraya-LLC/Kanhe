@@ -95,7 +95,8 @@ Status check_narrowing(const Scope& parent, const Scope& child) {
 } // namespace
 
 Result<LedgerState> LedgerState::from_genesis(const crypto::Provider& provider,
-                                              const SignedStatement& genesis) {
+                                              const SignedStatement& genesis,
+                                              std::optional<Timestamp> registered_at) {
     const auto* body = std::get_if<GenesisBody>(&genesis.statement.body);
     if (body == nullptr) {
         return fail(Errc::invalid_argument, "the first statement must be genesis");
@@ -103,6 +104,18 @@ Result<LedgerState> LedgerState::from_genesis(const crypto::Provider& provider,
     if (crypto::is_weak_public_key(body->root_key.algorithm, body->root_key.bytes) ||
         crypto::is_weak_public_key(body->log_key.algorithm, body->log_key.bytes)) {
         return fail(Errc::rejected, "genesis uses a weak key");
+    }
+    // Section 5 (v0.19): the rules every statement keeps, and the keys apart.
+    if (body->root_key == body->log_key) {
+        return fail(Errc::rejected, "the genesis root key is also its log key");
+    }
+    if (genesis.statement.presence) {
+        return fail(Errc::rejected, "the organization does not prove presence");
+    }
+    if (registered_at && genesis.statement.issued_at > *registered_at &&
+        genesis.statement.issued_at - *registered_at > max_clock_skew_ms) {
+        return fail(Errc::rejected,
+                    "the genesis is issued more than 5 minutes after its registration");
     }
     if (auto s = verify_statement(provider, genesis, body->root_key); !s) {
         return std::unexpected(s.error());
@@ -429,7 +442,8 @@ Status LedgerState::validate(const crypto::Provider& provider,
         signer_at && nonces_.contains(*signer_at, statement.nonce)) {
         return fail(Errc::rejected, "the statement repeats an earlier one (same signer and nonce)");
     }
-    if (statement.issued_at > now + max_clock_skew_ms) {
+    // Written so that no sum wraps, whatever the times.
+    if (statement.issued_at > now && statement.issued_at - now > max_clock_skew_ms) {
         return fail(Errc::rejected, "the statement claims to be issued in the future");
     }
 

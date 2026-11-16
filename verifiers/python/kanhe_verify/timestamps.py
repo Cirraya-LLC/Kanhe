@@ -15,6 +15,7 @@ token's imprint, time, and accuracy.
 from __future__ import annotations
 
 import calendar
+import datetime
 import hashlib
 import os
 import subprocess
@@ -114,6 +115,8 @@ def _parse_tstinfo(tstinfo: bytes):
     fields = _children(body)
     if len(fields) < 5 or fields[0][0] != 0x02 or fields[1][0] != 0x06 or fields[2][0] != 0x30:
         raise VerifyError("a TSTInfo is malformed")
+    if _integer(fields[0][1]) != 1:
+        raise VerifyError("a TSTInfo is not version 1")
     imprint = _children(fields[2][1])
     if len(imprint) != 2 or imprint[0][0] != 0x30 or imprint[1][0] != 0x04:
         raise VerifyError("a TSTInfo's message imprint is malformed")
@@ -123,27 +126,45 @@ def _parse_tstinfo(tstinfo: bytes):
     gen_time = fields[4]
     if gen_time[0] != 0x18:
         raise VerifyError("a TSTInfo's genTime is not a GeneralizedTime")
+    # Accuracy in RFC 3161's ranges (section 10.1, v0.19): seconds 0 or more,
+    # millis and micros 1 to 999; anything else is malformed, never zero.
     accuracy_ms = 0
     if len(fields) > 5 and fields[5][0] == 0x30:
         for tag, value in _children(fields[5][1]):
-            if tag == 0x02:
-                accuracy_ms += _integer(value) * 1000
-            elif tag == 0x80:
-                accuracy_ms += _integer(value)
-            elif tag == 0x81:
-                accuracy_ms += -(-_integer(value) // 1000)  # micros, rounded up
-    return algorithm[0][1], imprint[1][1], _generalized_time_ms(gen_time[1]), accuracy_ms
+            n = _integer(value)
+            if tag == 0x02 and n >= 0:
+                accuracy_ms += n * 1000
+            elif tag == 0x80 and 1 <= n <= 999:
+                accuracy_ms += n
+            elif tag == 0x81 and 1 <= n <= 999:
+                accuracy_ms += -(-n // 1000)  # micros, rounded up
+            else:
+                raise VerifyError("a TSTInfo's accuracy is out of RFC 3161's range")
+    gen_ms = _generalized_time_ms(gen_time[1])
+    if gen_ms + accuracy_ms > 2**64 - 1:
+        raise VerifyError("a TSTInfo's time and accuracy overflow")
+    return algorithm[0][1], imprint[1][1], gen_ms, accuracy_ms
 
 
 def _generalized_time_ms(value: bytes) -> int:
-    text = value.decode("ascii")
+    try:
+        text = value.decode("ascii")
+    except UnicodeDecodeError as e:
+        raise VerifyError("a TSTInfo's genTime is malformed") from e
     if not text.endswith("Z") or len(text) < 15:
         raise VerifyError("a TSTInfo's genTime is not in UTC")
     whole, fraction = text[:14], text[14:-1]
     if not whole.isdigit() or (fraction and not (fraction[0] == "." and fraction[1:].isdigit())):
         raise VerifyError("a TSTInfo's genTime is malformed")
-    seconds = calendar.timegm((int(whole[0:4]), int(whole[4:6]), int(whole[6:8]), int(whole[8:10]),
-                               int(whole[10:12]), int(whole[12:14]), 0, 0, 0))
+    # A real date and time of day, as OpenSSL reads it: 20260101990000Z is none.
+    try:
+        when = datetime.datetime(int(whole[0:4]), int(whole[4:6]), int(whole[6:8]), int(whole[8:10]),
+                                 int(whole[10:12]), int(whole[12:14]), tzinfo=datetime.timezone.utc)
+    except ValueError as e:
+        raise VerifyError("a TSTInfo's genTime is not a date and time") from e
+    if when.year < 1970:
+        raise VerifyError("a TSTInfo's genTime is before 1970")
+    seconds = calendar.timegm(when.timetuple())
     millis = int((fraction[1:] + "000")[:3]) if fraction else 0
     return seconds * 1000 + millis
 
