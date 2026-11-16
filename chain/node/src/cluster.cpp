@@ -211,6 +211,9 @@ struct Cluster::Impl {
         if (!raft->is_leader()) {
             return fail(Errc::unavailable, "this node does not lead; retry with the leader");
         }
+        if (machine->failure()) {
+            return fail(Errc::unavailable, "this node stopped applying the cluster's log");
+        }
         const auto result = raft->append_entries({to_buffer(entry)});
         if (!result->get_accepted() || result->get_result_code() != nuraft::cmd_result_code::OK) {
             return std::unexpected(cluster_error(result->get_result_code()));
@@ -330,6 +333,10 @@ Cluster::start(const std::filesystem::path& ledger_directory, ledger::Ledger& le
 
 bool Cluster::leads() const {
     return impl_->raft->is_leader();
+}
+
+std::optional<std::string> Cluster::failure() const {
+    return impl_->machine->failure();
 }
 
 std::optional<std::string> Cluster::leader_api_url() const {

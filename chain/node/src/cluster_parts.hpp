@@ -15,6 +15,7 @@
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <libnuraft/nuraft.hxx>
 #include <map>
@@ -22,6 +23,7 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -546,10 +548,15 @@ public:
             out->pos(0);
             return out;
         }
-        if (data.size() > 0) {
+        // Once an entry failed here, nothing after it is applied, and what
+        // is applied stays below it: a restart applies it again (applying is
+        // safe to repeat), from the log, which is not compacted meanwhile.
+        if (!broken_ && data.size() > 0) {
             apply(log_idx, data);
         }
-        set_applied(log_idx);
+        if (!broken_) {
+            set_applied(log_idx);
+        }
         ptr<buffer> out = buffer::alloc(sizeof(ulong));
         out->put(log_idx);
         out->pos(0);
@@ -557,7 +564,9 @@ public:
     }
 
     void commit_config(const ulong log_idx, ptr<nuraft::cluster_config>&) override {
-        set_applied(log_idx);
+        if (!broken_) {
+            set_applied(log_idx);
+        }
     }
 
     ulong last_commit_index() override { return applied_.load(); }
@@ -578,10 +587,28 @@ public:
     /// under it, so the two never write to the ledger at once.
     std::mutex apply_mutex;
 
+    /// Why this node stopped applying entries, if it did: an entry or a
+    /// snapshot it could not apply (the disk, or a ledger that differs from
+    /// the leader's). It applies nothing more until restarted.
+    [[nodiscard]] std::optional<std::string> failure() const {
+        if (!broken_) {
+            return std::nullopt;
+        }
+        const std::lock_guard lock(broken_mutex_);
+        return broken_text_;
+    }
+
     // ---- snapshots: the ledger itself --------------------------------------
 
     void create_snapshot(nuraft::snapshot& s,
                          nuraft::async_result<bool>::handler_type& when_done) override {
+        if (broken_) {
+            // The log keeps the entry that failed, for the restart.
+            ptr<std::exception> error = cs_new<std::runtime_error>("this node stopped applying");
+            bool done = false;
+            when_done(done, error);
+            return;
+        }
         {
             const std::lock_guard lock(snapshot_mutex_);
             ptr<buffer> b = s.serialize();
@@ -667,6 +694,9 @@ public:
 
     void save_logical_snp_obj(nuraft::snapshot&, ulong& obj_id, buffer& data, bool, bool) override {
         const std::lock_guard guard(apply_mutex);
+        if (broken_) {
+            return;
+        }
         const auto value = cbor::decode(ByteView(data.data_begin(), data.size()));
         const cbor::Array* items = value ? value->as_array() : nullptr;
         if (items == nullptr) {
@@ -736,12 +766,18 @@ public:
                 }
             }
         }
+        if (!ledger_->usable()) {
+            failed("the ledger failed to write while installing a snapshot");
+        }
+        if (broken_) {
+            return;
+        }
         ++obj_id;
     }
 
     bool apply_snapshot(nuraft::snapshot& s) override {
         const std::lock_guard guard(apply_mutex);
-        if (ledger_->size() < install_size_) {
+        if (broken_ || ledger_->size() < install_size_) {
             return false;
         }
         // The leader's pending calls are exactly the snapshot's: one this
@@ -874,7 +910,16 @@ private:
     /// Keeps a contract call's consents; a node that holds other bytes for
     /// it has diverged.
     void keep_contract_consents(const protocol::Id& call, ByteView bundles) {
-        if (auto s = store_consents_file(contract_consents_path(directory_, call), bundles); !s) {
+        auto s = store_consents_file(contract_consents_path(directory_, call), bundles);
+        if (!s && s.error().code == Errc::rejected) {
+            // The call was sent before with other consents: every node keeps
+            // the first, and the call is registered already.
+            if (event_) {
+                event_("cluster-consents-differ", "other consents are kept for a contract call");
+            }
+        } else if (!s) {
+            // Kept before the call registers: without them, this node must
+            // not register it.
             failed("cannot keep a contract call's consents");
         }
     }
@@ -883,7 +928,7 @@ private:
     /// nothing.
     Status keep_pending(std::span<const PendingChange> changes) {
         auto s = apply_pending_changes(directory_, changes);
-        if (!s) {
+        if (!s && s.error().code == Errc::unavailable) {
             failed("cannot keep a registrar's pending calls");
         }
         return s;
@@ -943,16 +988,24 @@ private:
             failed("a snapshot object is malformed");
             return;
         }
+        // One that does not apply here is told, not fatal: the snapshot's
+        // entries are this ledger's, and checkpoints are made again.
+        std::size_t refused = 0;
+        const auto count = [&](const Status& status) {
+            if (!status) {
+                ++refused;
+            }
+        };
         for (const cbor::Value& c : *items[0].as_array()) {
             if (c.as_bytes() != nullptr) {
-                static_cast<void>(ledger_->apply_checkpoint(std::nullopt, *c.as_bytes()));
+                count(ledger_->apply_checkpoint(std::nullopt, *c.as_bytes()));
             }
         }
         for (const cbor::Value& c : *items[1].as_array()) {
             const cbor::Array* parts = c.as_array();
             if (parts != nullptr && parts->size() == 2 && (*parts)[0].as_bytes() != nullptr) {
                 if (auto key = protocol::decode_public_key((*parts)[1])) {
-                    static_cast<void>(ledger_->add_cosignature(*(*parts)[0].as_bytes(), *key));
+                    count(ledger_->add_cosignature(*(*parts)[0].as_bytes(), *key));
                 }
             }
         }
@@ -961,15 +1014,21 @@ private:
                 const cbor::Array* parts = t.as_array();
                 if (parts != nullptr && parts->size() == 2 && (*parts)[0].as_bytes() != nullptr &&
                     (*parts)[1].as_uint64()) {
-                    static_cast<void>(
+                    count(
                         ledger_->add_timestamp(*(*parts)[0].as_bytes(), *(*parts)[1].as_uint64()));
                 }
             }
         }
         if (items.size() == 4) {
             for (const cbor::Value& n : *items[3].as_array()) {
-                static_cast<void>(add_network_cosignature(n.as_array(), 0));
+                count(add_network_cosignature(n.as_array(), 0));
             }
+        }
+        if (refused > 0 && event_) {
+            event_("cluster-snapshot-extras",
+                   std::format("{} checkpoint(s), cosignature(s), or token(s) of the snapshot did "
+                               "not apply here",
+                               refused));
         }
     }
 
@@ -1004,7 +1063,11 @@ private:
         std::error_code ec;
         std::filesystem::create_directories(path.parent_path(), ec);
         if (ec || !detail::write_file(path, sealed, true)) {
-            failed("cannot write a vault file");
+            // Not fatal: the statement's sender is told to send it again,
+            // and the data is written then, on every node.
+            if (event_) {
+                event_("cluster-vault-failed", "cannot write a vault file");
+            }
             return fail(Errc::unavailable, "cannot write a vault file");
         }
         return {};
@@ -1124,6 +1187,12 @@ private:
             }
             keep_contract_consents(parsed->id, *(*parts)[1].as_bytes());
         }
+        if (broken_) {
+            for (std::size_t i = 0; i < list.size(); ++i) {
+                results.emplace_back(fail(Errc::unavailable, "this node stopped applying"));
+            }
+            return results;
+        }
         results = ledger_->submit_batch(statements, at);
         for (const cbor::Value& v : vaults) {
             const auto sidecar = vault_sidecar(v, results.size());
@@ -1155,7 +1224,17 @@ private:
         write_quick(cluster_path(directory_, applied_file), as_bytes(text));
     }
 
+    /// This node cannot apply what the cluster committed: it stops
+    /// applying (see commit), says so once, and stays so until restarted.
     void failed(std::string_view what) {
+        {
+            const std::lock_guard lock(broken_mutex_);
+            if (broken_) {
+                return;
+            }
+            broken_text_ = std::string(what);
+            broken_ = true;
+        }
         if (event_) {
             event_("cluster-apply-failed", what);
         }
@@ -1165,6 +1244,9 @@ private:
     ledger::Ledger* ledger_;
     Event event_;
     std::atomic<std::uint64_t> applied_ = 0;
+    std::atomic<bool> broken_ = false;
+    mutable std::mutex broken_mutex_;
+    std::string broken_text_;
     std::mutex results_mutex_;
     std::map<ulong, std::variant<BatchResult, Status>> results_;
     std::mutex snapshot_mutex_;

@@ -383,9 +383,16 @@ std::size_t RelayAgent::once(std::chrono::seconds wait) {
 }
 
 void RelayAgent::run(const std::stop_token& stop,
-                     const std::function<void(const std::string&)>& report) {
+                     const std::function<void(const std::string&)>& report,
+                     const std::function<bool()>& active) {
     std::string last;
     while (!stop.stop_requested()) {
+        if (active && !active()) {
+            for (int i = 0; i < 10 && !stop.stop_requested(); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            continue;
+        }
         std::string problem;
         try {
             static_cast<void>(once(std::chrono::seconds(20)));

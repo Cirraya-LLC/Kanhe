@@ -340,6 +340,8 @@ struct LedgerApi::State {
     std::atomic<bool> failed = false;
     mutable std::mutex failure_mutex;
     std::string failure_text;
+    /// The failure is this cluster member's: it stopped applying the log.
+    bool cluster_stopped = false;
 
     mutable std::mutex tokens_mutex;
     mutable std::shared_ptr<const std::vector<ApiToken>> tokens =
@@ -1170,6 +1172,36 @@ struct LedgerApi::State {
         }
         const std::lock_guard lock(failure_mutex);
         return failure_text;
+    }
+
+    /// What every route but /healthz answers once failed.
+    [[nodiscard]] std::string_view unusable_message() const {
+        const std::lock_guard lock(failure_mutex);
+        return cluster_stopped
+                   ? "this cluster member stopped applying the cluster's log (see /healthz); "
+                     "restart it"
+                   : "the ledger's files do not validate; run kanhe audit";
+    }
+
+    /// The cluster's state machine could not apply an entry: this member
+    /// answers 503 until restarted, and a leader steps down (tick).
+    void cluster_failed(std::string_view detail) {
+        {
+            const std::lock_guard lock(failure_mutex);
+            if (!failed) {
+                failure_text =
+                    "this cluster member stopped applying the log: " + std::string(detail);
+                cluster_stopped = true;
+            }
+        }
+        failed.store(true, std::memory_order_release);
+    }
+
+    /// From tick(): a member that stopped applying leads no more.
+    void step_down_if_stopped() {
+        if (cluster && cluster->failure() && cluster->leads()) {
+            static_cast<void>(cluster->step_down());
+        }
     }
 
     void event(std::string_view what, std::string_view detail = {}) const {
@@ -2132,9 +2164,7 @@ struct LedgerApi::State {
         auto start = [this, q = std::get<RequestQuery>(std::move(parsed)),
                       principal = std::move(principal), done = std::move(done)]() mutable {
             if (failed) {
-                finish(done, principal,
-                       error_response(503, "unavailable",
-                                      "the ledger's files do not validate; run kanhe audit"));
+                finish(done, principal, error_response(503, "unavailable", unusable_message()));
                 return;
             }
             Found found = find_requests(q);
@@ -2457,8 +2487,22 @@ struct LedgerApi::State {
         return std::nullopt;
     }
 
-    http::Response access_request(const http::Request& r, const std::string& principal) {
+    /// Access requests and receipts are kept beside the ledger, and a
+    /// cluster does not replicate them yet: they would stay on one member,
+    /// gone for the next leader.
+    std::optional<http::Response> refuse_access_write() const {
         if (auto denied = refuse_peer_write()) {
+            return denied;
+        }
+        if (cluster) {
+            return error_response(501, "unsupported",
+                                  "a cluster takes no access requests or receipts yet");
+        }
+        return std::nullopt;
+    }
+
+    http::Response access_request(const http::Request& r, const std::string& principal) {
+        if (auto denied = refuse_access_write()) {
             return std::move(*denied);
         }
         if (r.body.size() > max_access_request) {
@@ -2568,7 +2612,7 @@ struct LedgerApi::State {
     }
 
     http::Response access_receipt(const http::Request& r, const std::string& principal) {
-        if (auto denied = refuse_peer_write()) {
+        if (auto denied = refuse_access_write()) {
             return std::move(*denied);
         }
         auto peer = peer_of(principal, r.body);
@@ -4123,8 +4167,7 @@ struct LedgerApi::State {
     http::Response answer(const http::Request& r, const Routed& routed,
                           const std::string& principal, Scopes scopes) {
         if (failed) {
-            return error_response(503, "unavailable",
-                                  "the ledger's files do not validate; run kanhe audit");
+            return error_response(503, "unavailable", unusable_message());
         }
         const std::string_view rest = std::string_view(r.path).substr(routed.rest);
         switch (routed.endpoint) {
@@ -4252,9 +4295,7 @@ struct LedgerApi::State {
 
     void propose_as_node(http::Request r, Done done) {
         if (failed) {
-            finish(done, "console",
-                   error_response(503, "unavailable",
-                                  "the ledger's files do not validate; run kanhe audit"));
+            finish(done, "console", error_response(503, "unavailable", unusable_message()));
             return;
         }
         call_proposal(r, "console", static_cast<Scopes>(Scope::submit), done);
@@ -4270,9 +4311,7 @@ struct LedgerApi::State {
     /// the submit scope, where the API takes writes at all.
     void submit_as_node(http::Request r, Done done) {
         if (failed) {
-            finish(done, "console",
-                   error_response(503, "unavailable",
-                                  "the ledger's files do not validate; run kanhe audit"));
+            finish(done, "console", error_response(503, "unavailable", unusable_message()));
             return;
         }
         if (options.read_only || replica) {
@@ -4340,9 +4379,7 @@ struct LedgerApi::State {
             return;
         }
         if (failed) {
-            finish(done, {},
-                   error_response(503, "unavailable",
-                                  "the ledger's files do not validate; run kanhe audit"));
+            finish(done, {}, error_response(503, "unavailable", unusable_message()));
             return;
         }
         // Whether an extension reads this path (or one above it).
@@ -4521,9 +4558,13 @@ Result<std::unique_ptr<LedgerApi>> LedgerApi::open(ApiOptions options,
     state->reload_tokens(true);
     if (state->options.cluster) {
         State* raw = state.get();
-        auto started = Cluster::start(
-            state->options.directory, *state->ledger,
-            [raw](std::string_view what, std::string_view detail) { raw->event(what, detail); });
+        auto started = Cluster::start(state->options.directory, *state->ledger,
+                                      [raw](std::string_view what, std::string_view detail) {
+                                          raw->event(what, detail);
+                                          if (what == "cluster-apply-failed") {
+                                              raw->cluster_failed(detail);
+                                          }
+                                      });
         if (!started) {
             return std::unexpected(started.error());
         }
@@ -4602,6 +4643,7 @@ void LedgerApi::tick() {
         return;
     }
     state_->reload_tokens(false);
+    state_->step_down_if_stopped();
     state_->auto_checkpoint();
     state_->keep();
     state_->poll_requests();
@@ -4628,6 +4670,10 @@ void LedgerApi::stop() {
 
 bool LedgerApi::is_replica() const noexcept {
     return state_->replica;
+}
+
+bool LedgerApi::leads() const {
+    return !state_->cluster || state_->cluster->leads();
 }
 
 const ledger::Ledger& LedgerApi::ledger() const noexcept {

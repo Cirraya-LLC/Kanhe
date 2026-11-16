@@ -130,6 +130,12 @@ public:
 
     /// True if this node leads and may take writes.
     [[nodiscard]] bool leads() const;
+    /// Why this node stopped applying committed entries, if it did (a disk
+    /// that fails, a ledger that differs from the leader's): it applies
+    /// nothing more, and keeps the Raft log from that entry on, until it is
+    /// restarted and applies them again. `on_event` was told
+    /// "cluster-apply-failed".
+    [[nodiscard]] std::optional<std::string> failure() const;
     /// The leader's API URL, if a leader is known.
     [[nodiscard]] std::optional<std::string> leader_api_url() const;
     [[nodiscard]] ClusterStatus status() const;

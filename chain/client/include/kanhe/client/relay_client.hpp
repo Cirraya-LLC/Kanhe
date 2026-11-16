@@ -93,8 +93,12 @@ public:
     /// relay cannot be reached or refuses.
     std::size_t once(std::chrono::seconds wait);
     /// Rounds until `stop`, saying what goes wrong (and "" once it works
-    /// again) through `report`; after a failure, again 5 s later.
-    void run(const std::stop_token& stop, const std::function<void(const std::string&)>& report);
+    /// again) through `report`; after a failure, again 5 s later. While
+    /// `active` (if given) is false, no round: a cluster member that does
+    /// not lead takes nothing from the relay (it would answer writes with
+    /// 307, which the relayed party cannot follow).
+    void run(const std::stop_token& stop, const std::function<void(const std::string&)>& report,
+             const std::function<bool()>& active = {});
 
 private:
     node::RelayRoute own_;

@@ -159,6 +159,8 @@ REQ="$(run contract deploy requesting.wasm --ledger node1 --as root.key --functi
 # The keeper: it may call the contract's result, so it expires its requests.
 run keeper add Keeper --contracts "$REQ" --key-out keeper.key --as root.key --ledger node1 > /dev/null
 run token create --ledger node1 ops --scope read,submit,admin --out ops.token > /dev/null
+run peer add partner --ledger-id "$(printf '%064d' 1)" --ledger node1 > /dev/null
+run token create --ledger node1 partner --scope peer --out partner.token > /dev/null
 run cluster init --help | contains 'Three members ride out the loss of one'
 expect_exit 2 cluster init --ledger node1 --id 1 --raft "127.0.0.1:${RPORT[1]}" --api "${API[1]}"
 contains 'checkpoint the whole log first' out.txt
@@ -185,6 +187,12 @@ done
 run cluster status --server "${API[1]}" | contains 'leader'
 # A member's files are its own while it runs: the command line goes through the API.
 expect_exit 2 status --ledger node2
+# Peers' access requests and receipts would stay on one member: refused for now.
+for box in requests receipts; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $(cat partner.token)" \
+        -H 'Content-Type: application/cbor' --data-binary 'x' "${API[2]}/v1/access/$box")"
+    [ "$code" = 501 ] || fail "a cluster refuses peers' access $box (got $code)"
+done
 
 # --- Writes through any member -----------------------------------------------------
 client() { run "$@" --server "${API[$CLIENT_AT]}" --ledger-id "$LEDGER_ID" --cache "$WORK/cache"; }

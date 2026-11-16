@@ -220,6 +220,9 @@ public:
     void stop() override;
 
     [[nodiscard]] bool is_replica() const noexcept;
+    /// False on a cluster member that does not lead now (it sends writes to
+    /// the leader); true on a single server.
+    [[nodiscard]] bool leads() const;
     [[nodiscard]] const ledger::Ledger& ledger() const noexcept;
 
     struct State;

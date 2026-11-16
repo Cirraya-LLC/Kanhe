@@ -103,6 +103,13 @@ void ask_witnesses_until(const std::stop_token& stop, node::LedgerApi& api,
     std::mutex mutex;
     std::condition_variable_any wake;
     while (!stop.stop_requested()) {
+        // In a cluster, the leader asks: a follower could not keep the
+        // cosignature, and the witness would answer it, not the leader.
+        if (!api.leads()) {
+            std::unique_lock lock(mutex);
+            wake.wait_for(lock, stop, std::chrono::seconds(1), [] { return false; });
+            continue;
+        }
         std::vector<client::WitnessAsked> asked;
         try {
             asked = client::ask_used_witnesses(api.ledger(), dir, [&api](Bytes body) {
@@ -460,12 +467,16 @@ int serve(const Args& args, const ServeDefaults& defaults) {
                               std::function<void(node::http::Response)> done) {
                 api->handle(std::move(r), "relay", std::move(done));
             });
-        relaying = std::jthread([agent, quiet = args.has("quiet")](const std::stop_token& stop) {
-            agent->run(stop, [quiet](const std::string& problem) {
-                if (!quiet) {
-                    std::println(stderr, "relay: {}", problem.empty() ? "reached" : problem);
-                }
-            });
+        relaying = std::jthread([agent, api = api.get(),
+                                 quiet = args.has("quiet")](const std::stop_token& stop) {
+            agent->run(
+                stop,
+                [quiet](const std::string& problem) {
+                    if (!quiet) {
+                        std::println(stderr, "relay: {}", problem.empty() ? "reached" : problem);
+                    }
+                },
+                [api] { return api->leads(); });
         });
     }
     // The public witnesses this ledger registered with (witness register),

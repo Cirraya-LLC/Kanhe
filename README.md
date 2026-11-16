@@ -1057,6 +1057,8 @@ What the chain does not do yet, as of this version (the Bo language's own are in
 - **Kept files** (`record issue --keep-files`, `record file add`) are kept by a single server or
   ledger directory: a cluster refuses them for now (it would not replicate them), and a backup
   of a cluster's member does not hold them.
+- **Access between organizations** (requests, deliveries, receipts) works with a single server:
+  a cluster refuses peers' access requests and receipts for now (it would not replicate them).
 - **Credentials** are secured with JOSE; SD-JWT VC, which the EU's digital identity wallet asks
   for, is planned.
 - **`KANHE_CLOCK_OFFSET`** is for demonstrations and tests only (`serve` refuses it without

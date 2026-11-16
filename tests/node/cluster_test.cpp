@@ -634,6 +634,61 @@ TEST_CASE("a node keeps a batch's private data, or says it could not", "[node][c
     std::filesystem::remove_all(dir);
 }
 
+TEST_CASE("a node that cannot apply an entry stops there, until restarted",
+          "[node][cluster][storage]") {
+    namespace cd = node::cluster_detail;
+    World w;
+    const auto dir = machine_directory("cluster-stops");
+    auto batch = [&](std::uint64_t size, protocol::Timestamp at) {
+        auto s = w.statement(w.org_id(), std::nullopt, w.record_body("other/1"));
+        s.issued_at = at;
+        const auto entry = cbor::encode(cbor::Value::array(
+            {cbor::Value::unsigned_integer(cd::entry_batch), cbor::Value::unsigned_integer(t0),
+             cbor::Value::unsigned_integer(size),
+             cbor::Value::array({cbor::Value::bytes(w.sign(w.org(), s))}),
+             cbor::Value::array({})}));
+        REQUIRE(entry);
+        return cd::to_buffer(*entry);
+    };
+    const std::string apply_failed = "cluster-apply-failed";
+    std::vector<std::string> told;
+    cd::LedgerMachine machine(
+        dir, w.ledger(), [&](std::string_view what, std::string_view) { told.emplace_back(what); });
+    machine.commit(1, *batch(w.ledger().size(), t0));
+    REQUIRE(machine.take(1));
+    CHECK(machine.last_commit_index() == 1);
+    CHECK_FALSE(machine.failure());
+
+    // An entry for a ledger longer than this one: this node differs.
+    const std::uint64_t size = w.ledger().size();
+    machine.commit(2, *batch(size + 5, t0 + 1));
+    REQUIRE(machine.failure());
+    CHECK(machine.failure()->contains("lacks"));
+    CHECK(std::ranges::count(told, apply_failed) == 1);
+    // Nothing after it is applied, and what is applied stays below it.
+    machine.commit(3, *batch(size, t0 + 2));
+    CHECK(w.ledger().size() == size);
+    CHECK(machine.last_commit_index() == 1);
+    CHECK(node::detail::read_file(cd::cluster_path(dir, cd::applied_file)) == Bytes{'1'});
+    CHECK(std::ranges::count(told, apply_failed) == 1); // said once
+    // No snapshot either: the Raft log keeps the entries from the failed one.
+    auto snapshot =
+        nuraft::cs_new<nuraft::snapshot>(3, 1, nuraft::cs_new<nuraft::cluster_config>());
+    std::optional<bool> made;
+    nuraft::async_result<bool>::handler_type done = [&](bool& ok, nuraft::ptr<std::exception>&) {
+        made = ok;
+    };
+    machine.create_snapshot(*snapshot, done);
+    CHECK(made == false);
+    CHECK_FALSE(machine.last_snapshot());
+
+    // Restarted, it starts again after the last entry it applied.
+    cd::LedgerMachine restarted(dir, w.ledger(), {});
+    CHECK(restarted.last_commit_index() == 1);
+    CHECK_FALSE(restarted.failure());
+    std::filesystem::remove_all(dir);
+}
+
 TEST_CASE("a snapshot sends every file it listed, though calls go while it is read",
           "[node][cluster][storage]") {
     namespace cd = node::cluster_detail;
