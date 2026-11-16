@@ -2813,6 +2813,9 @@ std::vector<CommandSpec> chain_commands() {
                {"log-key", "KEY",
                 "The ledger's log key file: lets the agent's contract consents travel as "
                 "evidence"},
+               {"files", "DIR",
+                "The directory the agent's files are in (default: the current directory): the "
+                "tools read and write no file outside it"},
                passphrase_file_option}),
          cmd_mcp,
          "Serves one AI agent over stdio (Model Context Protocol, revision 2026-07-28, and\n"
@@ -2833,6 +2836,9 @@ std::vector<CommandSpec> chain_commands() {
          "                                   requests contract calls made, and their answers\n"
          "  kanhe_answer_request          answer a request as its executor (done, failed,\n"
          "                                   or expired), under the agent's delegation\n\n"
+         "File paths the agent gives (attachments, evidence to verify, a consent's 'out') are\n"
+         "taken from the files directory (--files, by default the current one); one outside it,\n"
+         "or a link that leads out of it, is refused.\n\n"
          "Contract tools reach other organizations as this ledger's peers (peer add). Consents\n"
          "travel as evidence, which needs a checkpoint: give --log-key to let the agent consent.\n"
          "With --server, the agent works on the ledger a server (or a cluster) serves, through a\n"

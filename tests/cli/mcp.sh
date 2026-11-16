@@ -103,6 +103,14 @@ printf '%s\n' '{"jsonrpc":2.0,"id":1,"method":"ping"}' '{"jsonrpc":"2.0","id":2,
     run mcp --ledger ledger --as agent.key > odd.txt 2> /dev/null
 sed -n 1p odd.txt | contains '"code":-32600' || fail "a jsonrpc that is not text: $(cat odd.txt)"
 sed -n 2p odd.txt | contains '"result":{}' || fail "the server goes on: $(cat odd.txt)"
+# A message longer than 16 MiB is dropped and answered; one ending in CR LF is read.
+{
+    python3 -c 'import sys; sys.stdout.write("{" + " " * (17 << 20) + "}\n")'
+    printf '%s\r\n' '{"jsonrpc":"2.0","id":2,"method":"ping"}'
+} | run mcp --ledger ledger --as agent.key > odd.txt 2> /dev/null
+sed -n 1p odd.txt | contains '"code":-32700' || fail "a message too long: $(head -c 300 odd.txt)"
+sed -n 1p odd.txt | contains '16 MiB' || fail "named too long"
+sed -n 2p odd.txt | contains '"id":2,"jsonrpc":"2.0","result":{}' || fail "a message ending in CR LF: $(cat odd.txt)"
 
 # The agent's record carries its accountability, visible to any verifier.
 run checkpoint create --ledger ledger --log-key log.key > /dev/null
@@ -117,6 +125,23 @@ if contains -r 'Flange DN50' ledger/vault; then fail "agent-issued field values 
 printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{%s,"name":"kanhe_verify_evidence","arguments":{"bundle_path":"bundle.cbor","expected_ledger_id":"%s"}}}\n' \
     "$META" "$LEDGER_ID" | run mcp --ledger ledger --as agent.key > responses.txt 2> /dev/null
 contains '"verified":true' responses.txt || fail "verify through MCP"
+# The agent's files are in one directory (--files, by default the current one).
+mkdir agent-files
+cp bundle.cbor agent-files/
+ln -s "$WORK/bundle.cbor" agent-files/link.cbor
+{
+    for path in bundle.cbor ../bundle.cbor "$WORK/bundle.cbor" link.cbor; do
+        printf '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{%s,"name":"kanhe_verify_evidence","arguments":{"bundle_path":"%s"}}}\n' "$META" "$path"
+    done
+    printf '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{%s,"name":"kanhe_issue_record","arguments":{"record_type":"example.document/1","fields":{"result":"x"},"attachments":["/etc/hosts"]}}}\n' "$META"
+} | run mcp --ledger ledger --as agent.key --files agent-files > responses.txt 2> /dev/null
+line 1 | contains '"verified":true' || fail "a file in the files directory"
+for n in 2 3 4 5; do
+    line "$n" | contains '"isError":true' || fail "a file outside the files directory (line $n)"
+    line "$n" | contains 'is not a file in' || fail "named (line $n)"
+done
+expect_mcp_usage() { ! run mcp --ledger ledger --as agent.key --files "$1" < /dev/null > /dev/null 2>&1; }
+expect_mcp_usage no-such-directory || fail "--files names a directory"
 
 # A new version, through MCP: the old record then names it, and the latest.
 {

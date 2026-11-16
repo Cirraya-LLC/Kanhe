@@ -13,12 +13,15 @@
 
 #include <array>
 #include <cstdio>
+#include <filesystem>
 #include <format>
 #include <functional>
 #include <iostream>
 #include <limits>
+#include <optional>
 #include <print>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -56,6 +59,41 @@ constexpr int invalid_request = -32600;
 constexpr int method_not_found = -32601;
 constexpr int invalid_params = -32602;
 constexpr int unsupported_protocol_version = -32022;
+
+/// The longest message a client may send: tools take file paths, not
+/// contents.
+constexpr std::size_t max_message_bytes = 16U << 20U;
+
+enum class LineRead : std::uint8_t { line, too_long, end };
+
+/// Reads one message: a line, without its "\n" or "\r\n", of at most
+/// `limit` bytes; a longer one is read to its end and dropped.
+LineRead read_line(std::istream& in, std::string& line, std::size_t limit) {
+    line.clear();
+    bool too_long = false;
+    bool any = false;
+    for (int c = in.get(); c != std::char_traits<char>::eof(); c = in.get()) {
+        any = true;
+        if (c == '\n') {
+            if (too_long) {
+                return LineRead::too_long;
+            }
+            if (line.ends_with('\r')) {
+                line.pop_back();
+            }
+            return LineRead::line;
+        }
+        if (line.size() < limit) {
+            line.push_back(static_cast<char>(c));
+        } else {
+            too_long = true;
+        }
+    }
+    if (too_long) {
+        return LineRead::too_long;
+    }
+    return any ? LineRead::line : LineRead::end;
+}
 
 json server_info() {
     return {{"name", "kanhe"}, {"version", KANHE_VERSION}};
@@ -213,6 +251,14 @@ public:
     /// checkpoints it for the evidence of the agent's contract consents.
     Server(const Args& args, std::unique_ptr<crypto::Signer> key)
         : args_(args), key_(std::move(key)) {
+        std::error_code ec;
+        const std::filesystem::path files = args.get("files")
+                                                ? std::filesystem::path(*args.get("files"))
+                                                : std::filesystem::current_path(ec);
+        files_ = std::filesystem::canonical(files, ec);
+        if (ec || !std::filesystem::is_directory(files_)) {
+            throw UsageError{"--files must name a directory: " + files.string()};
+        }
         define_tools();
         Session session(args_);
         if (!session.remote()) {
@@ -244,7 +290,15 @@ public:
 
     int run() {
         std::string line;
-        while (std::getline(std::cin, line)) {
+        for (LineRead read = read_line(std::cin, line, max_message_bytes); read != LineRead::end;
+             read = read_line(std::cin, line, max_message_bytes)) {
+            if (read == LineRead::too_long) {
+                std::cout
+                    << error_response(nullptr, parse_error, "a message longer than 16 MiB").dump()
+                    << '\n'
+                    << std::flush;
+                continue;
+            }
             if (line.empty()) {
                 continue;
             }
@@ -713,7 +767,7 @@ private:
                         if (!path.is_string()) {
                             throw ToolError{"attachments must be file paths"};
                         }
-                        request.attachments.emplace_back(path.get<std::string>());
+                        request.attachments.emplace_back(in_files(path.get<std::string>()));
                     }
                 }
                 request.provenance = provenance(tool, arguments, session);
@@ -837,7 +891,7 @@ private:
              {"expected_ledger_id",
               {{"type", "string"},
                {"description", "The instance's home ledger id, learned out of band."}}}},
-            json::array({"evidence_path"}), read_only, [](const Tool&, const json& arguments) {
+            json::array({"evidence_path"}), read_only, [this](const Tool&, const json& arguments) {
                 const crypto::openssl::Provider provider;
                 protocol::VerifyOptions options;
                 options.modules = &ledger::loaded_modules();
@@ -846,7 +900,7 @@ private:
                         protocol::to_id(unwrap(from_hex(*ledger_id), "ledger id")), "ledger id");
                 }
                 const auto report = ledger::verify_contract_evidence(
-                    provider, read_file(text_arg(arguments, "evidence_path")), options,
+                    provider, read_file(in_files(text_arg(arguments, "evidence_path"))), options,
                     on_all_cores());
                 if (!report) {
                     return json{{"verified", false}, {"error", report.error().detail}};
@@ -921,7 +975,10 @@ private:
                                                       : instance_call(session, *instance, function);
                 body.arguments = contract_arguments(arguments);
                 body.reference = optional_text(arguments, "reference");
-                const std::vector<std::string> paths = string_list(arguments, "consents");
+                std::vector<std::string> paths;
+                for (const std::string& path : string_list(arguments, "consents")) {
+                    paths.push_back(in_files(path).string());
+                }
                 if (contract && !paths.empty()) {
                     throw ToolError{"a creation takes no consents"};
                 }
@@ -964,7 +1021,8 @@ private:
               {{"type", "string"},
                {"description", "Only this call: its full id (64 hex digits)."}}}},
             json::array({"home"}), remote_read, [this](const Tool&, const json& arguments) {
-                const Session session(args_);
+                Session session(args_);
+                const RelayReach reach(args_, session);
                 const node::Peer home = peer_named(peers_dir(), text_arg(arguments, "home"));
                 std::optional<std::string> call;
                 if (const auto text = optional_text(arguments, "call")) {
@@ -991,6 +1049,13 @@ private:
               {{"type", "string"}, {"description", "The instance's full id (64 hex digits)."}}}},
             json::array({"home", "instance"}), remote_read,
             [this](const Tool&, const json& arguments) {
+                // A home reached through its relay: as this ledger, with --log-key.
+                std::optional<Session> own;
+                std::optional<RelayReach> reach;
+                if (args_.has("log-key")) {
+                    own.emplace(args_);
+                    reach.emplace(args_, *own);
+                }
                 const node::Peer home = peer_named(peers_dir(), text_arg(arguments, "home"));
                 const protocol::ContractReport report =
                     fetch_instance(home, full_id(text_arg(arguments, "instance"), "instance"))
@@ -1027,8 +1092,9 @@ private:
                {"description", "The call lapses after this many days (default: the home's, 7)."}}}},
             json::array({"home", "instance", "function"}), remote_writes,
             [this](const Tool&, const json& arguments) {
-                const Session session(args_);
+                Session session(args_);
                 require_consent_delegation(session);
+                const RelayReach reach(args_, session);
                 const node::Peer home = peer_named(peers_dir(), text_arg(arguments, "home"));
                 node::PendingCall proposal;
                 proposal.instance = full_id(text_arg(arguments, "instance"), "instance");
@@ -1084,6 +1150,7 @@ private:
                                     "operator starts it with --log-key (the ledger's log key)"};
                 }
                 Session session(args_);
+                const RelayReach reach(args_, session);
                 const node::Peer home = peer_named(peers_dir(), text_arg(arguments, "home"));
                 const protocol::Id call = full_id(text_arg(arguments, "call"), "call");
                 const bool send = optional_flag(arguments, "send", true);
@@ -1099,7 +1166,7 @@ private:
                 const GivenConsent given =
                     give_consent(session, *key_, terms.consent, options, args_);
                 if (out_path) {
-                    write_file(*out_path, given.bundle, false);
+                    write_file(in_files(*out_path), given.bundle, false);
                 }
                 json out = plain(consent_json(given.record, terms.consent, terms.arguments));
                 if (send) {
@@ -1276,7 +1343,7 @@ private:
                {"description",
                 "Trust nodes to believe (spec v0.16): ledger id to the name to give it. The "
                 "evidence's memberships from others are reported and relied on for nothing."}}}},
-            json::array({"bundle_path"}), read_only, [](const Tool&, const json& arguments) {
+            json::array({"bundle_path"}), read_only, [this](const Tool&, const json& arguments) {
                 const crypto::openssl::Provider provider;
                 protocol::VerifyOptions options;
                 if (const auto ledger_id = optional_text(arguments, "expected_ledger_id")) {
@@ -1284,7 +1351,7 @@ private:
                         protocol::to_id(unwrap(from_hex(*ledger_id), "ledger id")), "ledger id");
                 }
                 for (const auto& [name, path] : string_map(arguments, "attachments")) {
-                    options.attachment_contents[name] = read_file(path);
+                    options.attachment_contents[name] = read_file(in_files(path));
                 }
                 for (const auto& [ledger_id, name] : string_map(arguments, "trust_nodes")) {
                     options.trust_nodes.push_back(
@@ -1292,9 +1359,9 @@ private:
                                 "trust node"),
                          name});
                 }
-                const auto report =
-                    ledger::verify_bundle(provider, read_file(text_arg(arguments, "bundle_path")),
-                                          options, on_all_cores());
+                const auto report = ledger::verify_bundle(
+                    provider, read_file(in_files(text_arg(arguments, "bundle_path"))), options,
+                    on_all_cores());
                 if (!report) {
                     throw ToolError{"VERIFICATION FAILED: " + std::string(report.error().detail)};
                 }
@@ -1310,6 +1377,26 @@ private:
             });
     }
 
+    /// A file the agent names: in the files directory (--files), or
+    /// refused. A relative path is taken from there; a link that leads out
+    /// of it is refused too.
+    [[nodiscard]] std::filesystem::path in_files(const std::string& given) const {
+        if (given.empty()) {
+            throw ToolError{"a file path is empty"};
+        }
+        const std::filesystem::path path(given);
+        std::error_code ec;
+        const std::filesystem::path full =
+            std::filesystem::weakly_canonical(path.is_absolute() ? path : files_ / path, ec);
+        const std::filesystem::path inside = full.lexically_relative(files_);
+        if (ec || inside.empty() || inside == "." || *inside.begin() == "..") {
+            throw ToolError{"'" + given + "' is not a file in " + files_.string() +
+                            ", the directory this MCP server reads and writes files in (its "
+                            "operator chooses it with --files)"};
+        }
+        return full;
+    }
+
     /// The ledger directory, whose peers the contract tools reach; empty in
     /// client mode (--server), where those tools are refused.
     [[nodiscard]] const std::filesystem::path& peers_dir() const {
@@ -1321,6 +1408,7 @@ private:
     }
 
     const Args& args_;
+    std::filesystem::path files_;
     std::filesystem::path ledger_;
     std::unique_ptr<crypto::Signer> key_;
     std::vector<Tool> tools_;

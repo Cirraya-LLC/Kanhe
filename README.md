@@ -992,7 +992,9 @@ contract instances, and verify evidence from others. Every action is signed with
 its delegation does not cover it, and recorded with provenance: its model, a hash of the inputs it
 acted on, and the digest of the tool it used. Verification reports show all of this. MCP clients
 start the server without a terminal, so give it the agent key's passphrase with
-`--passphrase-file` or `KANHE_PASSPHRASE`.
+`--passphrase-file` or `KANHE_PASSPHRASE`. The files the agent names (attachments, evidence to
+verify, a consent to keep) are taken from one directory, `--files` (by default the one the
+server starts in): a path outside it, or a link that leads out of it, is refused.
 
 Agents take part in contracts too. On their own organization's ledger they create and call
 instances (`kanhe_call_contract`): the contract runs first, and the result says what it decided,
