@@ -583,6 +583,12 @@ int run_person_console(const Args& args, const std::filesystem::path& dir,
     }
     // The parties' registrars, asked for calls waiting on this ledger.
     web->start_polling();
+    // After `deferred`, which holds the API, so gone before it: the
+    // console's threads stop first, however this ends.
+    struct StopThreads {
+        console::Console& web;
+        ~StopThreads() { web.stop_threads(); }
+    } const stop_threads{*web};
 
     node::ServerOptions server_options;
     server_options.host = "127.0.0.1";
@@ -767,6 +773,12 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
                 api->submit_statement(std::move(body), std::move(respond));
             }
         });
+        // Party calls, automatic answers, backups, and the relay: as the
+        // person console has them, stopped before the API goes.
+        web.start_polling();
+    };
+    defaults.before_close = [parts] {
+        parts->web->stop_threads();
     };
     // Beyond this computer only over TLS: served here, or by an https
     // proxy in front (--public-url https://...).

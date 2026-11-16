@@ -233,6 +233,23 @@ void Console::start_polling(std::chrono::seconds every) {
     relayer_ = std::jthread([this](const std::stop_token& stop) { relay_loop(stop); });
 }
 
+void Console::stop_threads() {
+    poller_.request_stop();
+    relayer_.request_stop();
+    if (poller_.joinable()) {
+        poller_.join();
+    }
+    if (relayer_.joinable()) {
+        relayer_.join();
+    }
+    std::jthread certifier;
+    {
+        const std::lock_guard lock(certify_mutex_);
+        certifier = std::move(certifier_);
+    }
+    // Its destructor asks it to stop and waits.
+}
+
 void Console::poll_now() const {
     {
         const std::lock_guard lock(poll_mutex_);

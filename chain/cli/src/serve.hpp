@@ -31,6 +31,9 @@ struct ServeDefaults {
     /// (the console, extensions), and wires itself to it once it is open.
     std::function<void(node::ApiOptions& options)> before_open;
     std::function<void(node::LedgerApi& api)> after_open;
+    /// Once the server stopped (or failed) after `after_open`, before the
+    /// API closes: the application stops its threads that use it.
+    std::function<void()> before_close;
     /// The application's say on where the server may listen: it throws a
     /// UsageError to refuse an address beyond this computer without TLS.
     std::function<void(bool loopback, bool tls)> check_listen;

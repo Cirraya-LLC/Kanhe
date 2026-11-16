@@ -295,6 +295,10 @@ public:
     /// (poll_now), for the calls its registrar holds that concern this
     /// ledger, while the ledger is served; the Home inbox shows them.
     void start_polling(std::chrono::seconds every = std::chrono::seconds(60));
+    /// Stops the console's own threads (polling, the relay, a batch of
+    /// certificates) and waits for them: before the ledger and the API they
+    /// use go. Once the server stopped taking requests.
+    void stop_threads();
     void poll_now() const;
     void poll_peers() const;
     /// Parties' questions the console's machine answers by itself, on the

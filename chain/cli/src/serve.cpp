@@ -331,6 +331,16 @@ int serve(const Args& args, const ServeDefaults& defaults) {
     if (defaults.after_open) {
         defaults.after_open(*api);
     }
+    // After the API, so gone before it: however serve ends, the
+    // application's threads stop first.
+    struct Closing {
+        const std::function<void()>& close;
+        ~Closing() {
+            if (close) {
+                close();
+            }
+        }
+    } const closing{defaults.before_close};
 
     node::ServerOptions server_options;
     const auto [host, port] =
