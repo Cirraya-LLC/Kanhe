@@ -350,6 +350,10 @@ if(TARGET kanhe_bo)
     # A receivable pledged to a bank, released, sold, and paid.
     add_test(NAME demo_receivable_financing
         COMMAND bash ${PROJECT_SOURCE_DIR}/examples/receivable-financing/receivable-financing.sh $<TARGET_FILE:kanhe>)
+    # Who sees what along a supply chain: an order's fields disclosed one by
+    # one, the bank shown everything, the core enterprise none of it.
+    add_test(NAME demo_supply_chain_privacy
+        COMMAND bash ${PROJECT_SOURCE_DIR}/examples/supply-chain-privacy/supply-chain-privacy.sh $<TARGET_FILE:kanhe>)
     # A concert ticket in the words of a vocabulary pack of one's own.
     add_test(NAME demo_events
         COMMAND bash ${PROJECT_SOURCE_DIR}/examples/events/events.sh $<TARGET_FILE:kanhe>)

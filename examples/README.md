@@ -19,6 +19,7 @@ Each example is a directory with:
 | [lending](lending/) | A camera lent between two people: rules of a dozen lines, the borrower's consent on his own ledger, a private record for the details, and the history verified offline. No server, no platform | 2 people |
 | [supply-agreement](supply-agreement/) | An agreement proposed by one organization and signed once two others consent: a person at one, an AI agent (through MCP) at the other; a registrar collects the consents online; one ledger uses the Chinese SM2 and SM3 algorithms | 3 organizations |
 | [receivable-financing](receivable-financing/) | Supply-chain finance: a receivable pledged to a bank, a second pledge refused, released, sold to a factoring company, and paid; a regulator witnesses the home ledger, and the bank lends only once the pledge is witnessed | 5 organizations |
+| [supply-chain-privacy](supply-chain-privacy/) | Who sees what along a supply chain: a tier-1 supplier's order to its own supplier on its own ledger, its fields disclosed one by one, so the tier-2 supplier never learns who the tier-1 supplier's customer is; a bank shown everything, which pays the tier-2 supplier early against the core enterprise's receivable, pledged to it; the core enterprise sees the pledge, not the tier-2 supplier | 4 organizations |
 | [multi-tier-split](multi-tier-split/) | Multi-tier supply-chain finance: a receivable split down a supply chain, each part an instance of its own, a part pledged to a bank that verifies the whole chain offline first | 6 organizations |
 | [shipment](shipment/) | A chain of custody: goods kept cold, handed from a shipper to a carrier, a transit warehouse, and a consignee. The driver signs each handover in person with a hardware key, a data logger (a device) posts readings, readings in tenths of a degree (°C), a keeper marks the shipment late, delivery charges each whole day late and asks for a notice that an executor sends (a request, answered on the ledger), the consignee checks a QR code and claims from an insurer; one ledger uses SM2 and SM3 | 5 organizations |
 | [events](events/) | A concert ticket in the words of a vocabulary pack of the organizer's own (`events.vocab`: reserve, check in, guest, in three languages, with standard terms): the pack checked, the contract deployed with it, the fan's consent, and the history verified offline by someone without the pack file, since the deploy carries it | 2 (an organizer, a fan) |
@@ -36,7 +37,7 @@ examples/lending/lending.sh build/gcc-release/bin/kanhe ./lending-demo   # keep 
 ```
 
 The scripts are also tests: `ctest -R demo_` runs every one (`demo_lending`,
-`demo_supply_agreement`, `demo_receivable_financing`, `demo_multi_tier_split`,
+`demo_supply_agreement`, `demo_receivable_financing`, `demo_supply_chain_privacy`, `demo_multi_tier_split`,
 `demo_events`, `demo_shipment`, `demo_idc_hosting`), so they keep working as Kanhe changes. The shipment also needs SoftHSM,
 which stands in for its driver's hardware key (`brew install softhsm`, or `apt install
 softhsm2`).
