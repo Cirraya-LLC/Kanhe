@@ -156,6 +156,9 @@ expect_exit 2 credential verify diploma.jwt --allow-http --ledger-id "$(printf '
 fetch "$URL/c/$TOKEN" evidence.cbor > /dev/null
 fetch "$URL/status/1" list.jwt > /dev/null
 contains -i "^content-type: application/vc+jwt" headers.txt || fail "a status list's type"
+# Kept while nothing changes: the same signature (ES256 signs differently each time).
+fetch "$URL/status/1" again-list.jwt > /dev/null
+cmp list.jwt again-list.jwt || fail "a status list kept while nothing changes"
 part list.jwt 1 | json 'd["credentialSubject"]["encodedList"][:5]' | contains -x "uH4sI" ||
     fail "u and base64url of GZIP"
 run credential verify diploma.jwt --offline --evidence evidence.cbor --did-document did.json \
@@ -184,6 +187,7 @@ expect_exit 3 credential verify forged.jwt --offline --evidence evidence.cbor
 # --- Revoked: the list says so at once ----------------------------------------------------
 run credential revoke --ledger local --as root.key "$CERT" --reason "issued in error" > /dev/null
 [ "$(fetch "$URL/status/1" list2.jwt)" = 200 ] || fail "the list after a revocation"
+cmp -s list.jwt list2.jwt && fail "a new list after a revocation"
 fetch "$URL/c/$TOKEN" evidence2.cbor > /dev/null
 R="$(run credential verify diploma.jwt --allow-http --ledger-id "$LEDGER_ID" --json)"
 [ "$(echo "$R" | json 'd["verified"], d["record"]["status"], d["status_list"]["revoked"]')" = \

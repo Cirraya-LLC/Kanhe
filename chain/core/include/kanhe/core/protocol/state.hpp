@@ -286,6 +286,9 @@ public:
     /// creation's statement id only if no call made it a child (v0.7): find
     /// the call that created an instance by `InstanceState::created_by`.
     [[nodiscard]] std::optional<std::uint64_t> statement_index(const Id& id) const;
+    /// How many statements the state holds, the genesis included: as the
+    /// log only grows, the same number means the same state.
+    [[nodiscard]] std::uint64_t statement_count() const noexcept { return statements_.size(); }
 
     /// Every actor, delegation, and record, in the order the log created
     /// them; each element is {key, value}.

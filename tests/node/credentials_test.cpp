@@ -585,6 +585,89 @@ TEST_CASE("what cannot be a claim is named", "[credentials]") {
     CHECK(*verifier::claim_value(V::boolean(true)) == true);
 }
 
+TEST_CASE("credential answers are planned under the lock and kept while nothing changes",
+          "[credentials]") {
+    College c;
+    c.endorse({.list = 1, .index = 8}, c.device);
+    // Not owned: the college keeps its device key.
+    const std::shared_ptr<const crypto::Signer> key(std::shared_ptr<void>(), &c.device);
+    node::CredentialService service{.key = [&] { return key; },
+                                    .base = [&] { return std::optional(c.base); }};
+    const auto statement_at = [&](std::uint64_t index) -> kanhe::Result<protocol::SignedStatement> {
+        const auto entry_bytes = c.w.ledger().entry(index);
+        const auto log_entry = protocol::decode_log_entry(*entry_bytes);
+        return protocol::parse_statement(provider(), log_entry->statement, c.w.hash());
+    };
+    const auto plan_of = [&](std::string_view path) {
+        auto planned =
+            node::plan_credential_response(provider(), service, c.w.ledger().state(), path);
+        REQUIRE(std::holds_alternative<node::CredentialPlan>(planned));
+        return std::get<node::CredentialPlan>(std::move(planned));
+    };
+    const auto answer = [&](const node::CredentialPlan& plan) {
+        auto r = node::credential_response(provider(), plan, t0, statement_at);
+        REQUIRE(r.status == 200);
+        return r;
+    };
+
+    // What the answer is made from, read from the state.
+    const node::CredentialPlan list = plan_of("/status/1");
+    CHECK(list.version == c.w.ledger().state().statement_count());
+    CHECK(list.list == 1);
+    CHECK_FALSE(verifier::status_bit(list.bits, 8));
+    const node::CredentialPlan did = plan_of("/.well-known/did.json");
+    CHECK(did.list == 0);
+    CHECK(did.key_statements.size() == 1); // the device's registration
+    // Errors are answered at once.
+    const auto none =
+        node::plan_credential_response(provider(), service, c.w.ledger().state(), "/status/2");
+    REQUIRE(std::holds_alternative<kanhe::node::http::Response>(none));
+    CHECK(std::get<kanhe::node::http::Response>(none).status == 404);
+
+    node::CredentialCache cache;
+    const auto signed_list = answer(list);
+    cache.keep("/status/1", list, t0, signed_list);
+    const auto& pub = c.device.public_key();
+    const auto kept = cache.find("/status/1", list.version, pub, c.base, t0 + 1'000);
+    REQUIRE(kept);
+    CHECK(kept->body == signed_list.body);
+    // Signed again a minute on, or if the clock went back.
+    CHECK_FALSE(
+        cache.find("/status/1", list.version, pub, c.base, t0 + node::credential_list_max_age_ms));
+    CHECK_FALSE(cache.find("/status/1", list.version, pub, c.base, t0 - 1));
+    // Not for another state, key, base URL, or path.
+    CHECK_FALSE(cache.find("/status/1", list.version + 1, pub, c.base, t0));
+    const KeyPair other = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    CHECK_FALSE(cache.find("/status/1", list.version, other.public_key(), c.base, t0));
+    CHECK_FALSE(cache.find("/status/1", list.version, pub,
+                           *verifier::parse_base_url("https://other.example.com"), t0));
+    CHECK_FALSE(cache.find("/did.json", list.version, pub, c.base, t0));
+    // A DID document holds no time: kept until the state changes.
+    cache.keep("/.well-known/did.json", did, t0, answer(did));
+    CHECK(cache.find("/.well-known/did.json", did.version, pub, c.base,
+                     t0 + 10 * node::credential_list_max_age_ms));
+    // Errors are not kept.
+    kanhe::node::http::Response error;
+    error.status = 503;
+    cache.keep("/status/3", list, t0, error);
+    CHECK_FALSE(cache.find("/status/3", list.version, pub, c.base, t0));
+
+    // A revocation is a new state: a new plan, with the bit set. An answer
+    // from the older state that finishes last is not kept over it.
+    c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt,
+                                    protocol::RecordRevokeBody{c.record, "issued in error"}));
+    CHECK_FALSE(cache.find("/status/1", c.w.ledger().state().statement_count(), pub, c.base, t0));
+    const node::CredentialPlan revoked = plan_of("/status/1");
+    CHECK(revoked.version == list.version + 1);
+    CHECK(verifier::status_bit(revoked.bits, 8));
+    const auto revoked_list = answer(revoked);
+    cache.keep("/status/1", revoked, t0, revoked_list);
+    cache.keep("/status/1", list, t0, signed_list);
+    const auto newest = cache.find("/status/1", revoked.version, pub, c.base, t0);
+    REQUIRE(newest);
+    CHECK(newest->body == revoked_list.body);
+}
+
 TEST_CASE("a full status list moves on to the next", "[credentials]") {
     std::vector<node::CredentialEntry> entries;
     for (std::uint64_t i = 0; i < verifier::status_list_size; ++i) {

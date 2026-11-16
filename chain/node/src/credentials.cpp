@@ -188,10 +188,13 @@ bool is_credential_key(const protocol::LedgerState& state, const protocol::Actor
     return false;
 }
 
-Result<std::vector<crypto::PublicKey>> credential_keys(
-    const protocol::LedgerState& state, std::span<const CredentialEntry> entries,
-    std::optional<protocol::Id> also,
-    const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at) {
+namespace {
+
+/// The log indexes of the statements that gave each key of every unrevoked
+/// actor among `entries`' and `also`: its registration and its rotations.
+std::vector<std::uint64_t> key_statements(const protocol::LedgerState& state,
+                                          std::span<const CredentialEntry> entries,
+                                          std::optional<protocol::Id> also) {
     std::vector<protocol::Id> actors;
     for (const CredentialEntry& e : entries) {
         if (!std::ranges::contains(actors, e.actor)) {
@@ -201,48 +204,61 @@ Result<std::vector<crypto::PublicKey>> credential_keys(
     if (also && !std::ranges::contains(actors, *also)) {
         actors.push_back(*also);
     }
-    std::vector<crypto::PublicKey> keys;
+    std::vector<std::uint64_t> out;
     for (const protocol::Id& id : actors) {
         const protocol::ActorState* actor = state.actor(id);
         if (actor == nullptr || actor->revoked) {
             continue;
         }
-        // The key it was registered with, and each it rotated to.
-        const auto registration = statement_at(actor->registered_at_index);
-        if (!registration) {
-            return std::unexpected(registration.error());
+        out.push_back(actor->registered_at_index);
+        out.insert(out.end(), actor->rotations.begin(), actor->rotations.end());
+    }
+    return out;
+}
+
+/// The ES256 keys the statements at `indexes` registered or rotated to.
+Result<std::vector<crypto::PublicKey>>
+keys_at(std::span<const std::uint64_t> indexes,
+        const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at) {
+    std::vector<crypto::PublicKey> keys;
+    for (const std::uint64_t index : indexes) {
+        const auto signed_statement = statement_at(index);
+        if (!signed_statement) {
+            return std::unexpected(signed_statement.error());
         }
+        const crypto::PublicKey* key = nullptr;
         if (const auto* body =
-                std::get_if<protocol::ActorRegisterBody>(&registration->statement.body)) {
-            if (body->key.algorithm == crypto::SigAlg::esp256) {
-                keys.push_back(body->key);
-            }
+                std::get_if<protocol::ActorRegisterBody>(&signed_statement->statement.body)) {
+            key = &body->key;
+        } else if (const auto* rotation = std::get_if<protocol::ActorRotateKeyBody>(
+                       &signed_statement->statement.body)) {
+            key = &rotation->key;
         }
-        for (const std::uint64_t index : actor->rotations) {
-            const auto rotation = statement_at(index);
-            if (!rotation) {
-                return std::unexpected(rotation.error());
-            }
-            if (const auto* body =
-                    std::get_if<protocol::ActorRotateKeyBody>(&rotation->statement.body);
-                body != nullptr && body->key.algorithm == crypto::SigAlg::esp256) {
-                keys.push_back(body->key);
-            }
+        if (key != nullptr && key->algorithm == crypto::SigAlg::esp256) {
+            keys.push_back(*key);
         }
     }
     return keys;
+}
+
+} // namespace
+
+Result<std::vector<crypto::PublicKey>> credential_keys(
+    const protocol::LedgerState& state, std::span<const CredentialEntry> entries,
+    std::optional<protocol::Id> also,
+    const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at) {
+    return keys_at(key_statements(state, entries, also), statement_at);
 }
 
 bool credential_path(std::string_view path) noexcept {
     return path == "/.well-known/did.json" || path == "/did.json" || list_number(path).has_value();
 }
 
-http::Response credential_response(
-    const crypto::Provider& provider, const CredentialService& service,
-    const protocol::LedgerState& state, std::string_view path, protocol::Timestamp now,
-    const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at) {
-    const std::shared_ptr<const crypto::Signer> key = service.key ? service.key() : nullptr;
-    const std::optional<verifier::BaseUrl> base = service.base ? service.base() : std::nullopt;
+std::variant<http::Response, CredentialPlan>
+plan_credential_response(const crypto::Provider& provider, const CredentialService& service,
+                         const protocol::LedgerState& state, std::string_view path) {
+    std::shared_ptr<const crypto::Signer> key = service.key ? service.key() : nullptr;
+    std::optional<verifier::BaseUrl> base = service.base ? service.base() : std::nullopt;
     if (key == nullptr || !base) {
         return open_error(404, "not_found", "this server issues no credentials (yet)");
     }
@@ -257,13 +273,36 @@ http::Response credential_response(
                           "the server's credential key is not a credential key of this ledger: a "
                           "device whose delegations cover record endorsements and nothing else");
     }
+    CredentialPlan plan;
+    plan.key = std::move(key);
+    plan.base = std::move(*base);
+    plan.ledger_id = state.ledger_id();
+    plan.hash = state.hash();
+    plan.version = state.statement_count();
     const std::vector<CredentialEntry> entries = credential_entries(state);
     if (path == "/.well-known/did.json" || path == "/did.json") {
-        const auto keys = credential_keys(state, entries, actor->id.id(), statement_at);
+        plan.key_statements = key_statements(state, entries, actor->id.id());
+        return plan;
+    }
+    const auto list = list_number(path);
+    if (!list || !std::ranges::contains(status_lists(entries), *list)) {
+        return open_error(404, "not_found", "no credential names that status list");
+    }
+    plan.list = *list;
+    plan.bits = status_bits(state, entries, *list);
+    plan.organization = state.organization();
+    return plan;
+}
+
+http::Response credential_response(
+    const crypto::Provider& provider, const CredentialPlan& plan, protocol::Timestamp now,
+    const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at) {
+    if (plan.list == 0) {
+        const auto keys = keys_at(plan.key_statements, statement_at);
         if (!keys) {
             return open_error(500, "internal", "the credential keys could not be read");
         }
-        const auto doc = verifier::did_document(provider, *base, *keys, state.ledger_id());
+        const auto doc = verifier::did_document(provider, plan.base, *keys, plan.ledger_id);
         const auto text =
             doc ? verifier::jcs(*doc) : Result<std::string>(std::unexpected(doc.error()));
         if (!text) {
@@ -271,18 +310,53 @@ http::Response credential_response(
         }
         return open_response(200, "application/did+json", *text);
     }
-    const auto list = list_number(path);
-    if (!list || !std::ranges::contains(status_lists(entries), *list)) {
-        return open_error(404, "not_found", "no credential names that status list");
-    }
-    const Bytes bits = status_bits(state, entries, *list);
     const verifier::Json payload =
-        verifier::status_list_json(*base, state.organization(), *list, bits, now);
-    const auto jws = verifier::sign_credential(*key, provider, base->did, payload);
+        verifier::status_list_json(plan.base, plan.organization, plan.list, plan.bits, now);
+    const auto jws = verifier::sign_credential(*plan.key, provider, plan.base.did, payload);
     if (!jws) {
         return open_error(500, "internal", "the status list could not be signed");
     }
     return open_response(200, std::string(verifier::credential_media_type), *jws);
+}
+
+std::optional<http::Response> CredentialCache::find(std::string_view path, std::uint64_t version,
+                                                    const crypto::PublicKey& key,
+                                                    const verifier::BaseUrl& base,
+                                                    protocol::Timestamp now) const {
+    const std::scoped_lock lock(mutex_);
+    const auto it = kept_.find(path);
+    if (it == kept_.end()) {
+        return std::nullopt;
+    }
+    const Kept& k = it->second;
+    if (k.version != version || k.key != key || k.base != base) {
+        return std::nullopt;
+    }
+    // A list says when it was signed: sign again once that is long ago, or
+    // if the clock went back.
+    if (k.list && (now < k.made || now - k.made >= credential_list_max_age_ms)) {
+        return std::nullopt;
+    }
+    return k.response;
+}
+
+void CredentialCache::keep(std::string_view path, const CredentialPlan& plan,
+                           protocol::Timestamp now, const http::Response& response) {
+    if (response.status != 200) {
+        return;
+    }
+    const std::scoped_lock lock(mutex_);
+    Kept& k = kept_[std::string(path)];
+    // Answers made from an older state may finish last: keep the newest.
+    if (k.version > plan.version) {
+        return;
+    }
+    k = Kept{.version = plan.version,
+             .key = plan.key->public_key(),
+             .base = plan.base,
+             .list = plan.list != 0,
+             .made = now,
+             .response = response};
 }
 
 } // namespace kanhe::node

@@ -207,6 +207,8 @@ whose payload is the JCS of
 
 `validFrom` is when the list was made, from the ledger's state then. An issuer serves the list as
 its ledger is when asked, so a revocation shows at once. 404 for a list no endorsement names.
+(The reference server signs a list again only when the ledger changed or a minute has passed:
+anyone may ask, and a list from the same state says the same.)
 
 ## 6. Issuing
 

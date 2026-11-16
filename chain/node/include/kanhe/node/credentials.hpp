@@ -5,11 +5,14 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 #include <kanhe/core/bytes.hpp>
@@ -95,12 +98,73 @@ struct CredentialService {
 /// /did.json, /status/N.
 [[nodiscard]] bool credential_path(std::string_view path) noexcept;
 
-/// Answers GET of a credential path from the ledger's state: the DID
-/// document, or a status list signed now with the service's key.
-/// `statement_at` as for `credential_keys`.
+/// What the answer to a credential path is made from, read from the state
+/// under its lock (`plan_credential_response`), so that the slow part, the
+/// statements read from the log, the DID document, compressing and signing a
+/// status list, is done outside it (`credential_response`).
+struct CredentialPlan {
+    std::shared_ptr<const crypto::Signer> key;
+    verifier::BaseUrl base;
+    protocol::Id ledger_id;
+    crypto::HashAlg hash{};
+    /// The number of statements in the state read: the same number, the
+    /// same state (the log only grows).
+    std::uint64_t version = 0;
+    /// The DID document: the log indexes of each key's registration or
+    /// rotation (`credential_keys`).
+    std::vector<std::uint64_t> key_statements;
+    /// A status list (list > 0): its number, its bits, the issuer's name.
+    std::uint64_t list = 0;
+    Bytes bits;
+    std::string organization;
+};
+
+/// The answer to GET of a credential path at once (an error, as an
+/// `http::Response`), or what to make it from.
+[[nodiscard]] std::variant<http::Response, CredentialPlan>
+plan_credential_response(const crypto::Provider& provider, const CredentialService& service,
+                         const protocol::LedgerState& state, std::string_view path);
+
+/// Answers GET of a credential path from its plan: the DID document, or a
+/// status list signed now with the service's key. `statement_at` reads the
+/// signed statement at a log index, as for `credential_keys`.
 [[nodiscard]] http::Response credential_response(
-    const crypto::Provider& provider, const CredentialService& service,
-    const protocol::LedgerState& state, std::string_view path, protocol::Timestamp now,
+    const crypto::Provider& provider, const CredentialPlan& plan, protocol::Timestamp now,
     const std::function<Result<protocol::SignedStatement>(std::uint64_t)>& statement_at);
+
+/// How long a status list is kept while nothing changes, in milliseconds:
+/// its `validFrom` says when it was signed, and stays this recent.
+inline constexpr protocol::Timestamp credential_list_max_age_ms = 60'000;
+
+/// The answers to credential paths, kept while the ledger's state, the
+/// service's key, and its base URL stay the same (a status list for at most
+/// `credential_list_max_age_ms` besides): one scan of the state and one
+/// signature for each change, however many ask, since anyone may.
+/// Thread-safe.
+class CredentialCache {
+public:
+    /// A kept answer to `path`, made from the state with `version`
+    /// statements, with `key` and `base`, if there is one recent enough at
+    /// `now`. Cheap: ask before planning.
+    [[nodiscard]] std::optional<http::Response> find(std::string_view path, std::uint64_t version,
+                                                     const crypto::PublicKey& key,
+                                                     const verifier::BaseUrl& base,
+                                                     protocol::Timestamp now) const;
+    /// Keeps a successful answer to `path`, made from `plan` at `now`.
+    void keep(std::string_view path, const CredentialPlan& plan, protocol::Timestamp now,
+              const http::Response& response);
+
+private:
+    struct Kept {
+        std::uint64_t version = 0;
+        crypto::PublicKey key;
+        verifier::BaseUrl base;
+        bool list = false;
+        protocol::Timestamp made = 0;
+        http::Response response;
+    };
+    mutable std::mutex mutex_;
+    std::map<std::string, Kept, std::less<>> kept_;
+};
 
 } // namespace kanhe::node

@@ -358,6 +358,8 @@ struct LedgerApi::State {
     std::atomic<std::uint64_t> refused = 0;
     std::atomic<std::uint64_t> auto_checkpoints = 0;
 
+    /// Credential answers kept while nothing changes (credentials.hpp).
+    mutable CredentialCache credential_cache;
     mutable std::mutex event_mutex;
     /// Which ledger each of this ledger's memberships names (v0.16).
     mutable MembershipIndex membership_index;
@@ -1679,24 +1681,45 @@ struct LedgerApi::State {
     // ---- credentials (credentials.hpp) --------------------------------------
 
     /// GET /.well-known/did.json, /did.json, /status/N, from the state as it
-    /// is now: a revocation shows at once.
+    /// is now: a revocation shows at once. Anyone may ask, so only reading
+    /// the state is done under its lock, and an answer is kept until the
+    /// state changes (a list a minute at most): the rest, reading keys from
+    /// the log, compressing and signing, is done outside, once per change.
     http::Response credential(std::string_view path) const {
-        http::Response out;
+        const CredentialService& service = *options.credentials;
+        const protocol::Timestamp now = clock->now();
+        if (const auto key = service.key ? service.key() : nullptr) {
+            if (const auto base = service.base ? service.base() : std::nullopt) {
+                std::uint64_t version = 0;
+                ledger->read_state(
+                    [&](const protocol::LedgerState& s) { version = s.statement_count(); });
+                if (auto kept =
+                        credential_cache.find(path, version, key->public_key(), *base, now)) {
+                    return std::move(*kept);
+                }
+            }
+        }
+        std::variant<http::Response, CredentialPlan> planned;
         ledger->read_state([&](const protocol::LedgerState& s) {
-            out = credential_response(
-                *provider, *options.credentials, s, path, clock->now(),
-                [&](std::uint64_t index) -> Result<protocol::SignedStatement> {
-                    const auto bytes = ledger->entry(index);
-                    if (!bytes) {
-                        return std::unexpected(bytes.error());
-                    }
-                    const auto entry = protocol::decode_log_entry(*bytes);
-                    if (!entry) {
-                        return std::unexpected(entry.error());
-                    }
-                    return protocol::parse_statement(*provider, entry->statement, s.hash());
-                });
+            planned = plan_credential_response(*provider, service, s, path);
         });
+        if (auto* answer = std::get_if<http::Response>(&planned)) {
+            return std::move(*answer);
+        }
+        const CredentialPlan& plan = std::get<CredentialPlan>(planned);
+        http::Response out = credential_response(
+            *provider, plan, now, [&](std::uint64_t index) -> Result<protocol::SignedStatement> {
+                const auto bytes = ledger->entry(index);
+                if (!bytes) {
+                    return std::unexpected(bytes.error());
+                }
+                const auto entry = protocol::decode_log_entry(*bytes);
+                if (!entry) {
+                    return std::unexpected(entry.error());
+                }
+                return protocol::parse_statement(*provider, entry->statement, plan.hash);
+            });
+        credential_cache.keep(path, plan, now, out);
         return out;
     }
 
