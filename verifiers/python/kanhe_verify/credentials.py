@@ -474,18 +474,34 @@ def verify_credential(compact: str, bundle: bytes, *, did_document: str | None =
         except VerifyError as e:
             r.list_problems.append(f"the status list is not a JWS of this profile ({e})")
             return r
-        signed = False
-        if r.key_actor is not None:
-            index = next(i for i in record.history if ledger.applied[i].statement.type == protocol.RECORD_ENDORSE
-                         and ledger.applied[i].statement.fields["role"] == role
-                         and ledger.applied[i].signer == r.key_actor.id)
-            for key in _keys_from(ledger, r.key_actor, index):
-                if (key.alg == crypto.ESP256 and lst.kid == c.issuer + "#" + thumbprint(key)
-                        and crypto.verify_signature(key, lst.signing_input, lst.signature)):
-                    signed = True
-                    break
+        # Signed by a key of the issuer's: one its DID document lists, once step 6
+        # tied that document to this ledger, else one of a device that endorsed
+        # the record in this entry's role. The bit is compared with the ledger below.
+        keys = []
+        by_document = r.did_problems == []
+        if by_document:
+            doc = json.loads(did_document)
+            named = [m for m in doc.get("assertionMethod") or [] if isinstance(m, str)]
+            for method in doc.get("verificationMethod") or []:
+                if isinstance(method, dict) and method.get("id") in named:
+                    try:
+                        keys.append(jwk_key(method.get("publicKeyJwk")))
+                    except VerifyError:
+                        pass
+        else:
+            for i in record.history:
+                applied = ledger.applied[i]
+                if (applied.statement.type == protocol.RECORD_ENDORSE
+                        and applied.statement.fields["role"] == role
+                        and ledger.actors[applied.signer].kind == protocol.DEVICE):
+                    keys.extend(_keys_from(ledger, ledger.actors[applied.signer], i))
+        signed = any(key.alg == crypto.ESP256 and lst.kid == c.issuer + "#" + thumbprint(key)
+                     and crypto.verify_signature(key, lst.signing_input, lst.signature) for key in keys)
         if not signed:
-            r.list_problems.append("the status list is not signed by the device that endorsed the record")
+            r.list_problems.append("the status list is not signed by a key the issuer's DID document lists"
+                                   if by_document else
+                                   "the status list is not signed by a device that endorsed the record as "
+                                   "this credential")
         p = lst.payload
         subject = p.get("credentialSubject") if isinstance(p.get("credentialSubject"), dict) else {}
         types = p.get("type") if isinstance(p.get("type"), list) else []

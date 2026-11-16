@@ -962,11 +962,11 @@ run checkpoint create --log-key vc-log.key > /dev/null
 run export "$VC_CERT" --disclose name,programme --log-key vc-log.key --out vc-evidence.cbor > /dev/null
 run credential did-document --url "$VC_URL" --out vc-did.json > /dev/null
 run credential status --as vc-cred.key --url "$VC_URL" --out vc-list.jwt > /dev/null
-vc_compare() { # CREDENTIAL EVIDENCE LIST: both verifiers, the same facts
-    local c="$1" e="$2" l="$3" ours theirs
-    ours="$(run credential verify "$c" --offline --evidence "$e" --did-document vc-did.json --status-list "$l" \
+vc_compare() { # CREDENTIAL EVIDENCE LIST [DID]: both verifiers, the same facts
+    local c="$1" e="$2" l="$3" did="${4:-vc-did.json}" ours theirs
+    ours="$(run credential verify "$c" --offline --evidence "$e" --did-document "$did" --status-list "$l" \
         --ledger-id "$VC_ID" --json || true)"
-    theirs="$(pyverify credential "$c" --evidence "$e" --did-document vc-did.json --status-list "$l" \
+    theirs="$(pyverify credential "$c" --evidence "$e" --did-document "$did" --status-list "$l" \
         --ledger-id "$VC_ID" --json || true)"
     "$PYTHON" - "$ours" "$theirs" << 'PY' || fail "the verifiers disagree on a credential"
 import json, sys
@@ -1028,6 +1028,16 @@ s = min(s, n - s)
 print(h + "." + p + "." + b(r.to_bytes(32, "big") + s.to_bytes(32, "big")))
 PY
 [ "$(vc_compare vc-stranger.jwt vc-evidence.cbor vc-list.jwt)" = False ] || fail "a stranger's signature fails in both"
+# A second credential key, a server's, signs the lists: valid when the issuer's DID
+# document lists it, as a standard verifier would read the list; not when it does not.
+run credential key add Server --key-out vc-server.key --as vc-root.key > /dev/null
+run credential did-document --url "$VC_URL" --key vc-server.key --out vc-did2.json > /dev/null
+run credential status --as vc-server.key --url "$VC_URL" --out vc-list-server.jwt > /dev/null
+[ "$(vc_compare vc.jwt vc-evidence.cbor vc-list-server.jwt vc-did2.json)" = True ] ||
+    fail "a list by another key the DID document lists verifies in both"
+[ "$(vc_compare vc.jwt vc-evidence.cbor vc-list-server.jwt)" = False ] ||
+    fail "a list by a key the DID document does not list fails in both"
+COMPARED=$((COMPARED + 2))
 run record revoke "$VC_CERT" --as vc-root.key --reason "issued in error" > /dev/null
 run checkpoint create --log-key vc-log.key > /dev/null
 run export "$VC_CERT" --disclose name,programme --log-key vc-log.key --out vc-revoked.cbor > /dev/null

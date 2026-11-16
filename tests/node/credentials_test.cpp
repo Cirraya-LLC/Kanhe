@@ -443,6 +443,58 @@ TEST_CASE("a credential key that rotates keeps its credentials verifying", "[cre
     CHECK(methods[0]["id"].get<std::string>() < methods[1]["id"].get<std::string>());
 }
 
+TEST_CASE("a status list signed by another of the issuer's credential keys", "[credentials]") {
+    College c;
+    const verifier::StatusEntry entry{.list = 1, .index = 11};
+    c.endorse(entry, c.device);
+    // A second credential key, the server's, which signs the lists.
+    const KeyPair server = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    const protocol::Id server_id =
+        c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt,
+                                        protocol::ActorRegisterBody{protocol::ActorKind::device,
+                                                                    "Server", server.public_key(),
+                                                                    std::nullopt, std::nullopt}));
+    c.w.grant(c.w.org(), c.w.org_id(), std::nullopt, server_id,
+              scope({StatementType::record_endorse}));
+    const Bytes bundle = c.evidence();
+    const std::string credential = c.sign(c.payload(bundle, entry), c.device);
+    verifier::CredentialOptions options;
+    options.status_list = c.status_list(server);
+    // Without the DID document, only a device that endorsed the record vouches
+    // for a list.
+    const auto alone = c.check(credential, bundle, options);
+    REQUIRE(alone.status_list_problems.size() == 1);
+    CHECK(alone.status_list_problems[0].find("not signed by a device that endorsed") !=
+          std::string::npos);
+    // With the issuer's DID document, which lists both keys, either signs its lists.
+    options.did_document = verifier::did_document(provider(), c.base,
+                                                  std::vector<crypto::PublicKey>{
+                                                      c.device.public_key(), server.public_key()},
+                                                  c.w.org_id())
+                               ->dump();
+    const auto both = c.check(credential, bundle, options);
+    CHECK(both.verified());
+    CHECK(both.status_list_bit == false);
+    // A key the document does not list does not.
+    const KeyPair stranger = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    options.status_list = c.status_list(stranger);
+    const auto foreign = c.check(credential, bundle, options);
+    REQUIRE(foreign.status_list_problems.size() == 1);
+    CHECK(foreign.status_list_problems[0].find("a key the issuer's DID document lists") !=
+          std::string::npos);
+    // Whoever signed it, a list whose bit disagrees with the ledger is found out.
+    const std::string before = c.status_list(server);
+    c.w.ok(c.w.org(), c.w.statement(c.w.org_id(), std::nullopt,
+                                    protocol::RecordRevokeBody{c.record, "issued in error"}));
+    const Bytes revoked = c.evidence();
+    options.status_list = before;
+    const auto stale = c.check(credential, revoked, options);
+    CHECK_FALSE(stale.verified());
+    CHECK(stale.status_list_problems.size() == 1);
+    options.status_list = c.status_list(server);
+    CHECK(c.check(credential, revoked, options).verified());
+}
+
 TEST_CASE("only a credential key's endorsements are entries, keys, and bits", "[credentials]") {
     College c;
     const verifier::StatusEntry entry{.list = 1, .index = 7};

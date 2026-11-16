@@ -3,6 +3,12 @@
 Profile 1 (draft), for protocol revision v0.17 and later. It changes nothing in the protocol: no
 statement, ledger rule, or evidence format is new.
 
+**Changes in this draft (2026-11-15).** A status list may be signed by any key the issuer's DID
+document lists (section 7, step 7): before, only by the device that endorsed the credential, so a
+second credential key, or a server key moved to a new device, made valid credentials fail. A list
+counts only credential keys' endorsements (section 5), and a credential key is a device whose
+every delegation, ever, covers endorsements only (section 2).
+
 A record can be handed over as a **W3C Verifiable Credential**, so that a digital wallet can hold
 it and any verifier that knows the standards can check it. A verifier that also knows Kanhe checks
 the record behind it: that it is on the issuer's witnessed ledger, live or revoked, with the same
@@ -41,8 +47,9 @@ names the host the same way. Verifiers MUST NOT fetch an `http` URL unless told 
 
 A credential is signed with ECDSA P-256 and SHA-256 (`ES256`), which wallets accept, by a
 **credential key**: a device actor of the issuer's ledger (section 3 of the protocol, `esp256`)
-whose delegations cover `record-endorse` (type 17) and nothing else. A ledger may have several,
-and a credential key may rotate its key like any actor.
+whose delegations, every one it was ever granted (at least one), cover `record-endorse` (type 17)
+and nothing else; a device once granted more is never one. A ledger may have several, and a
+credential key may rotate its key like any actor.
 
 The first time it issues a credential for a record, the credential key **endorses that record in
 the role `credential/N/I`**, where N and I are the credential's status list and index (section 5),
@@ -166,8 +173,10 @@ current list that no endorsement names (so that indices say nothing of the order
 start list `N + 1` when one is full.
 
 **A list is a function of the ledger.** Its bit `I` is 1 if a record endorsed in the role
-`credential/N/I` is **revoked or replaced** (section 6 of the protocol: revoked, or superseded by
-a newer version), and 0 otherwise; indices no endorsement names are 0. (Should two records name one
+`credential/N/I` by a credential key (section 2) is **revoked or replaced** (section 6 of the
+protocol: revoked, or superseded by a newer version), and 0 otherwise; indices no such endorsement
+names are 0. Any actor allowed to endorse may write a role that reads `credential/N/I`; only a
+credential key's names an entry, so no one else can set a credential's bit. (Should two records name one
 entry, which an issuer avoids, the bit is 1 if either is revoked or replaced.) So anyone holding
 the ledger can recompute every list, and a Kanhe verifier checks one credential's bit against its
 record's evidence. Bit `I` is bit
@@ -248,10 +257,15 @@ DID document and status list credential, it:
 6. with a DID document: requires its `id` to be the issuer's DID, a verification method under
    `kid` whose JWK is A's key (the one the JWS verified with), and the Kanhe service's `ledger`
    to be the bundle's ledger;
-7. with the status list credential: requires it to verify with a key of A (as in 3), its `id` to
+7. with the status list credential: requires it to verify with a key the issuer has, its `kid`
+   the issuer's DID, `#`, and that key's thumbprint: when step 6 held for a DID document, any key
+   a verification method gives that its `assertionMethod` names (as a standard verifier reads the
+   list); without one, a key of any device that endorsed the record in the role `credential/N/I`,
+   in effect at its endorsement or rotated to after it (as in 3). It requires the list's `id` to
    be the entry's `statusListCredential`, and its bit at the entry's index to be 1 exactly when
    the bundle shows the record revoked or replaced. A list that disagrees with the ledger is
-   reported as such: the issuer's list says otherwise than its ledger.
+   reported as such: the issuer's list says otherwise than its ledger. (The bit, compared with
+   the ledger, is what this step proves; the signature only shows the list is the issuer's.)
 
 It reports: the outcome of each check; the record, its type, its status; who endorsed it as a
 credential (A's name and id) and when; the issuer as the genesis names it; the fields; and the
@@ -267,7 +281,9 @@ A server given a credential key and its base URL answers, openly (no token), eac
   of the server's credential key and of every credential key that endorsed a record in a role
   `credential/N/I`;
 - `GET /status/{N}`: the status list credential (section 5), signed with the server's credential
-  key, which must be unrevoked.
+  key, which must be an unrevoked credential key (section 2). It may differ from the key that
+  issued a credential: the DID document lists both, and a verifier accepts either (section 7,
+  step 7).
 
 A server without one answers 404 to these, as to any unknown path. Nothing else is served:
 issuing is an endorsement, submitted as any statement is (section 16 of the protocol).

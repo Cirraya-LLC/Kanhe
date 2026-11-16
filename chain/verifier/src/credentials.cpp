@@ -80,6 +80,29 @@ const std::string* text_member(const Json& object, std::string_view name) {
     return m != nullptr && m->is_string() ? &m->get_ref<const std::string&>() : nullptr;
 }
 
+/// The JWKs of a DID document's verification methods that its
+/// assertionMethod names (by id), in the document's order.
+std::vector<Json> did_assertion_keys(const Json& doc) {
+    std::vector<Json> out;
+    const Json* methods = member(doc, "verificationMethod");
+    const Json* assertion = member(doc, "assertionMethod");
+    if (methods == nullptr || !methods->is_array() || assertion == nullptr ||
+        !assertion->is_array()) {
+        return out;
+    }
+    for (const Json& method : *methods) {
+        const std::string* id = text_member(method, "id");
+        const Json* jwk = member(method, "publicKeyJwk");
+        if (id != nullptr && jwk != nullptr &&
+            std::ranges::any_of(*assertion, [&](const Json& named) {
+                return named.is_string() && named.get_ref<const std::string&>() == *id;
+            })) {
+            out.push_back(*jwk);
+        }
+    }
+    return out;
+}
+
 bool only_members(const Json& object, std::initializer_list<std::string_view> allowed) {
     return std::ranges::all_of(object.items(), [&](const auto& item) {
         return std::ranges::contains(allowed, std::string_view(item.key()));
@@ -970,22 +993,42 @@ Result<CredentialReport> verify_credential(const crypto::Provider& provider,
             problems.push_back(std::format("the status list is not a JWS of this profile ({})",
                                            list.error().detail));
         } else {
-            bool signature = false;
-            if (r.key_actor && signed_with) {
-                const auto keys = keys_from(actor_keys(provider, *decoded, e.hash, *r.key_actor),
-                                            r.endorsement_index);
-                for (const crypto::PublicKey& key : keys) {
-                    const auto thumbprint = jwk_thumbprint(provider, key);
-                    if (thumbprint && list->kid == r.issuer + "#" + *thumbprint &&
-                        verify_jws(provider, *list, key)) {
-                        signature = true;
-                        break;
+            // Signed by a key of the issuer's: one its DID document lists, once
+            // step 6 tied that document to this ledger (as a standard verifier
+            // reads a list), else one of a device that endorsed the record in
+            // this entry's role. Which key matters less than the bit, which is
+            // compared with the ledger below.
+            std::vector<crypto::PublicKey> keys;
+            if (r.did_document_checked && r.did_document_problems.empty()) {
+                const Json doc = Json::parse(*options.did_document, nullptr, false);
+                for (const Json& method : did_assertion_keys(doc)) {
+                    if (const auto key = jwk_key(method)) {
+                        keys.push_back(*key);
+                    }
+                }
+            } else {
+                for (const protocol::RecordEvent& event : e.events) {
+                    if (event.type == protocol::StatementType::record_endorse &&
+                        event.detail == role && event.actor.kind == protocol::ActorKind::device) {
+                        for (crypto::PublicKey& key :
+                             keys_from(actor_keys(provider, *decoded, e.hash, event.actor.id),
+                                       event.index)) {
+                            keys.push_back(std::move(key));
+                        }
                     }
                 }
             }
+            const bool signature = std::ranges::any_of(keys, [&](const crypto::PublicKey& key) {
+                const auto thumbprint = jwk_thumbprint(provider, key);
+                return thumbprint && list->kid == r.issuer + "#" + *thumbprint &&
+                       verify_jws(provider, *list, key);
+            });
             if (!signature) {
                 problems.push_back(
-                    "the status list is not signed by the device that endorsed the record");
+                    r.did_document_checked && r.did_document_problems.empty()
+                        ? "the status list is not signed by a key the issuer's DID document lists"
+                        : "the status list is not signed by a device that endorsed the record as "
+                          "this credential");
             }
             const Json& p = list->payload;
             const std::string* id = text_member(p, "id");
