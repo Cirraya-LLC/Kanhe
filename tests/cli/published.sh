@@ -116,6 +116,13 @@ run backup create --ledger local --log-key log.key --out b.cxb > /dev/null
 run backup restore b.cxb --ledger restored > /dev/null
 [ -f "restored/published/$TOKEN.cbor" ] || fail "restored"
 run record published --ledger restored --json | json 'd[0]["token"]' | contains -x -- "$TOKEN"
+# A read-only server takes nothing down: no other server would know.
+cp local/api-tokens restored/api-tokens
+start_server ro.json --ledger restored --read-only
+RO="$(json 'd["url"]' < ro.json)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X DELETE -H "Authorization: Bearer $(cat ops.token)" \
+    "$RO/v1/published/$TOKEN")" = 403 ] || fail "a read-only server refuses to unpublish"
+[ -f "restored/published/$TOKEN.cbor" ] || fail "and keeps the address"
 
 run record unpublish --ledger local "$TOKEN" > /dev/null
 [ "$(run record published --ledger local --json | json 'len(d)')" = 0 ] || fail "taken down"

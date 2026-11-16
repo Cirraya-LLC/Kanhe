@@ -148,10 +148,13 @@ std::vector<Published> list_published(const std::filesystem::path& ledger) {
 
 Status unpublish(const std::filesystem::path& ledger, std::string_view token) {
     std::error_code ec;
-    if (!valid_published_token(token) ||
-        !std::filesystem::remove(published_path(ledger, token), ec)) {
+    const std::filesystem::path path =
+        valid_published_token(token) ? published_path(ledger, token) : std::filesystem::path();
+    if (path.empty() || !std::filesystem::remove(path, ec)) {
         return fail(Errc::not_found, "nothing is published at that address");
     }
+    // Gone for good, a crash after the answer notwithstanding.
+    detail::sync_directory(path.parent_path());
     return {};
 }
 

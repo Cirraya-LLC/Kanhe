@@ -352,7 +352,14 @@ struct Ledger::Impl {
     /// newest that checks and its slot, the one this ledger opened from with
     /// its state's SHA-256, and when to write the next.
     std::array<std::unique_ptr<AppendFile>, 2> snapshot_slots;
+    /// The writer's; others read it through `snapshot()`, under
+    /// `snapshot_info_mutex`.
     std::optional<SnapshotInfo> snapshot_on_disk;
+    mutable std::mutex snapshot_info_mutex;
+    void set_snapshot_on_disk(std::optional<SnapshotInfo> info) {
+        const std::scoped_lock lock(snapshot_info_mutex);
+        snapshot_on_disk = std::move(info);
+    }
     std::size_t snapshot_slot = 0;
     std::optional<SnapshotInfo> opened_from;
     Bytes opened_state_digest;
@@ -1042,28 +1049,23 @@ struct Ledger::Impl {
         if (claimed(1) > claimed(0)) {
             std::swap(order[0], order[1]);
         }
-        std::optional<SnapshotFile> best;
+        // A slot that reads but does not check against the log is passed
+        // over for the other, as one that does not read is.
         for (const std::size_t slot : order) {
             if (!snapshot_slots[slot]) {
                 continue;
             }
             auto read =
                 read_snapshot(*provider, *snapshot_slots[slot], state.ledger_id(), state.hash());
-            if (read) {
-                best = std::move(*read);
-                snapshot_slot = slot;
-                break;
+            if (!read || !take_snapshot(*read)) {
+                continue;
             }
+            snapshot_slot = slot;
+            set_snapshot_on_disk(read->info);
+            last_snapshot_size = read->info.size;
+            return read->info.size;
         }
-        if (!best) {
-            return std::nullopt;
-        }
-        snapshot_on_disk = best->info;
-        last_snapshot_size = best->info.size;
-        if (!take_snapshot(*best)) {
-            return std::nullopt;
-        }
-        return best->info.size;
+        return std::nullopt;
     }
 
     bool take_snapshot(const SnapshotFile& file) {
@@ -1265,7 +1267,7 @@ struct Ledger::Impl {
         if (auto s = file.sync(); !s) {
             return s;
         }
-        snapshot_on_disk = info;
+        set_snapshot_on_disk(info);
         snapshot_slot = slot;
         last_snapshot_size = info.size;
         return {};
@@ -1430,6 +1432,7 @@ Status Ledger::write_snapshot() {
 }
 
 std::optional<SnapshotInfo> Ledger::snapshot() const {
+    const std::scoped_lock lock(impl_->snapshot_info_mutex);
     return impl_->snapshot_on_disk;
 }
 
@@ -1446,7 +1449,7 @@ Status Ledger::remove_snapshots() {
             }
         }
     }
-    impl_->snapshot_on_disk.reset();
+    impl_->set_snapshot_on_disk(std::nullopt);
     impl_->last_snapshot_size = 0;
     return {};
 }

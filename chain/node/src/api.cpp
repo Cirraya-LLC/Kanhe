@@ -1684,14 +1684,18 @@ struct LedgerApi::State {
         auto newest = [this, member] {
             return member ? membership_index.newest(*provider, *ledger, *member) : std::nullopt;
         };
-        const bool can_write =
-            !options.read_only && !replica && !cluster && !options.log_keys.empty();
+        const bool can_write = !options.read_only && !replica && !options.log_keys.empty();
         if (!can_write || !member || !ledger->outdated()) {
             const auto record = newest();
             if (!can_write || !record || covered(*record)) {
                 finish(done, principal, answer_safely(r, routed, principal, 0));
                 return;
             }
+        }
+        // A cluster's leader checkpoints, as for a record's evidence.
+        if (cluster && !cluster->leads()) {
+            finish(done, principal, not_leader(r.target));
+            return;
         }
         queue_locked([this, text, newest, principal = std::move(principal),
                       done = std::move(done)](const http::Response* refusal) mutable {
@@ -1701,7 +1705,9 @@ struct LedgerApi::State {
             }
             // Caught up with the files: checkpoint unless that covers it now.
             if (const auto record = newest(); record && !covered(*record)) {
-                if (auto made = ledger->checkpoint(log_keys()); !made) {
+                if (auto made =
+                        cluster ? cluster->checkpoint(log_keys()) : ledger->checkpoint(log_keys());
+                    !made) {
                     finish(done, principal, error_response(made.error()));
                     return;
                 }
@@ -1914,6 +1920,14 @@ struct LedgerApi::State {
     }
 
     http::Response unpublish_route(std::string_view token) const {
+        // As publishing: what a read-only server, a replica, or a cluster
+        // member removed here would be removed nowhere else.
+        if (options.read_only || replica) {
+            return error_response(403, "read_only", "this server keeps no published records");
+        }
+        if (cluster) {
+            return error_response(501, "unsupported", "a cluster publishes no records yet");
+        }
         if (auto s = unpublish(options.directory, token); !s) {
             return error_response(s.error());
         }

@@ -184,10 +184,21 @@ void add_membership_proofs(const std::filesystem::path& ledger_directory,
 std::optional<protocol::Id> MembershipIndex::newest(const crypto::Provider& provider,
                                                     const ledger::Ledger& ledger,
                                                     const protocol::Id& member) {
-    // The memberships, by their registration; the ones not read yet are
-    // read from the log, outside the state's lock.
+    // Anyone may ask: the records are looked through (under the state's
+    // lock) only once the state changed, and a membership's metadata read
+    // from the log (outside it) once.
+    std::uint64_t scanned = 0;
+    {
+        const std::scoped_lock lock(mutex_);
+        scanned = scanned_;
+    }
+    std::uint64_t count = 0;
     std::vector<std::pair<protocol::Id, std::uint64_t>> memberships;
     ledger.read_state([&](const protocol::LedgerState& state) {
+        count = state.statement_count();
+        if (count == scanned) {
+            return;
+        }
         for (const auto& [key, record] : state.records()) {
             if (record.record_type == protocol::membership_type && !record.history.empty()) {
                 memberships.emplace_back(protocol::Id(record.id), record.history.front());
@@ -195,22 +206,28 @@ std::optional<protocol::Id> MembershipIndex::newest(const crypto::Provider& prov
         }
     });
     const std::scoped_lock lock(mutex_);
-    std::optional<std::pair<std::uint64_t, protocol::Id>> best;
+    bool all_read = true;
     for (const auto& [id, index] : memberships) {
-        auto known = known_.find(protocol::key_of(id));
-        if (known == known_.end()) {
-            const auto metadata = record_metadata(provider, ledger, id);
-            const auto membership =
-                metadata ? protocol::decode_membership(*metadata)
-                         : Result<protocol::Membership>(std::unexpected(metadata.error()));
-            if (!membership) {
-                continue;
-            }
-            known =
-                known_.emplace(protocol::key_of(id), std::pair{index, membership->member}).first;
+        if (known_.contains(protocol::key_of(id))) {
+            continue;
         }
-        if (known->second.second == member && (!best || known->second.first > best->first)) {
-            best = std::pair{known->second.first, id};
+        const auto metadata = record_metadata(provider, ledger, id);
+        if (!metadata) {
+            all_read = false; // read again next time
+            continue;
+        }
+        const auto membership = protocol::decode_membership(*metadata);
+        known_.emplace(
+            protocol::key_of(id),
+            std::pair{index, membership ? std::optional(membership->member) : std::nullopt});
+    }
+    if (all_read) {
+        scanned_ = std::max(scanned_, count);
+    }
+    std::optional<std::pair<std::uint64_t, protocol::Id>> best;
+    for (const auto& [key, known] : known_) {
+        if (known.second == member && (!best || known.first > best->first)) {
+            best = std::pair{known.first, protocol::Id(protocol::CompactId(key))};
         }
     }
     return best ? std::optional(best->second) : std::nullopt;

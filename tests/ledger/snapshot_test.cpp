@@ -168,6 +168,34 @@ TEST_CASE("a snapshot's state holds what the rules keep true", "[ledger][snapsho
     CHECK(refused.error().detail.contains("key epochs"));
 }
 
+TEST_CASE("a snapshot that reads but does not check gives way to the other", "[ledger][snapshot]") {
+    World w;
+    Cast c = build_cast(w);
+    populate(w, c);
+    REQUIRE(w.ledger().checkpoint(w.log_key()));
+    REQUIRE(w.ledger().write_snapshot());
+    const std::uint64_t older = w.ledger().snapshot()->size;
+    w.ok(w.org(), w.statement(w.org_id(), std::nullopt, w.record_body("other/1")));
+    REQUIRE(w.ledger().checkpoint(w.log_key()));
+    REQUIRE(w.ledger().write_snapshot());
+    REQUIRE(w.ledger().snapshot()->size > older);
+    // The newer one's first key epoch moved off the genesis, its seal made
+    // good: it reads, and its state does not decode.
+    const Bytes newer = w.fs().contents("snapshot-b");
+    const std::string_view organization = "Test Org";
+    const auto name =
+        std::search(newer.begin(), newer.end(), organization.begin(), organization.end());
+    REQUIRE(name != newer.end());
+    forge(w, "snapshot-b",
+          static_cast<std::size_t>(name - newer.begin()) + organization.size() + 4);
+    auto opened = ledger::Ledger::open(w.fs(), w.clock(), provider());
+    REQUIRE(opened);
+    REQUIRE(opened->opened_from_snapshot());
+    CHECK(opened->opened_from_snapshot()->size == older);
+    CHECK(opened->snapshot()->size == older);
+    CHECK(*opened->state().encode() == *w.ledger().state().encode());
+}
+
 TEST_CASE("a ledger writes a snapshot by itself as its log grows", "[ledger][snapshot]") {
     World w;
     Cast c = build_cast(w);

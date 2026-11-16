@@ -83,15 +83,20 @@ void add_membership_proofs(const std::filesystem::path& ledger_directory,
 /// its registration once (a membership's metadata never changes).
 class MembershipIndex {
 public:
-    /// The membership registered last that names `member`, if any.
+    /// The membership registered last that names `member`, if any. The
+    /// state's records are looked through only when it changed since.
     [[nodiscard]] std::optional<protocol::Id> newest(const crypto::Provider& provider,
                                                      const ledger::Ledger& ledger,
                                                      const protocol::Id& member);
 
 private:
     std::mutex mutex_;
-    /// Membership record -> (its registration's log index, its member).
-    std::map<protocol::IdKey, std::pair<std::uint64_t, protocol::Id>> known_;
+    /// The state's statement count when its records were last looked
+    /// through.
+    std::uint64_t scanned_ = 0;
+    /// Membership record -> (its registration's log index, its member, if
+    /// its metadata reads as a membership).
+    std::map<protocol::IdKey, std::pair<std::uint64_t, std::optional<protocol::Id>>> known_;
 };
 
 } // namespace kanhe::node
