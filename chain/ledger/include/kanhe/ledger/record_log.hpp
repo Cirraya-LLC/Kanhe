@@ -95,6 +95,10 @@ public:
     /// wrote or refreshed (one fstat), so that `refresh` would find more.
     [[nodiscard]] bool outdated() const;
 
+    /// Whether a write failed on the disk: the log takes no more writes
+    /// until it is opened again.
+    [[nodiscard]] bool failed() const noexcept { return failed_; }
+
 private:
     [[nodiscard]] static Result<RecordLog> open_as(FileSystem& fs, std::string_view name,
                                                    RecoveryReport* report, bool cut_tail);

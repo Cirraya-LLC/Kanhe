@@ -450,6 +450,25 @@ TEST_CASE("the ledger survives crashes at any point", "[ledger][engine][simulati
     }
 }
 
+TEST_CASE("a checkpoint whose write fails leaves the ledger unusable until reopened",
+          "[ledger][engine]") {
+    // Wherever the disk gives out, the log's commitment or the checkpoint
+    // file: the ledger shows it, rather than look fine and never checkpoint
+    // again.
+    for (std::uint64_t budget = 0; budget < 12; ++budget) {
+        World w;
+        Cast c = build_cast(w);
+        REQUIRE(w.ledger().submit(w.sign(c.agent, agent_record(w, c, document_type))));
+        kanhe::test::CrashingFileSystem fs(w.fs(), budget);
+        auto crashing = ledger::Ledger::open(fs, w.clock(), provider());
+        REQUIRE(crashing);
+        if (!crashing->checkpoint(w.log_key())) {
+            INFO("budget " << budget);
+            CHECK_FALSE(crashing->usable());
+        }
+    }
+}
+
 TEST_CASE("a batch is validated in order and made durable at once", "[ledger][engine][batch]") {
     World w;
     Cast c = build_cast(w);

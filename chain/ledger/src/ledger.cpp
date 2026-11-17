@@ -730,7 +730,10 @@ struct Ledger::Impl {
             return fail(Errc::verification_failed, "log entries go back in time");
         }
         if (entry.is_state_commitment()) {
+            // The tree moves to the state here; until this commitment is
+            // applied (or the next one, if it does not check), proofs wait.
             auto root = sync_state_tree();
+            tree_ahead = true;
             if (!root) {
                 return std::unexpected(root.error());
             }
@@ -1281,6 +1284,15 @@ struct Ledger::Impl {
             return;
         }
         static_cast<void>(write_snapshot());
+    }
+
+    /// A side log (checkpoints, cosignatures, time stamps) whose write
+    /// failed on the disk takes none until reopened: nor does the ledger,
+    /// as when its log fails, so that it shows unusable.
+    void side_write_failed(const RecordLog& side) {
+        if (side.failed()) {
+            failed = true;
+        }
     }
 
     Status require_usable() const {
@@ -1844,6 +1856,7 @@ Status Ledger::store_checkpoint_now(ByteView encoded) {
     }
     auto pending = impl_->checkpoints.write(std::span(&encoded, 1));
     if (!pending) {
+        impl_->side_write_failed(impl_->checkpoints);
         return std::unexpected(pending.error());
     }
     const std::unique_lock lock(impl_->log_mutex);
@@ -2238,6 +2251,7 @@ Status Ledger::add_cosignature(ByteView encoded, const crypto::PublicKey& witnes
     const ByteView view = *record;
     auto pending = impl_->cosignatures.write(std::span(&view, 1));
     if (!pending) {
+        impl_->side_write_failed(impl_->cosignatures);
         return std::unexpected(pending.error());
     }
     const std::unique_lock lock(impl_->log_mutex);
@@ -2334,6 +2348,7 @@ Status Ledger::add_timestamp(ByteView token, std::uint64_t size) {
     const ByteView view = *record;
     auto pending = impl_->timestamps.write(std::span(&view, 1));
     if (!pending) {
+        impl_->side_write_failed(impl_->timestamps);
         return std::unexpected(pending.error());
     }
     const std::unique_lock lock(impl_->log_mutex);
@@ -2409,6 +2424,7 @@ Status Ledger::add_network_cosignature(const protocol::network::VerifierKey& wit
     const ByteView view = *record;
     auto pending = impl_->network_cosignatures.write(std::span(&view, 1));
     if (!pending) {
+        impl_->side_write_failed(impl_->network_cosignatures);
         return std::unexpected(pending.error());
     }
     const std::unique_lock lock(impl_->log_mutex);
@@ -2586,6 +2602,7 @@ Result<protocol::SignedCheckpoint> Ledger::checkpoint_now(LogKeys log_keys) {
     }
     if (!last->is_state_commitment()) {
         auto state_root = impl_->sync_state_tree();
+        impl_->tree_ahead = true; // until the commitment is in the log
         if (!state_root) {
             return std::unexpected(state_root.error());
         }
@@ -2618,6 +2635,7 @@ Result<protocol::SignedCheckpoint> Ledger::checkpoint_now(LogKeys log_keys) {
         impl_->last_registered_at = now;
         impl_->tree_commitment = commitment->commitment;
         impl_->tree_commitment_index = index;
+        impl_->tree_ahead = false;
     }
     auto root = impl_->tree.root();
     if (!root) {
@@ -2640,6 +2658,7 @@ Result<protocol::SignedCheckpoint> Ledger::checkpoint_now(LogKeys log_keys) {
     const ByteView view = signed_checkpoint->encoded;
     auto pending = impl_->checkpoints.write(std::span(&view, 1));
     if (!pending) {
+        impl_->side_write_failed(impl_->checkpoints);
         return std::unexpected(pending.error());
     }
     const std::unique_lock log_lock(impl_->log_mutex);
@@ -3022,7 +3041,12 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
             if (related_state == nullptr) {
                 continue;
             }
+            // As of the checkpoint: a later change to a shared record (a
+            // script many name) is not this bundle's.
             for (const std::uint64_t index : related_state->history.to_vector()) {
+                if (index >= checkpoint->checkpoint.tree_size) {
+                    continue;
+                }
                 auto bytes = impl_->log.read(index);
                 if (!bytes) {
                     return std::unexpected(bytes.error());

@@ -230,6 +230,32 @@ TEST_CASE("a record names the script it came from and the records it was made fr
     CHECK(b.w.rejected(b.device_key, b.report({}, script)) == Errc::rejected);
 }
 
+TEST_CASE("a source's later change by someone new leaves the evidence at a checkpoint alone",
+          "[scripts][ledger]") {
+    Bank b;
+    const protocol::Id script = b.approve(risk_model());
+    const protocol::Id book = b.book();
+    const protocol::Id report = b.w.ok(b.device_key, b.report({b.local(book)}, script));
+    REQUIRE(b.w.ledger().checkpoint(b.w.log_key()));
+    // After the checkpoint, a new actor endorses the book the report was
+    // made from.
+    KeyPair auditor_key = key("auditor");
+    const protocol::Id auditor = b.w.register_actor(b.w.org(), b.w.org_id(), std::nullopt,
+                                                    protocol::ActorKind::device, auditor_key);
+    const protocol::Id allowed = b.w.grant(b.w.org(), b.w.org_id(), std::nullopt, auditor,
+                                           scope({StatementType::record_endorse}));
+    b.w.ok(auditor_key,
+           b.w.statement(auditor, allowed, protocol::RecordEndorseBody{book, "audited"}));
+    // The report's evidence, at the checkpoint that covers it: as they were.
+    auto bundle = b.w.ledger().export_evidence(b.w.log_key(), report);
+    INFO((bundle ? std::string() : std::string(bundle.error().detail)));
+    REQUIRE(bundle);
+    const auto checked = verify(*bundle);
+    INFO((checked ? std::string() : std::string(checked.error().detail)));
+    REQUIRE(checked);
+    CHECK(checked->complete);
+}
+
 TEST_CASE("a record's evidence carries its script and its sources, and what became of them",
           "[scripts][evidence]") {
     Bank b;
