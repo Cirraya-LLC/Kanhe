@@ -201,6 +201,16 @@ env -u KANHE_LEDGER KANHE_TOKEN="$WRITER" "$KANHE" record issue --as root.key \
 NEW="$(json 'd["record"]["id"]' < issued.json)"
 get "/v1/records?q=%E6%96%B0%E7%94%9F" | sed -n '2,$p' | json '[r["id"] for r in d["records"]]' |
     contains -xF "['$NEW']"
+# A whole number beyond 64 bits: kept exactly, and in ranges the nearest end.
+env -u KANHE_LEDGER KANHE_TOKEN="$WRITER" "$KANHE" record issue --as root.key \
+    --type example.school.donation/1 --field note=x --meta amount=100000000000000000000 \
+    --server "$URL" --cache "$WORK/cache" --ledger-id "$LEDGER_ID" --json > big.json 2> big.err ||
+    { cat big.err; fail "issue a large amount through the server"; }
+BIG="$(json 'd["record"]["id"]' < big.json)"
+get "/v1/records?meta.amount.min=1000" | sed -n '2,$p' | json '[r["id"] for r in d["records"]]' |
+    contains -xF "['$BIG']" || fail "a number beyond 64 bits by range"
+get "/v1/records/$BIG" | sed -n '2,$p' | json 'd["record"]["metadata"]["amount"], d["versions"]' |
+    contains -x "100000000000000000000 1" || fail "a number beyond 64 bits kept exactly"
 
 # Help and completion name the commands.
 run kanhe-index search records --help | contains -- '--meta KEY=VALUE'

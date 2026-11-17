@@ -150,8 +150,10 @@ struct Served::State {
             const auto& s = std::get<InstanceReport>(q);
             return answer(served->report(s.filter, s.report));
         }
-        // One record, or its versions: the chain from the state, each
-        // version's row from the index.
+        // One record, or its versions: the chain, every version's row, and
+        // the log size they reflect, all from one update's view of the index
+        // (the ledger's state, read apart, may be ahead of it or, by the
+        // time the rows are read, behind it).
         std::string_view rest = path.substr(records.size());
         const bool all_versions = rest.ends_with("/versions");
         if (all_versions) {
@@ -161,31 +163,32 @@ struct Served::State {
         if (!id || !params.empty()) {
             return error_response(400, "invalid_argument", "a record id is 64 hex digits");
         }
-        std::vector<protocol::Id> versions;
-        ledger->read_state(
-            [&](const protocol::LedgerState& s) { versions = protocol::record_versions(s, *id); });
-        if (versions.empty()) {
-            return error_response(404, "not_found", "no such record");
+        const auto found = served->versions(*id);
+        if (!found) {
+            return error_response(found.error());
+        }
+        if (!*found) {
+            // Not in the index: the ledger tells a record it has not
+            // reached from none.
+            bool known = false;
+            ledger->read_state(
+                [&](const protocol::LedgerState& s) { known = s.record(*id) != nullptr; });
+            return known ? error_response(503, "unavailable",
+                                          "the search index has not reached this record yet")
+                         : error_response(404, "not_found", "no such record");
+        }
+        const Versions& versions = **found;
+        if (!all_versions) {
+            return json_response(200, {{"record", to_json(versions.rows[versions.asked])},
+                                       {"latest", to_hex(versions.rows.back().id.bytes())},
+                                       {"versions", versions.rows.size()},
+                                       {"as_of", versions.as_of}});
         }
         json rows = json::array();
-        for (const protocol::Id& v : all_versions ? versions : std::vector<protocol::Id>{*id}) {
-            const auto row = served->record(v);
-            if (!row) {
-                return error_response(row.error());
-            }
-            if (!*row) {
-                return error_response(503, "unavailable",
-                                      "the search index has not reached this record yet");
-            }
-            rows.push_back(to_json(**row));
+        for (const RecordRow& row : versions.rows) {
+            rows.push_back(to_json(row));
         }
-        if (!all_versions) {
-            return json_response(200, {{"record", rows[0]},
-                                       {"latest", to_hex(versions.back().bytes())},
-                                       {"versions", versions.size()},
-                                       {"as_of", served->as_of()}});
-        }
-        return json_response(200, {{"versions", std::move(rows)}, {"as_of", served->as_of()}});
+        return json_response(200, {{"versions", std::move(rows)}, {"as_of", versions.as_of}});
     }
 };
 

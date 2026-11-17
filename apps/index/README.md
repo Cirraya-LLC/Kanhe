@@ -17,7 +17,11 @@ kanhe-index rebuild                      # made again from the log
 It holds only what the ledger holds in the clear: types, states, registrants, times, versions,
 public metadata, and instances' contracts, states, parties, and fields. Private field values are
 never indexed. Searches page with `--limit` and `--cursor`; text matches any part of a metadata
-value, Chinese included. Answers are hints, each with the log size it reflects; evidence is what
+value, Chinese included. Whole numbers, also when written as text, are found by range as well, in
+64 bits: a metadata number beyond them is kept exactly as text and counts in ranges as the nearest
+end of the 64-bit range (`--meta-min amount=1000` finds 10^20); a field beyond them, which no Bo
+contract keeps, is text only, so that reports add fields up exactly. Answers are hints, each with
+the log size it reflects (a record's versions all from one update of the index); evidence is what
 to rely on.
 
 `kanhe-index serve` serves the ledger read-only, with the index's routes beside the ledger's

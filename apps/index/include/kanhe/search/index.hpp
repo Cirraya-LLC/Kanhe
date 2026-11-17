@@ -43,7 +43,8 @@ struct RecordFilter {
     enum class Revoked : std::uint8_t { no, yes, any };
     Revoked revoked = Revoked::no;
     /// A public metadata key's value: exactly `equals`, or a number in
-    /// [at_least, at_most].
+    /// [at_least, at_most] (a whole number beyond 64 bits counts as the
+    /// nearest end of their range).
     struct Metadata {
         std::string key{};
         std::optional<std::string> equals{};
@@ -73,7 +74,8 @@ struct InstanceFilter {
     std::optional<std::string> reference{};
     /// A field of its state (a Bo contract's `fields`): text or yes/no
     /// exactly (`equals`: "true" or "false" for yes/no), or a number in
-    /// [at_least, at_most].
+    /// [at_least, at_most] (a whole number beyond 64 bits, which no Bo
+    /// contract keeps, is text only: reports add fields up exactly).
     struct Field {
         std::string name{};
         std::optional<std::string> equals{};
@@ -141,6 +143,16 @@ struct Page {
     std::uint64_t as_of = 0;
 };
 
+/// A record's versions (the chain of supersessions through it), oldest
+/// first, as one update of the index left them.
+struct Versions {
+    std::vector<RecordRow> rows;
+    /// Which of them was asked for.
+    std::size_t asked = 0;
+    /// The log size the rows reflect.
+    std::uint64_t as_of = 0;
+};
+
 /// What a report groups by. Times are bucketed in `utc_offset_minutes`.
 enum class Group : std::uint8_t {
     type,       // records
@@ -196,9 +208,11 @@ struct IndexStatus {
 /// sees the index as one update left it; updates run one at a time.
 class Index {
 public:
-    /// Behind by more than this many log entries (a first build, or a long
-    /// way to catch up), `update` loads the rows first and makes the
-    /// secondary indexes once at the end.
+    /// Behind by more than this many log entries, and by more than it holds
+    /// (a first build, or one that more than doubles it), `update` loads the
+    /// rows first and makes the secondary indexes once at the end; searches
+    /// meanwhile read the rows without them. Less than it holds goes in with
+    /// the indexes in place, so that searches beside it keep them.
     static constexpr std::uint64_t bulk_from = 50'000;
 
     /// Opens (or makes) the index of `ledger` at `file`; one of another
@@ -227,6 +241,10 @@ public:
                                                       const PageRequest& page) const;
     /// One record's row, if the index has it.
     [[nodiscard]] Result<std::optional<RecordRow>> record(const Id& id) const;
+    /// The record's versions and the log size they reflect, all read from
+    /// one update's view; none if the index does not have the record (no
+    /// such record, or one it has not reached yet).
+    [[nodiscard]] Result<std::optional<Versions>> versions(const Id& id) const;
     /// The log size the index reflects.
     [[nodiscard]] std::uint64_t as_of() const;
     [[nodiscard]] Result<Report> report(const RecordFilter& filter,

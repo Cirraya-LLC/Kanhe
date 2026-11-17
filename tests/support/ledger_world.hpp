@@ -49,13 +49,13 @@ inline KeyPair key(const std::string& name) {
 /// statements.
 class World {
 public:
-    /// Worlds with the same hash and organization name are the same ledger
-    /// (same keys, same genesis).
+    /// Worlds with the same hash, organization name, and start are the same
+    /// ledger (same keys, same genesis). The clock starts at `start`.
     explicit World(crypto::HashAlg hash = crypto::HashAlg::sha256,
-                   const std::string& organization = "Test Org")
-        : hash_(hash), clock_(t0), entropy_(7), org_(key("org")), log_key_(key("log")) {
+                   const std::string& organization = "Test Org", protocol::Timestamp start = t0)
+        : hash_(hash), clock_(start), entropy_(7), org_(key("org")), log_key_(key("log")) {
         protocol::Statement genesis;
-        genesis.issued_at = t0;
+        genesis.issued_at = start;
         genesis.nonce = entropy_.bytes<16>();
         genesis.body =
             protocol::GenesisBody{hash, organization, org_.public_key(), log_key_.public_key()};

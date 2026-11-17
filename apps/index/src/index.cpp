@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <set>
@@ -13,6 +14,7 @@
 #include <thread>
 #include <utility>
 #include <variant>
+#include <vector>
 
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
@@ -28,8 +30,10 @@ namespace kanhe::search {
 
 namespace {
 
-// The layout's version: an index of another is emptied and rebuilt.
-constexpr std::int64_t layout = 3;
+// The layout's version: an index of another is emptied and rebuilt. 4: whole
+// numbers beyond 64 bits kept (their text, and in metadata a number), and
+// whole numbers written as text of any length.
+constexpr std::int64_t layout = 4;
 
 constexpr std::string_view tables = R"sql(
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID;
@@ -161,24 +165,54 @@ std::string hex_of(ByteView bytes) {
     return to_hex(bytes);
 }
 
-/// A value as the index keeps it: text, and a number if it is an integer.
+/// A whole number as the index keeps it, in 64 bits: one beyond them as the
+/// nearest end of their range (`beyond`), as the index keeps every number
+/// it cannot hold (positions and times too).
+struct Number {
+    std::int64_t value = 0;
+    bool beyond = false;
+};
+
+/// A value as the index keeps it: text, and a number if it is a whole
+/// number. Metadata's ranges take a number beyond 64 bits as the nearest end
+/// (it lies past every bound a search can give); a thing's fields, which
+/// reports add up, take only numbers they hold exactly.
 struct Scalar {
     std::string text;
-    std::optional<std::int64_t> number;
+    std::optional<Number> number;
 };
+
+constexpr Number nearest_end(bool negative) noexcept {
+    return {negative ? std::numeric_limits<std::int64_t>::min()
+                     : std::numeric_limits<std::int64_t>::max(),
+            true};
+}
 
 /// A whole number written as text ("2026", "-15"), as forms and the
 /// command line write numbers into metadata.
-std::optional<std::int64_t> number_in(std::string_view text) {
-    if (text.empty() || text.size() > 18) {
+std::optional<Number> number_in(std::string_view text) {
+    if (text.empty() || text.front() == '+') {
         return std::nullopt;
     }
     std::int64_t value = 0;
-    const auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-    if (ec != std::errc{} || ptr != text.data() + text.size() || text.front() == '+') {
+    const char* end = text.data() + text.size();
+    const auto [ptr, ec] = std::from_chars(text.data(), end, value);
+    if (ptr != end) {
         return std::nullopt;
     }
-    return value;
+    if (ec == std::errc::result_out_of_range) {
+        return nearest_end(text.front() == '-');
+    }
+    if (ec != std::errc{}) {
+        return std::nullopt;
+    }
+    return Number{value, false};
+}
+
+/// The decimal digits of 1 + n, which may be 2^64.
+std::string one_more(std::uint64_t n) {
+    return n == std::numeric_limits<std::uint64_t>::max() ? "18446744073709551616"
+                                                          : std::to_string(n + 1);
 }
 
 std::optional<Scalar> scalar_of(const cbor::Value& value) {
@@ -186,10 +220,15 @@ std::optional<Scalar> scalar_of(const cbor::Value& value) {
         return Scalar{*t, number_in(*t)};
     }
     if (const auto n = value.as_int64()) {
-        return Scalar{std::to_string(*n), *n};
+        return Scalar{std::to_string(*n), Number{*n, false}};
     }
+    // Beyond 64 bits (CBOR's integers reach 2^64 - 1 and -2^64): the exact
+    // decimal, and the nearest end as the number.
     if (const auto u = value.as_uint64()) {
-        return Scalar{std::to_string(*u), std::nullopt};
+        return Scalar{std::to_string(*u), nearest_end(false)};
+    }
+    if (const auto below = value.as_negative()) {
+        return Scalar{"-" + one_more(below->n), nearest_end(true)};
     }
     if (const auto b = value.as_bool()) {
         return Scalar{*b ? "true" : "false", std::nullopt};
@@ -387,26 +426,43 @@ Status check_limit(const PageRequest& page) {
     return {};
 }
 
-/// A report's group: what rows are grouped by (`inner`, for `?` a time's
-/// offset in seconds), and how a group's key is written (`outer`, `@` for
-/// the grouped value).
+/// A report's group: what rows are grouped by (`inner`, binding `values`
+/// to its `?`s in order), and how a group's key is written (`outer`, `@`
+/// for the grouped value).
 struct Key {
     std::string inner;
     std::string outer = "@";
+    std::vector<std::int64_t> values{};
 };
 
-/// Times bucketed in a fixed offset: days and weeks as whole numbers (the
-/// day since 1970; weeks from Monday, since 1970-01-01 was a Thursday), so
-/// that rows are grouped by arithmetic and each group's date written once.
-Key bucket(Group g, std::string_view column) {
-    const std::string days = "((" + std::string(column) + " / 1000 + ?) / 86400)";
+/// `value` divided by `divisor` (positive), rounded down. SQL divides whole
+/// numbers toward zero, which would put a moment before 1970 in the local
+/// time (the first hours of 1970-01-01 at a negative offset) into the day
+/// after its own.
+std::string floor_div(std::string_view value, std::int64_t divisor) {
+    const std::string v = "(" + std::string(value) + ")";
+    const std::string d = std::to_string(divisor);
+    return "((" + v + " - (" + v + " % " + d + " + " + d + ") % " + d + ") / " + d + ")";
+}
+
+/// Times bucketed in a fixed offset (`offset`, in seconds): days and weeks as
+/// whole numbers (the day since 1970; weeks from Monday, since 1970-01-01 was
+/// a Thursday), so that rows are grouped by arithmetic and each group's date
+/// written once.
+Key bucket(Group g, std::string_view column, std::int64_t offset) {
+    const std::string seconds = floor_div(column, 1000) + " + ?";
+    const std::string days = floor_div(seconds, 86400);
+    auto key = [offset](std::string inner, std::string outer) {
+        const auto uses = static_cast<std::size_t>(std::ranges::count(inner, '?'));
+        return Key{std::move(inner), std::move(outer), std::vector<std::int64_t>(uses, offset)};
+    };
     switch (g) {
     case Group::day:
-        return {days, "date(@ * 86400, 'unixepoch')"};
+        return key(days, "date(@ * 86400, 'unixepoch')");
     case Group::week:
-        return {"((" + days + " + 3) / 7)", "date((@ * 7 - 3) * 86400, 'unixepoch')"};
+        return key(floor_div(days + " + 3", 7), "date((@ * 7 - 3) * 86400, 'unixepoch')");
     case Group::month:
-        return {"strftime('%Y-%m', " + std::string(column) + " / 1000 + ?, 'unixepoch')", "@"};
+        return key("strftime('%Y-%m', " + seconds + ", 'unixepoch')", "@");
     default:
         return {};
     }
@@ -873,7 +929,7 @@ Result<std::uint64_t> Index::Impl::step(std::uint64_t end) {
                     continue;
                 }
                 meta.bind(1, w.pos).bind(2, n++).bind(3, *key).bind(4, scalar->text);
-                scalar->number ? meta.bind(5, *scalar->number) : meta.bind_null(5);
+                scalar->number ? meta.bind(5, scalar->number->value) : meta.bind_null(5);
                 SEARCH_CHECK(meta.run());
                 all += scalar->text + "\n";
             }
@@ -936,7 +992,9 @@ Result<std::uint64_t> Index::Impl::step(std::uint64_t end) {
             SEARCH_CHECK(clear_fields.run());
             for (const auto& [name, value] : w.fields) {
                 field.bind(1, w.pos).bind(2, name).bind(3, value.text);
-                value.number ? field.bind(4, *value.number) : field.bind_null(4);
+                // Reports add fields up: only numbers held exactly.
+                value.number && !value.number->beyond ? field.bind(4, value.number->value)
+                                                      : field.bind_null(4);
                 SEARCH_CHECK(field.run());
             }
         }
@@ -1006,9 +1064,16 @@ Result<std::uint64_t> Index::update(std::chrono::milliseconds budget, std::size_
     const std::lock_guard lock(impl_->mutex);
     const auto deadline = std::chrono::steady_clock::now() + budget;
     batch = std::max<std::size_t>(batch, 1);
-    // Far behind (a first build, or a long way to catch up): rows first,
-    // the secondary indexes made once at the end, in large batches.
-    if (!impl_->bulk && impl_->ledger.size() > impl_->indexed + impl_->bulk_from) {
+    // Far behind, and by more than it holds (a first build, or one that more
+    // than doubles it): rows first, the secondary indexes made once at the
+    // end, in large batches. They stay dropped until then, through as many
+    // calls as it takes (searches meanwhile read the rows without them):
+    // making them again at every pause would cost more than the build.
+    // Behind by less than it holds, an index searches rely on keeps them,
+    // and the rows go in with them in place.
+    const std::uint64_t held = impl_->indexed;
+    if (const std::uint64_t size = impl_->ledger.size();
+        !impl_->bulk && size > held && size - held > impl_->bulk_from && size - held > held) {
         SEARCH_CHECK(impl_->db.exec(drop_indexes));
         impl_->bulk = true;
     }
@@ -1094,6 +1159,66 @@ Result<std::optional<RecordRow>> Index::record(const Id& id) const {
     }
     SEARCH_TRY(RecordRow r, read_record(s, meta));
     return std::optional<RecordRow>(std::move(r));
+}
+
+Result<std::optional<Versions>> Index::versions(const Id& id) const {
+    // One read transaction for every row and the log size they reflect: the
+    // chain is the one that update left, its links all within it.
+    SEARCH_TRY(auto lease, impl_->lease());
+    SEARCH_TRY(const std::uint64_t seen, lease.begin());
+    SEARCH_TRY(sql::Statement s,
+               lease.db().prepare(std::string(record_columns) + " WHERE r.id = ?"));
+    SEARCH_TRY(sql::Statement meta,
+               lease.db().prepare("SELECT key, value FROM record_meta WHERE pos = ? ORDER BY n"));
+    auto row_of = [&](const Id& version) -> Result<std::optional<RecordRow>> {
+        s.bind(1, version.bytes());
+        const Result<bool> found = s.step();
+        if (!found) {
+            return std::unexpected(found.error());
+        }
+        if (!*found) {
+            s.reset();
+            return std::optional<RecordRow>{};
+        }
+        Result<RecordRow> r = read_record(s, meta);
+        s.reset();
+        if (!r) {
+            return std::unexpected(r.error());
+        }
+        return std::optional<RecordRow>(std::move(*r));
+    };
+    SEARCH_TRY(std::optional<RecordRow> asked, row_of(id));
+    if (!asked) {
+        return std::optional<Versions>{};
+    }
+    // Each link names an earlier registration, so the chain has no cycle; the
+    // ids already taken only guard a file that is not the index's own.
+    std::set<protocol::IdKey> taken{protocol::key_of(id)};
+    std::vector<RecordRow> older;
+    for (std::optional<Id> link = asked->supersedes;
+         link && taken.insert(protocol::key_of(*link)).second;) {
+        SEARCH_TRY(std::optional<RecordRow> r, row_of(*link));
+        if (!r) {
+            break;
+        }
+        link = r->supersedes;
+        older.push_back(std::move(*r));
+    }
+    Versions out;
+    out.as_of = seen;
+    out.rows.assign(std::make_move_iterator(older.rbegin()), std::make_move_iterator(older.rend()));
+    out.asked = out.rows.size();
+    std::optional<Id> link = asked->superseded_by;
+    out.rows.push_back(std::move(*asked));
+    while (link && taken.insert(protocol::key_of(*link)).second) {
+        SEARCH_TRY(std::optional<RecordRow> r, row_of(*link));
+        if (!r) {
+            break;
+        }
+        link = r->superseded_by;
+        out.rows.push_back(std::move(*r));
+    }
+    return std::optional<Versions>(std::move(out));
 }
 
 Result<Page<RecordRow>> Index::records(const RecordFilter& filter, const PageRequest& page) const {
@@ -1211,7 +1336,7 @@ namespace {
 
 Result<Report> run_report(sql::Database& db, std::uint64_t as_of, const ReportRequest& request,
                           std::string_view from, const std::vector<Key>& keys, const Query& where,
-                          const std::vector<std::int64_t>& key_values, bool summed) {
+                          bool summed) {
     // Grouped inside, keys written outside: once a group, not once a row.
     std::string inner;
     std::string outer;
@@ -1241,8 +1366,10 @@ Result<Report> run_report(sql::Database& db, std::uint64_t as_of, const ReportRe
     // The keys' values (time offsets) come first, then the sum's field, then
     // the conditions', then the limit.
     int at = 1;
-    for (const std::int64_t v : key_values) {
-        s.bind(at++, v);
+    for (const Key& key : keys) {
+        for (const std::int64_t v : key.values) {
+            s.bind(at++, v);
+        }
     }
     if (summed) {
         s.bind(at++, std::string_view(*request.sum));
@@ -1295,8 +1422,8 @@ Result<Report> Index::report(const RecordFilter& filter, const ReportRequest& re
     if (request.sum) {
         return fail(Errc::invalid_argument, "records have no fields to sum: only instances do");
     }
+    const std::int64_t offset = std::int64_t{request.utc_offset_minutes} * 60;
     std::vector<Key> keys;
-    std::vector<std::int64_t> values;
     for (const Group g : request.by) {
         switch (g) {
         case Group::type:
@@ -1311,8 +1438,7 @@ Result<Report> Index::report(const RecordFilter& filter, const ReportRequest& re
         case Group::day:
         case Group::week:
         case Group::month:
-            keys.push_back(bucket(g, "r.registered_at"));
-            values.push_back(std::int64_t{request.utc_offset_minutes} * 60);
+            keys.push_back(bucket(g, "r.registered_at", offset));
             break;
         case Group::contract:
             return fail(Errc::invalid_argument, "records are grouped by type, state, "
@@ -1323,13 +1449,13 @@ Result<Report> Index::report(const RecordFilter& filter, const ReportRequest& re
     record_conditions(filter, q);
     SEARCH_TRY(auto lease, impl_->lease());
     SEARCH_TRY(const std::uint64_t seen, lease.begin());
-    return run_report(lease.db(), seen, request, "FROM records r", keys, q, values, false);
+    return run_report(lease.db(), seen, request, "FROM records r", keys, q, false);
 }
 
 Result<Report> Index::report(const InstanceFilter& filter, const ReportRequest& request) const {
     SEARCH_CHECK(check_offset(request));
+    const std::int64_t offset = std::int64_t{request.utc_offset_minutes} * 60;
     std::vector<Key> keys;
-    std::vector<std::int64_t> values;
     for (const Group g : request.by) {
         switch (g) {
         case Group::contract:
@@ -1341,8 +1467,7 @@ Result<Report> Index::report(const InstanceFilter& filter, const ReportRequest& 
         case Group::day:
         case Group::week:
         case Group::month:
-            keys.push_back(bucket(g, "i.created_at"));
-            values.push_back(std::int64_t{request.utc_offset_minutes} * 60);
+            keys.push_back(bucket(g, "i.created_at", offset));
             break;
         case Group::type:
         case Group::registrant:
@@ -1357,7 +1482,7 @@ Result<Report> Index::report(const InstanceFilter& filter, const ReportRequest& 
                     : "FROM instances i";
     SEARCH_TRY(auto lease, impl_->lease());
     SEARCH_TRY(const std::uint64_t seen, lease.begin());
-    return run_report(lease.db(), seen, request, from, keys, q, values, request.sum.has_value());
+    return run_report(lease.db(), seen, request, from, keys, q, request.sum.has_value());
 }
 
 Result<IndexStatus> Index::status() const {
