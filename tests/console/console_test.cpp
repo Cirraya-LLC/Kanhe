@@ -195,6 +195,27 @@ TEST_CASE("the console refuses other sites' pages", "[console]") {
     CHECK(c.handle(request("POST", "/console/", host, "http://localhost:7470")).status == 405);
 }
 
+TEST_CASE("a request whose JSON nests too deep is refused before anything reads it", "[console]") {
+    console::Console c;
+    c.set_origins(console::loopback_origins(7470));
+    auto sent = [&](const std::string& path, const std::string& text) {
+        auto r = request("POST", path, "localhost:7470", "http://localhost:7470");
+        r.body.assign(text.begin(), text.end());
+        return c.handle(r);
+    };
+    // Copying or writing such JSON out would recurse 100,000 deep.
+    const std::string deep =
+        R"({"sheet": )" + std::string(100'000, '[') + std::string(100'000, ']') + "}";
+    const auto refused = sent("/console/api/rules/form", deep);
+    CHECK(refused.status == 400);
+    CHECK(body(refused).contains("nests deeper than 64"));
+    // Brackets in a string are text; 64 levels pass this check.
+    const std::string in_text = R"({"sheet": ")" + std::string(1000, '[') + R"("})";
+    CHECK(sent("/console/api/nothing", in_text).status == 404);
+    CHECK(sent("/console/api/nothing", std::string(64, '[') + std::string(64, ']')).status == 404);
+    CHECK(sent("/console/api/nothing", std::string(65, '[') + std::string(65, ']')).status == 400);
+}
+
 TEST_CASE("a public URL is the console's only name", "[console]") {
     const auto origin = console::parse_origin("https://Ledger.Example.com/");
     REQUIRE(origin);

@@ -6,6 +6,7 @@
 #include <cctype>
 #include <charconv>
 #include <cstddef>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <mutex>
@@ -32,6 +33,38 @@
 namespace kanhe::console {
 
 namespace {
+
+/// How deep a request's JSON may nest. The console's own requests nest a
+/// few levels; copying or writing out JSON recurses, so a body nested far
+/// deeper (parsing does not recurse) could exhaust the stack.
+constexpr std::size_t max_request_nesting = 64;
+
+/// The deepest nesting of brackets outside strings in `body`, counted
+/// without recursion and without parsing.
+std::size_t json_nesting(std::span<const std::uint8_t> body) {
+    std::size_t depth = 0;
+    std::size_t deepest = 0;
+    bool in_string = false;
+    bool escaped = false;
+    for (const std::uint8_t c : body) {
+        if (in_string) {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == '"') {
+                in_string = false;
+            }
+        } else if (c == '"') {
+            in_string = true;
+        } else if (c == '[' || c == '{') {
+            deepest = std::max(deepest, ++depth);
+        } else if ((c == ']' || c == '}') && depth > 0) {
+            --depth;
+        }
+    }
+    return deepest;
+}
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -374,6 +407,11 @@ std::optional<http::Response> Console::refuse(const http::Request& request) cons
     } else if (!reads) {
         return error(403, "forbidden",
                      "a request that changes something must come from the console");
+    }
+    // A file uploaded is bytes, not JSON; everything else sent is JSON.
+    if (!reads && request.path != "/console/api/uploads" &&
+        json_nesting(request.body) > max_request_nesting) {
+        return error(400, "invalid_argument", "the request's JSON nests deeper than 64 levels");
     }
     return std::nullopt;
 }
