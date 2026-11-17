@@ -2,6 +2,7 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <mutex>
 #include <set>
 #include <system_error>
 
@@ -28,6 +29,12 @@ std::filesystem::path trust_directory(const std::filesystem::path& ledger) {
 std::filesystem::path nodes_file(const std::filesystem::path& ledger) {
     return trust_directory(ledger) / "nodes.json";
 }
+
+/// Kept proofs already checked, by their bytes' digest, their node, and
+/// their member: a kept file changes only when fetched again, so each is
+/// checked once however many bundles carry it.
+std::mutex checked_mutex;
+std::set<std::string> checked_proofs;
 
 } // namespace
 
@@ -60,6 +67,19 @@ load_trust_nodes(const std::filesystem::path& ledger_directory) {
         }
         nodes.push_back({n["name"].get<std::string>(), *id, n["url"].get<std::string>(),
                          n["added"].get<protocol::Timestamp>()});
+    }
+    // As saving keeps it: at most 16, names and ledgers unique.
+    std::set<std::string> names;
+    std::set<protocol::IdKey> ledgers;
+    for (const TrustNodeEntry& n : nodes) {
+        if (!valid_token_name(n.name) || !names.insert(n.name).second ||
+            !ledgers.insert(protocol::key_of(n.ledger_id)).second) {
+            return fail(Errc::malformed, "the trust nodes file names a trust node twice, or a "
+                                         "name that cannot be one");
+        }
+    }
+    if (nodes.size() > protocol::max_membership_proofs) {
+        return fail(Errc::malformed, "the trust nodes file lists more than 16 trust nodes");
     }
     return nodes;
 }
@@ -127,7 +147,9 @@ Result<protocol::EvidenceReport> check_membership_proof(const crypto::Provider& 
     return report;
 }
 
-std::vector<Bytes> kept_membership_proofs(const std::filesystem::path& ledger_directory) {
+std::vector<Bytes> kept_membership_proofs(const crypto::Provider& provider,
+                                          const std::filesystem::path& ledger_directory,
+                                          const protocol::Id& member) {
     std::vector<Bytes> out;
     const auto nodes = load_trust_nodes(ledger_directory);
     if (!nodes) {
@@ -135,9 +157,31 @@ std::vector<Bytes> kept_membership_proofs(const std::filesystem::path& ledger_di
     }
     for (const TrustNodeEntry& n : *nodes) {
         auto bytes = detail::read_file(membership_proof_path(ledger_directory, n.ledger_id));
-        if (bytes && protocol::decode_bundle(*bytes)) {
-            out.push_back(std::move(*bytes));
+        if (!bytes) {
+            continue;
         }
+        const auto digest = provider.digest(crypto::HashAlg::sha256, *bytes);
+        if (!digest) {
+            continue;
+        }
+        const std::string key =
+            to_hex(digest->bytes()) + to_hex(n.ledger_id.bytes()) + to_hex(member.bytes());
+        bool known = false;
+        {
+            const std::lock_guard lock(checked_mutex);
+            known = checked_proofs.contains(key);
+        }
+        if (!known) {
+            if (!check_membership_proof(provider, *bytes, n.ledger_id, member)) {
+                continue;
+            }
+            const std::lock_guard lock(checked_mutex);
+            if (checked_proofs.size() >= 1024) {
+                checked_proofs.clear();
+            }
+            checked_proofs.insert(key);
+        }
+        out.push_back(std::move(*bytes));
     }
     return out;
 }
@@ -145,12 +189,12 @@ std::vector<Bytes> kept_membership_proofs(const std::filesystem::path& ledger_di
 Result<protocol::EvidenceReport>
 fetch_membership_proof(const crypto::Provider& provider,
                        const std::filesystem::path& ledger_directory, const TrustNodeEntry& node,
-                       const protocol::Id& member) {
+                       const protocol::Id& member, const ClientOptions& options) {
     auto url = Url::parse(node.url);
     if (!url) {
         return std::unexpected(url.error());
     }
-    const Client client(std::move(*url), ClientOptions{});
+    const Client client(std::move(*url), options);
     auto response = client.request("GET", "/m/" + to_hex(member.bytes()));
     if (!response) {
         return std::unexpected(response.error());
@@ -166,6 +210,15 @@ fetch_membership_proof(const crypto::Provider& provider,
         return std::unexpected(report.error());
     }
     const auto path = membership_proof_path(ledger_directory, node.ledger_id);
+    // Never back: a proof older than the one kept would hide a change since
+    // (a suspension); the node, or a cache in between, answered from before.
+    if (const auto kept = detail::read_file(path)) {
+        if (const auto before = check_membership_proof(provider, *kept, node.ledger_id, member);
+            before && before->checkpoint.tree_size > report->checkpoint.tree_size) {
+            return fail(Errc::verification_failed,
+                        "the trust node answered an older proof than the one kept here");
+        }
+    }
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);
     if (auto written = detail::write_file(path, response->body, false); !written) {
@@ -174,10 +227,12 @@ fetch_membership_proof(const crypto::Provider& provider,
     return report;
 }
 
-void add_membership_proofs(const std::filesystem::path& ledger_directory,
-                           std::string_view record_type, protocol::EvidenceBundle& bundle) {
+void add_membership_proofs(const crypto::Provider& provider,
+                           const std::filesystem::path& ledger_directory,
+                           const protocol::Id& member, std::string_view record_type,
+                           protocol::EvidenceBundle& bundle) {
     if (record_type != protocol::membership_type) {
-        bundle.memberships = kept_membership_proofs(ledger_directory);
+        bundle.memberships = kept_membership_proofs(provider, ledger_directory, member);
     }
 }
 

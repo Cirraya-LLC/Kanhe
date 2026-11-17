@@ -825,11 +825,15 @@ std::vector<CommandSpec> chain_commands() {
          "[NAME]",
          0,
          1,
-         with({ledger_option}),
+         with({ledger_option,
+               {"ca-file", "FILE",
+                "CA certificates (PEM) to trust for the trust nodes, if not the "
+                "system's"}}),
          cmd_trust_node_fetch,
          "From each trust node listed (or NAME): its newest membership naming this ledger,\n"
-         "checked, kept in place of the one before. A proof shows the membership as of its\n"
-         "checkpoint, so fetch again from time to time (a suspension shows only then)."},
+         "checked, kept in place of the one before (never by an older one). A proof shows the\n"
+         "membership as of its checkpoint, so fetch again from time to time (a suspension\n"
+         "shows only then)."},
         {{"record", "publish"},
          "Publish a record at a private address: its evidence as it is, with chosen fields",
          "Records",

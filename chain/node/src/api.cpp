@@ -1658,7 +1658,7 @@ struct LedgerApi::State {
                 type = r->record_type;
             }
         });
-        add_membership_proofs(options.directory, type, bundle);
+        add_membership_proofs(*provider, options.directory, ledger->id(), type, bundle);
         add_source_proofs(options.directory, bundle);
     }
 
@@ -2014,7 +2014,7 @@ struct LedgerApi::State {
         if (!bundle) {
             return error_response(bundle.error());
         }
-        add_membership_proofs(options.directory, "", *bundle);
+        add_membership_proofs(*provider, options.directory, ledger->id(), "", *bundle);
         auto evidence = contract_evidence(*provider, options.directory, *bundle, ancestors);
         return evidence ? binary("application/cbor", std::move(*evidence))
                         : error_response(evidence.error());
@@ -3434,7 +3434,7 @@ struct LedgerApi::State {
                 done(std::unexpected(bundle.error()));
                 return;
             }
-            add_membership_proofs(options.directory, "", *bundle);
+            add_membership_proofs(*provider, options.directory, ledger->id(), "", *bundle);
             done(contract_evidence(*provider, options.directory, *bundle, ancestors));
         });
     }

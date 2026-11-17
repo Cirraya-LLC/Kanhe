@@ -621,8 +621,8 @@ protocol::EvidenceBundle Session::evidence(const LogKey& log_key, const protocol
         // proofs of its sources on other ledgers (v0.18); a server adds its
         // own.
         const protocol::RecordState* r = state().record(record);
-        node::add_membership_proofs(directory_, r != nullptr ? r->record_type : std::string(),
-                                    bundle);
+        node::add_membership_proofs(provider_, directory_, state().ledger_id(),
+                                    r != nullptr ? r->record_type : std::string(), bundle);
         node::add_source_proofs(directory_, bundle);
         return bundle;
     }

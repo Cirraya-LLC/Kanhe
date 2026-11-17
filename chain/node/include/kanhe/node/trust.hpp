@@ -20,6 +20,7 @@
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/id_map.hpp>
 #include <kanhe/ledger/ledger.hpp>
+#include <kanhe/node/client.hpp>
 
 /// Trust nodes (spec v0.16, section 16), on both sides.
 ///
@@ -60,24 +61,30 @@ membership_proof_path(const std::filesystem::path& ledger_directory, const proto
 check_membership_proof(const crypto::Provider& provider, ByteView proof, const protocol::Id& node,
                        const protocol::Id& member);
 
-/// The proofs kept for the trust nodes listed, in the list's order (a node
-/// without one, or with a file that does not read, is left out).
+/// The proofs kept for the trust nodes listed, in the list's order, each
+/// checked as `member`'s evidence will check it (a node without one, or
+/// with one that does not check, is left out: it would fail every bundle).
 [[nodiscard]] std::vector<Bytes>
-kept_membership_proofs(const std::filesystem::path& ledger_directory);
+kept_membership_proofs(const crypto::Provider& provider,
+                       const std::filesystem::path& ledger_directory, const protocol::Id& member);
 
 /// Fetches this ledger's (`member`'s) proof from `node`'s server
-/// (`GET /m/MEMBER`), checks it, and keeps it in place of the one before.
-/// Errc::not_found if the trust node names this ledger in no membership.
+/// (`GET /m/MEMBER`), checks it, and keeps it in place of the one before,
+/// unless it is older than that one (Errc::verification_failed: the node or
+/// a cache in between went back). Errc::not_found if the trust node names
+/// this ledger in no membership.
 [[nodiscard]] Result<protocol::EvidenceReport>
 fetch_membership_proof(const crypto::Provider& provider,
                        const std::filesystem::path& ledger_directory, const TrustNodeEntry& node,
-                       const protocol::Id& member);
+                       const protocol::Id& member, const ClientOptions& client = {});
 
 /// Adds the kept proofs to `bundle`, evidence of a record of this ledger's
-/// whose type is `record_type` (empty for an instance), unless it is a
-/// membership: a proof carries none.
-void add_membership_proofs(const std::filesystem::path& ledger_directory,
-                           std::string_view record_type, protocol::EvidenceBundle& bundle);
+/// (`member`) whose type is `record_type` (empty for an instance), unless it
+/// is a membership: a proof carries none.
+void add_membership_proofs(const crypto::Provider& provider,
+                           const std::filesystem::path& ledger_directory,
+                           const protocol::Id& member, std::string_view record_type,
+                           protocol::EvidenceBundle& bundle);
 
 /// Which ledger each membership on a trust node's ledger names, read from
 /// its registration once (a membership's metadata never changes).

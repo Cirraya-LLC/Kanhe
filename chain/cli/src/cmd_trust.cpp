@@ -384,11 +384,15 @@ int cmd_trust_node_fetch(const Args& args) {
                            "--url URL"};
     }
     const protocol::Timestamp now = ledger::SystemClock().now();
+    node::ClientOptions client;
+    if (const auto ca = args.get("ca-file")) {
+        client.ca_file = *ca;
+    }
     Json out = Json::array();
     bool all = true;
     for (const node::TrustNodeEntry& n : chosen) {
-        auto report =
-            node::fetch_membership_proof(shared_provider(), dir, n, session.state().ledger_id());
+        auto report = node::fetch_membership_proof(shared_provider(), dir, n,
+                                                   session.state().ledger_id(), client);
         if (!report) {
             all = false;
             if (args.json()) {

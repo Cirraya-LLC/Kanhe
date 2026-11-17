@@ -128,6 +128,8 @@ run export "$M" --ledger node --log-key n-log.key --out m.cbor > /dev/null
 run trust member suspend "$M" --ledger node --as n-root.key | contains "suspended membership"
 expect_exit 2 trust member suspend "$M" --ledger node --as n-root.key
 run trust node fetch hktrust --ledger school | contains "is suspended"
+# The trust node as it is now, to serve an older proof later.
+run backup create --ledger node --log-key n-log.key --out node-then.cxb > /dev/null
 run export "$CERT" --ledger school --log-key s-log.key --out cert2.cbor > /dev/null
 R="$(run verify cert2.cbor --ledger-id "$SCHOOL" --trust-node "$NODE=HK Trust" --json)"
 [ "$(echo "$R" | json 'd["memberships"][0]["at_record"]')" = active ] || fail "active when issued"
@@ -142,6 +144,48 @@ run trust member revoke "$M2" --ledger node --as n-root.key --reason "forged pap
     contains "revoked membership"
 expect_exit 2 trust member revoke "$M2" --ledger node --as n-root.key
 run trust node fetch --ledger school | contains "is revoked"
+
+# --- Never back: an older proof does not replace the one kept ------------------------------
+run backup restore node-then.cxb --ledger node-then > /dev/null
+start_server then.json --ledger node-then --log-key n-log.key --checkpoint-interval 0
+THEN="$(json 'd["url"]' < then.json)"
+cp school/trust/nodes.json nodes.json.saved
+cp "school/trust/proofs/$NODE.cbor" kept.cbor
+python3 - "$THEN" << 'PY'
+import json, sys
+path = "school/trust/nodes.json"
+nodes = json.load(open(path))
+nodes["nodes"][0]["url"] = sys.argv[1]
+json.dump(nodes, open(path, "w"))
+PY
+expect_exit 2 trust node fetch --ledger school
+contains "older proof than the one kept" out.txt || fail "an older proof refused"
+cmp -s kept.cbor "school/trust/proofs/$NODE.cbor" || fail "the newer proof still kept"
+# A file that names a trust node twice is read as saving writes it: refused.
+python3 << 'PY'
+import json
+path = "school/trust/nodes.json"
+nodes = json.load(open(path))
+nodes["nodes"].append(dict(nodes["nodes"][0], name="again"))
+json.dump(nodes, open(path, "w"))
+PY
+expect_exit 2 trust node list --ledger school
+contains "twice" out.txt || fail "a trust node listed twice"
+cp nodes.json.saved school/trust/nodes.json
+
+# --- A kept proof that does not check is left out, not carried into every bundle ------------
+for k in o-root o-log; do run key generate --out "$k.key" > /dev/null; done
+OTHER="$(run init --ledger other --name "Another School" --root-key o-root.key --log-key o-log.key \
+    --json | json 'd["ledger_id"]')"
+M3="$(run trust member add "$OTHER" --ledger node --as n-root.key --name "Another School" --json |
+    json 'd["membership"]')"
+run checkpoint create --ledger node --log-key n-log.key > /dev/null
+run export "$M3" --ledger node --log-key n-log.key --out "school/trust/proofs/$NODE.cbor" > /dev/null
+run export "$CERT" --ledger school --log-key s-log.key --out unchecked.cbor > /dev/null
+[ "$(run verify unchecked.cbor --ledger-id "$SCHOOL" --json |
+    json '"%s %d" % (d["verified"], len(d["memberships"]))')" = "True 0" ] ||
+    fail "a proof naming another ledger, left out"
+cp kept.cbor "school/trust/proofs/$NODE.cbor"
 
 # --- Backups keep the trust files; removing a node drops its proof --------------------------
 run backup create --ledger school --log-key s-log.key --out b.cxb > /dev/null
