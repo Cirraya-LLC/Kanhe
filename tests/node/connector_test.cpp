@@ -2,7 +2,10 @@
 // Copyright 2026 Cirraya
 
 #include <chrono>
+#include <filesystem>
 #include <string>
+#include <unistd.h>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -216,4 +219,35 @@ TEST_CASE("child processes run without a shell, with lines and timeouts", "[node
     CHECK(!timed_out.exit);
     CHECK(std::chrono::steady_clock::now() - started < 5s);
     CHECK(!ChildProcess::start("/nonexistent/program", {}));
+}
+
+TEST_CASE("child processes start in a directory, with only the environment given",
+          "[node][process]") {
+    const std::filesystem::path directory = std::filesystem::temp_directory_path() /
+                                            ("kanhe-process-test-" + std::to_string(::getpid()));
+    std::filesystem::remove_all(directory);
+    std::filesystem::create_directories(directory);
+    ::setenv("CONNECTOR_TEST_HIDDEN", "yes", 1);
+    kanhe::node::ChildOptions options;
+    options.directory = directory;
+    options.environment = std::vector<std::string>{"ONLY=this", "PATH=/usr/bin:/bin"};
+    auto pwd = ChildProcess::start("/bin/sh", {"-c", "pwd -P; env"}, options);
+    REQUIRE(pwd);
+    const auto ran = pwd->communicate({}, 2s, 1 << 20);
+    REQUIRE(ran.exit);
+    CHECK(ran.exit->success());
+    const std::string output(ran.output.begin(), ran.output.end());
+    CHECK(output.starts_with(std::filesystem::canonical(directory).string() + "\n"));
+    CHECK(output.find("ONLY=this") != std::string::npos);
+    CHECK(output.find("CONNECTOR_TEST_HIDDEN") == std::string::npos);
+    ::unsetenv("CONNECTOR_TEST_HIDDEN");
+    // A directory that is not there: the program never runs.
+    options.directory = directory / "missing";
+    auto nowhere = ChildProcess::start("/bin/sh", {"-c", "echo ran"}, options);
+    if (nowhere) {
+        const auto tried = nowhere->communicate({}, 2s, 1024);
+        CHECK(tried.output.empty());
+        CHECK((!tried.exit || !tried.exit->success()));
+    }
+    std::filesystem::remove_all(directory);
 }

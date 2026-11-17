@@ -501,6 +501,61 @@ std::vector<CommandSpec> chain_commands() {
          cmd_script_check,
          "Hashes each file the approval names, below DIR (default: the current directory),\n"
          "and says which are the same, changed, or missing. Exit status 3 if any differ."},
+        {{"record", "recompute"},
+         "Run a record's deterministic script again on its sources' fields, and compare",
+         "Scripts",
+         "EVIDENCE",
+         1,
+         1,
+         with(
+             {{"script-dir", "DIR", "The script's files, each checked against its approval", true},
+              {"run", "COMMAND",
+               "How to run the script in DIR, e.g. \"python3 run.py\" (split into words, no "
+               "shell)",
+               true},
+              {"source", "FILE",
+               "The evidence of a source the record names, with the fields the script reads "
+               "disclosed (one for each source)",
+               false, true},
+              {"timeout", "SECONDS", "Stop the script after this long (1 to 3600; default: 60)"},
+              {"ledger-id", "ID", "The record's ledger id, learned out of band"},
+              {"witness", "PUBKEY", "Trust this witness's public key file", false, true},
+              {"witness-vkey", "VKEY",
+               "Trust this open network's witness, by its verifier key (spec v0.13)", false, true},
+              {"min-witnesses", "N", "Fail unless at least N trusted witnesses cosigned EVIDENCE"},
+              {"tsa-root", "FILE",
+               "Trust time-stamp authorities under this root certificate (PEM or DER)", false,
+               true},
+              {"min-timestamps", "N",
+               "Fail unless at least N trusted time-stamp authorities stamped EVIDENCE"},
+              {"trust-node", "LEDGER=NAME",
+               "Believe this trust node's memberships, naming it NAME (spec v0.16)", false, true}}),
+         cmd_record_recompute,
+         "EVIDENCE is the record's evidence as its ledger exported it, with the fields to\n"
+         "compare disclosed (kanhe export --disclose); each --source is the evidence of a\n"
+         "record it was made from, with the fields the script reads disclosed: one for each\n"
+         "source the record names, in any order. Each is verified as kanhe verify verifies\n"
+         "it, with the trust given here. The script is the one the record's registration\n"
+         "names: it must be approved still and stated deterministic, and each of its files\n"
+         "must be below DIR as approved (other files there are not checked, and the script\n"
+         "may read them).\n\n"
+         "--run is split into words as a shell splits them, with quotes and backslashes, but\n"
+         "no shell runs it: nothing is expanded or redirected. It runs in DIR with PATH, HOME,\n"
+         "and TMPDIR from your environment, LC_ALL=C, and TZ=UTC, and nothing else. It gets\n"
+         "one line of JSON on its stdin:\n"
+         "  {\"sources\": [{\"ledger\": ID, \"record\": ID, \"type\": TYPE,\n"
+         "                \"fields\": {NAME: VALUE, ...}}, ...]}\n"
+         "the sources in the order the record names them, each value as kanhe verify --json\n"
+         "shows it (a field given on the command line is text). It must exit 0 within\n"
+         "--timeout and print one JSON object, {NAME: VALUE, ...}, at most 16 MiB. Each field\n"
+         "it prints is compared with the value the record discloses: it matches, it differs,\n"
+         "or it cannot be checked (not disclosed); a disclosed field it does not print is not\n"
+         "recomputed.\n\n"
+         "Exit status 0 if every field compared matches and at least one was compared; 3 if\n"
+         "one differs, none was compared, or evidence does not verify; 1 or 2 if it could not\n"
+         "run. It runs a program you name, so the MCP server does not offer it.\n\n"
+         "  kanhe record recompute score.cbor --script-dir ./model --run \"python3 run.py\" \\\n"
+         "      --source reading.cbor --ledger-id 9f8e7d6c..."},
         {{"record", "list"},
          "List records",
          "Records",
@@ -2560,7 +2615,11 @@ std::vector<CommandSpec> chain_commands() {
                {"secrets", "NAMES", "command, program: secrets it is handed, comma-separated"},
                {"connector-config", "JSON", "program: its own configuration, a JSON object"},
                {"concurrency", "N",
-                "How many of its requests run at once, one copy of it each (1 to 256)"}}),
+                "How many of its requests run at once, one copy of it each (1 to 256)"},
+               {"script", "SCRIPT",
+                "command, program: the approved script it runs (kanhe script approve), named in "
+                "its answers"},
+               ledger_option}),
          cmd_executor_connector_add,
          "A webhook POSTs each request as JSON to --url, signed with HMAC-SHA-256 under the\n"
          "secret --secret (executor secret set NAME). A command runs --program with the --arg\n"
@@ -2573,10 +2632,19 @@ std::vector<CommandSpec> chain_commands() {
          "performing one request at a time: up to --concurrency of them; by default, as many\n"
          "as executor run works at once for a webhook or a command, and one for a program\n"
          "(which may keep state of its own).\n\n"
+         "--script names the approved script a command or a program runs: the answers made\n"
+         "from its outcomes then name it in their provenance, as --script does on a signed\n"
+         "command, so their evidence shows what made them and who approved it. It is checked\n"
+         "on the executor's ledger (--ledger, or --server) when the connector is added: a\n"
+         "script, not withdrawn. Once it is withdrawn, the ledger refuses those answers:\n"
+         "approve the new version, then remove the connector and add it again with that one.\n"
+         "Answers the runtime makes on its own (failed: deadline) name no script.\n\n"
          "  kanhe executor connector add notices --config notifier.json --type webhook \\\n"
          "      --kinds notify --url https://hooks.example.com/ledger --secret hook-key\n"
          "  kanhe executor connector add script --config notifier.json --type command \\\n"
-         "      --kinds http.post --program /usr/local/bin/post-request --timeout 60"},
+         "      --kinds http.post --program /usr/local/bin/post-request --timeout 60\n"
+         "  kanhe executor connector add scorer --config notifier.json --type command \\\n"
+         "      --kinds score --program /opt/scorer/run --script 7c41a9e0"},
         {{"executor", "connector", "list"},
          "List the connectors in an executor's config",
          "Executors",

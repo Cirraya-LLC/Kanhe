@@ -25,7 +25,9 @@
 #include <nlohmann/json.hpp>
 
 #include <kanhe/core/protocol/contracts.hpp>
+#include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/node/api.hpp>
 #include <kanhe/node/client.hpp>
 #include <kanhe/node/connectors.hpp>
@@ -33,6 +35,7 @@
 #include <kanhe/node/server.hpp>
 #include <kanhe/node/tokens.hpp>
 
+#include "support/authenticator.hpp"
 #include "support/ledger_world.hpp"
 #include "support/vectors.hpp"
 
@@ -419,6 +422,114 @@ TEST_CASE("an executor verifies a request, acts once, and answers with the respo
     events = run_once(home, running.url(), recorder, state);
     CHECK(recorder.count() == 1);
     CHECK(!has_event(events, "acting"));
+    std::filesystem::remove_all(state);
+}
+
+TEST_CASE("an executor's answers name the script its connector runs, while it stays approved",
+          "[node][executor]") {
+    Home home;
+    const auto api = home.api();
+    Running running(*api);
+    node::ClientOptions staff;
+    staff.bearer_token = home.staff;
+    const node::Client client(*node::Url::parse(running.url()), staff);
+    auto submit = [&](const Bytes& statement) {
+        auto answer = client.request("POST", "/v1/statements", statement, "application/cose");
+        REQUIRE(answer);
+        INFO(std::string(answer->body.begin(), answer->body.end()));
+        REQUIRE(answer->status == 201);
+        const json body = json::parse(answer->body.begin(), answer->body.end());
+        return *protocol::to_id(*kanhe::from_hex(body["statement_id"].get<std::string>()));
+    };
+
+    // A person approves the script in person, with a passkey (spec v0.18).
+    const KeyPair approver_key = key("executor home approver");
+    SoftPasskey passkey;
+    {
+        auto generated = KeyPair::generate(crypto::SigAlg::esp256);
+        REQUIRE(generated);
+        auto shared = std::make_shared<const KeyPair>(std::move(*generated));
+        passkey.public_key = shared->public_key();
+        passkey.key = shared;
+        passkey.credential_id = Bytes(16, 7);
+    }
+    const protocol::Id approver = submit(
+        home.sign(home.org, home.id, std::nullopt,
+                  protocol::ActorRegisterBody{
+                      protocol::ActorKind::person, "Approver", approver_key.public_key(), {}, {}}));
+    submit(home.sign(
+        home.org, home.id, std::nullopt,
+        protocol::ActorSetPresenceBody{
+            approver,
+            {protocol::PresenceCredential{passkey.rp_id, passkey.credential_id, passkey.public_key,
+                                          std::string("Approver's passkey")}}}));
+    const protocol::Id approvals = submit(home.sign(
+        home.org, home.id, std::nullopt,
+        protocol::DelegationGrantBody{
+            approver, scope({StatementType::record_register, StatementType::record_revoke})}));
+    protocol::Script notifier;
+    notifier.name = "notifier";
+    notifier.version = "1.0";
+    notifier.files = {{"notify.py", 120, Bytes(32, 0x3c)}};
+    notifier.deterministic = true;
+    protocol::Statement approval;
+    approval.ledger_id = home.id;
+    approval.actor_id = approver;
+    approval.delegation_id = approvals;
+    approval.issued_at = ledger::SystemClock{}.now();
+    approval.nonce = home.entropy.bytes<16>();
+    approval.body =
+        protocol::RecordRegisterBody{std::string(protocol::script_type), Bytes(32, 0x42), 1, {},
+                                     *protocol::encode_script(notifier), std::nullopt,    {}};
+    const auto kid =
+        protocol::key_id(provider(), crypto::HashAlg::sha256, approver_key.public_key());
+    REQUIRE(kid);
+    approval.presence =
+        passkey.sign(provider(), *protocol::presence_challenge(provider(), crypto::HashAlg::sha256,
+                                                               approval, *kid));
+    const auto signed_approval =
+        protocol::sign_statement(approver_key, provider(), crypto::HashAlg::sha256, approval);
+    REQUIRE(signed_approval);
+    const protocol::Id script = submit(signed_approval->encoded);
+
+    // The connector runs it: its answer names it, and the ledger takes it.
+    executor::Config config = home.config();
+    config.connectors[0].script = script;
+    REQUIRE(executor::parse_config(executor::config_text(config))->connectors[0].script == script);
+    Recorder recorder;
+    const auto state = fresh_directory();
+    run_once(home, running.url(), recorder, state, std::nullopt, &config);
+    REQUIRE(status_of(*api, home.requests[0]) == protocol::AnswerStatus::done);
+    auto entry = executor::Journal(state).find(home.requests[0]);
+    REQUIRE(entry);
+    CHECK(entry->script == script);
+    REQUIRE(entry->statement);
+    const auto answer =
+        protocol::parse_statement(provider(), *entry->statement, crypto::HashAlg::sha256);
+    REQUIRE(answer);
+    REQUIRE(answer->statement.provenance);
+    CHECK(answer->statement.provenance->script == script);
+    CHECK(!answer->statement.provenance->model);
+
+    // Withdrawn: the ledger refuses the answers that name it, and the
+    // request stays open for others.
+    submit(home.sign(approver_key, approver, approvals,
+                     protocol::RecordRevokeBody{script, "replaced"}));
+    protocol::ContractCallBody ask;
+    ask.instance = home.instance;
+    ask.head = head_of(*api, home.instance);
+    ask.function = "ask";
+    ask.arguments = asks({{"notify", hour}});
+    const protocol::Id call = submit(home.sign(home.org, home.id, std::nullopt, ask));
+    const protocol::Id next = *protocol::request_id(provider(), crypto::HashAlg::sha256, call, 0);
+    const auto events = run_once(home, running.url(), recorder, state, std::nullopt, &config);
+    CHECK(recorder.count() == 2);
+    CHECK(has_event(events, "refused"));
+    entry = executor::Journal(state).find(next);
+    REQUIRE(entry);
+    CHECK(entry->stage == executor::Stage::closed);
+    CHECK(entry->note.find("refused") != std::string::npos);
+    CHECK(!status_of(*api, next));
     std::filesystem::remove_all(state);
 }
 

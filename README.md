@@ -306,7 +306,7 @@ The `kanhe` tool controls every part of a ledger:
 | Actors | `actor add`, `actor list`, `actor show`, `actor revoke`, `actor rotate-key`, `actor set-presence`, `presence enroll` |
 | Delegations | `delegation grant`, `delegation list`, `delegation show`, `delegation revoke` |
 | Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record source list\|prove\|forget`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
-| Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke` |
+| Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke`, `record recompute` |
 | Claims | `claim issue`, `claim list`, `claim show`, `claim revoke` |
 | Credentials | `credential key add\|list\|revoke`, `credential issue`, `credential list`, `credential show`, `credential revoke`, `credential status`, `credential did-document`, `credential verify` |
 | Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch` (a member's) |
@@ -622,6 +622,26 @@ kanhe verify score.cbor --follow sources/
 A script is withdrawn with `script revoke`: records can no longer name it, and the evidence of
 those that did says so. A source on another ledger is shown by its proof (`record source prove`
 keeps a newer one), or as not provided.
+
+A script stated `--deterministic` can be run again. An auditor given the record's evidence with
+the fields to check disclosed, each source's evidence with the fields the script reads, and the
+script's files runs it and compares what it prints with what the record holds, each value
+proven against the record's commitment:
+
+```sh
+kanhe record recompute score.cbor --script-dir ./model --run "python3 run.py" \
+    --source book.cbor --source title.cbor --ledger-id <bank-ledger-id>
+#   Files        2 in ./model, each as approved
+#     band: cannot be checked (not disclosed)
+#     score: match
+#   Recomputed: every field compared matches (1 of 1 disclosed).
+```
+
+It verifies each bundle, checks every file against the approval, and runs `--run` in that
+directory without a shell (split into words, nothing expanded), with a minimal environment and a
+time limit; the script gets the sources' disclosed fields as one line of JSON on its stdin and
+prints the fields it makes as a JSON object. Exit status 0 when every field compared matches, 3
+when one differs. A script that is withdrawn, or not stated deterministic, is not recomputed.
 
 ## Trust nodes
 
@@ -957,6 +977,11 @@ kanhe executor run --config notifier.json --state notifier-state \
 kanhe executor journal list --state notifier-state   # what it did, and why
 ```
 
+A `command` or `program` connector may name the approved script it runs
+(`executor connector add ... --script <script-id>`, checked on the executor's ledger): the
+answers made from its outcomes then name that script in their provenance, as records do, and
+the ledger refuses them once the script is withdrawn.
+
 It works several requests at once (`--concurrency`, by default one per core), never two of one
 instance, each verified once: the answer is built on the evidence its request was verified in.
 An answer carries the connector's result (external ids, statuses, codes: never personal data), a
@@ -1012,7 +1037,8 @@ ledger's `--log-key` to let the agent consent. Arguments are CBOR diagnostic not
 command line. An agent can also be an executor: it lists the requests contracts made
 (`kanhe_list_requests`, `kanhe_get_request`) and answers those its delegation covers
 (`kanhe_answer_request`), each answer recorded with its provenance. `kanhe mcp --help`
-lists every tool.
+lists every tool. `kanhe record recompute` is not among them: it runs a program the person
+names.
 
 With `--server URL` (and `--token-file`, `--ledger-id`, as for every command in client mode), the
 agent works on a ledger a server or a cluster serves, through a verified local mirror: it reads,

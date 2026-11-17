@@ -151,6 +151,18 @@ std::expected<ConnectorConfig, std::string> connector_of(const json& entry) {
     if (!secrets) {
         return bad(secrets.error());
     }
+    if (const auto script = entry.find("script"); script != entry.end()) {
+        const auto id = script->is_string()
+                            ? detail::id_from_hex(script->get_ref<const std::string&>())
+                            : std::nullopt;
+        if (!id) {
+            return bad("its script is an id of 64 hex digits");
+        }
+        if (c.type == "webhook") {
+            return bad("a webhook names no script: what it reaches runs elsewhere");
+        }
+        c.script = *id;
+    }
     json config = json::object();
     config["timeout"] = c.timeout.count();
     if (c.type == "webhook") {
@@ -242,6 +254,9 @@ json connector_json(const ConnectorConfig& c) {
     o["timeout"] = c.timeout.count();
     if (c.concurrency != 0) {
         o["concurrency"] = c.concurrency;
+    }
+    if (c.script) {
+        o["script"] = hex(*c.script);
     }
     const json config = json::parse(c.config, nullptr, false);
     if (c.type == "program") {
@@ -420,6 +435,7 @@ std::string entry_text(const JournalEntry& e) {
     put_bytes("response", e.response);
     put_bytes("salt", e.salt);
     put_bytes("digest", e.digest);
+    o["script"] = e.script ? json(hex(*e.script)) : json(nullptr);
     put_bytes("statement", e.statement);
     o["statement_id"] = e.statement_id ? json(hex(*e.statement_id)) : json(nullptr);
     o["head"] = e.head ? json(*e.head) : json(nullptr);
@@ -493,6 +509,7 @@ std::optional<JournalEntry> parse_entry(std::string_view text) {
     e.response = bytes("response");
     e.salt = bytes("salt");
     e.digest = bytes("digest");
+    e.script = id("script");
     e.statement = bytes("statement");
     e.statement_id = id("statement_id");
     if (const auto it = o.find("head"); it != o.end() && it->is_number_unsigned()) {
@@ -1410,7 +1427,9 @@ private:
             return;
         }
         e.failures = 0;
-        decide(e, server, *report, o.status, o.reason, std::move(o.result), std::move(o.response));
+        // The connector's outcome: the answer names the script it runs.
+        decide(e, server, *report, o.status, o.reason, std::move(o.result), std::move(o.response),
+               route->script);
     }
 
     void unverified(JournalEntry& e, std::string why) {
@@ -1420,12 +1439,14 @@ private:
         event("unverified", e, {{"why", e.note}});
     }
 
-    /// Journals the outcome (with the response's salted digest), then
-    /// answers on the head `r` verified.
+    /// Journals the outcome (with the response's salted digest, and the
+    /// script it came from, if any), then answers on the head `r` verified.
     void decide(JournalEntry& e, Connection& server, const protocol::ContractReport& r,
                 connector::OutcomeStatus status, std::optional<std::string> reason,
-                std::optional<cbor::Value> result = {}, std::optional<Bytes> response = {}) {
+                std::optional<cbor::Value> result = {}, std::optional<Bytes> response = {},
+                std::optional<protocol::Id> script = {}) {
         e.status = status == connector::OutcomeStatus::done ? "done" : "failed";
+        e.script = script;
         e.reason = status == connector::OutcomeStatus::done
                        ? std::nullopt
                        : std::optional<std::string>(reason.value_or("rejected"));
@@ -1481,6 +1502,14 @@ private:
                     {"executor:kanhe", Bytes(tool->bytes().begin(), tool->bytes().end())});
             }
             st.provenance = std::move(p);
+        }
+        // The script the outcome came from (spec v0.18), as the journal
+        // keeps it: the ledger refuses the answer if it was withdrawn since.
+        if (e.script) {
+            if (!st.provenance) {
+                st.provenance.emplace();
+            }
+            st.provenance->script = *e.script;
         }
         protocol::ContractCallBody body;
         body.instance = e.instance;

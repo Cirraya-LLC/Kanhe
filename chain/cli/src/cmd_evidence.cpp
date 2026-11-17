@@ -687,39 +687,7 @@ Json follow(const protocol::EvidenceReport& report, const FollowIndex& index,
 
 int cmd_verify(const Args& args) {
     const crypto::openssl::Provider provider;
-    protocol::VerifyOptions options;
-    if (const auto ledger_id = args.get("ledger-id")) {
-        const auto bytes = from_hex(*ledger_id);
-        if (!bytes) {
-            throw UsageError{"--ledger-id must be the full hex ledger id"};
-        }
-        options.expected_ledger = unwrap(protocol::to_id(*bytes), "ledger id");
-    }
-    for (const std::string& path : args.all("witness")) {
-        options.trusted_witnesses.push_back(load_public_key(path));
-    }
-    options.trusted_timestamp_roots = client::load_certificates(args.all("tsa-root"));
-    options.trusted_network_witnesses = client::network_witness_keys(args.all("witness-vkey"));
-    for (const std::string& item : args.all("attachment")) {
-        auto [name, path] = split_pair(item, "--attachment");
-        options.attachment_contents[name] = read_file(path);
-    }
-    // Trust nodes (spec v0.16): named here, never by the evidence.
-    for (const std::string& item : args.all("trust-node")) {
-        auto [ledger_text, name] = split_pair(item, "--trust-node");
-        const auto bytes = from_hex(ledger_text);
-        const auto id =
-            bytes ? protocol::to_id(*bytes) : Result<protocol::Id>(std::unexpected(bytes.error()));
-        if (!id || name.empty()) {
-            throw UsageError{"--trust-node is LEDGER=NAME: the trust node's full hex ledger id, "
-                             "and the name to give it"};
-        }
-        if (std::ranges::any_of(options.trust_nodes,
-                                [&](const protocol::TrustNode& n) { return n.ledger == *id; })) {
-            throw UsageError{"--trust-node names each trust node once"};
-        }
-        options.trust_nodes.push_back({*id, name});
-    }
+    const protocol::VerifyOptions options = verify_options(args);
     const auto report = ledger::verify_bundle(provider, read_file(args.positional().front()),
                                               options, on_all_cores());
     if (!report) {

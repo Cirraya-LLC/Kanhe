@@ -84,6 +84,7 @@ int cmd_script_list(const Args& args);
 int cmd_script_show(const Args& args);
 int cmd_script_revoke(const Args& args);
 int cmd_script_check(const Args& args);
+int cmd_record_recompute(const Args& args);
 int cmd_record_endorse(const Args& args);
 int cmd_record_transition(const Args& args);
 int cmd_record_revoke(const Args& args);

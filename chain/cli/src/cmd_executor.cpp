@@ -83,6 +83,20 @@ void save_config(const std::filesystem::path& path, const executor::Config& conf
     write_file(path, as_bytes(std::string_view(text)), true);
 }
 
+/// The script a connector runs (--script, spec v0.18), checked on the
+/// executor's home ledger as --script is on a signed command: a script
+/// approved there, not withdrawn.
+protocol::Id connector_script(const Args& args, const executor::Config& config) {
+    Session session(args);
+    if (session.state().ledger_id() != config.ledger) {
+        throw UsageError{"the config is for the ledger " + hex_id(config.ledger) + ", not " +
+                         hex_id(session.state().ledger_id()) +
+                         ": --script is checked on the executor's own ledger (--ledger or "
+                         "--server)"};
+    }
+    return *session.provenance(args)->script;
+}
+
 // ---- secrets ---------------------------------------------------------------
 
 std::filesystem::path secrets_directory(const std::filesystem::path& state) {
@@ -236,6 +250,7 @@ Json entry_json(const executor::JournalEntry& e, bool full) {
         o["response_bytes"] = e.response ? Json(e.response->size()) : Json(nullptr);
         o["salt"] = e.salt ? hex_json(*e.salt) : Json(nullptr);
         o["digest"] = e.digest ? hex_json(*e.digest) : Json(nullptr);
+        o["script"] = e.script ? id_json(*e.script) : Json(nullptr);
         o["statement_id"] = e.statement_id ? id_json(*e.statement_id) : Json(nullptr);
         o["head"] = e.head ? Json(*e.head) : Json(nullptr);
     }
@@ -405,7 +420,7 @@ int cmd_executor_connector_add(const Args& args) {
         }
     };
     if (type == "webhook") {
-        refuse({"program", "arg", "connector-config", "secrets"});
+        refuse({"program", "arg", "connector-config", "secrets", "script"});
         entry["url"] = args.need("url");
         entry["secret"] = args.need("secret");
         if (const auto ca = args.get("ca-file")) {
@@ -428,6 +443,9 @@ int cmd_executor_connector_add(const Args& args) {
     } else {
         throw UsageError{"--type is webhook, command, or program"};
     }
+    if (args.has("script")) {
+        entry["script"] = hex_id(connector_script(args, config));
+    }
     Json whole = Json::parse(executor::config_text(config));
     for (const Json& existing : whole["connectors"]) {
         if (existing["name"] == name) {
@@ -446,6 +464,11 @@ int cmd_executor_connector_add(const Args& args) {
         std::println("connector {} ({}) added to {}: serves {}", name, type, path.string(),
                      args.need("kinds"));
         const auto& added = checked->connectors.back();
+        if (added.script) {
+            std::println("its answers name the script {}: once it is withdrawn, the ledger "
+                         "refuses them",
+                         hex_id(*added.script));
+        }
         for (const std::string& secret : added.secrets) {
             std::println("it needs the secret {}: kanhe executor secret set {} --state DIR", secret,
                          secret);
@@ -469,13 +492,14 @@ int cmd_executor_connector_list(const Args& args) {
         for (const auto& k : c.kinds) {
             kinds += (kinds.empty() ? "" : ",") + k;
         }
-        std::println("{:<16} {:<8} serves {}{} (timeout {} s, {})", c.name, c.type, kinds,
+        std::println("{:<16} {:<8} serves {}{} (timeout {} s, {}){}", c.name, c.type, kinds,
                      c.contracts.empty() ? std::string(" on any contract")
                                          : std::format(" on {} contract(s)", c.contracts.size()),
                      c.timeout.count(),
                      c.concurrency != 0    ? std::format("{} at once", c.concurrency)
                      : c.type == "program" ? std::string("1 at once")
-                                           : std::string("as many at once as executor run"));
+                                           : std::string("as many at once as executor run"),
+                     c.script ? "  script " + short_id(*c.script) : std::string());
     }
     return exit_ok;
 }
@@ -667,9 +691,10 @@ int cmd_executor_journal_show(const Args& args) {
         return exit_ok;
     }
     for (const char* key :
-         {"request", "kind", "instance", "contract", "connector", "stage", "attempts", "status",
-          "reason", "result", "index", "answered_status", "answered_by", "note", "response_bytes",
-          "salt", "digest", "digest_checked", "response_file"}) {
+         {"request",        "kind",     "instance",        "contract",       "connector",
+          "stage",          "attempts", "status",          "reason",         "result",
+          "script",         "index",    "answered_status", "answered_by",    "note",
+          "response_bytes", "salt",     "digest",          "digest_checked", "response_file"}) {
         if (o.contains(key) && !o[key].is_null() &&
             !(o[key].is_string() && o[key].get<std::string>().empty())) {
             std::println("{:<16} {}", std::string(key) + ":",

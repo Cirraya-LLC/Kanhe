@@ -92,6 +92,7 @@ status_of() { a request show "$1" --json | json 'd["status"]'; }
 run executor run --help | contains 'never acted on'
 run executor run --help | contains 'never params, results, responses'
 run executor connector add --help | contains 'never through a shell'
+run executor connector add --help | contains 'name it in their provenance'
 run executor secret set --help | contains 'never from the command line'
 run executor journal show --help | contains 'HASH(salt || response)'
 run connector webhook --help | contains 'X-Kanhe-Signature'
@@ -227,6 +228,15 @@ run executor connector add spare --config worker.json --type command --kinds spa
     --program /bin/true > /dev/null
 run executor connector remove spare --config worker.json > /dev/null
 expect_exit 2 executor connector show spare --config worker.json
+# A connector may name the approved script it runs (scripts.sh approves one, in person):
+# checked on the executor's ledger; a contract is no script, and a webhook names none.
+expect_exit 2 executor connector add scored --config worker.json --type command \
+    --kinds spare.kind --program /bin/true --script "$C" --ledger "$A"
+contains 'no record with id' out.txt
+expect_exit 1 executor connector add hook3 --config worker.json --type webhook --kinds x \
+    --url "$HOOK" --secret hook-key --script "$C" --ledger "$A"
+contains -- '--script does not go with --type webhook' out.txt
+json 'len(d["connectors"])' < worker.json | contains -x 2
 expect_exit 2 executor check --config worker.json
 contains 'needs the secret' out.txt
 run executor check --config worker.json --state "$S" --json > check.json

@@ -72,6 +72,10 @@ struct ConnectorConfig {
     /// once for webhook and command (stateless per request), 1 for program
     /// (which may keep state of its own).
     std::size_t concurrency = 0;
+    /// For "command" and "program": the approved script (a kanhe.script/1
+    /// record of the home ledger, spec v0.18) it runs. The answers its
+    /// outcomes make name it in their provenance (key 5).
+    std::optional<protocol::Id> script;
 };
 
 /// An executor's config file (JSON): the home ledger, the executor's actor
@@ -154,6 +158,10 @@ struct JournalEntry {
     std::optional<Bytes> response;
     std::optional<Bytes> salt;
     std::optional<Bytes> digest;
+    /// The script the outcome came from: its connector's, when the outcome
+    /// is the connector's (not one the runtime decided, such as a deadline
+    /// passed). The answer's provenance names it.
+    std::optional<protocol::Id> script;
     // The answer.
     std::optional<Bytes> statement; // COSE
     std::optional<protocol::Id> statement_id;

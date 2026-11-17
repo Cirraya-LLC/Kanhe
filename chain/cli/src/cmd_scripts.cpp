@@ -264,15 +264,8 @@ int cmd_script_check(const Args& args) {
     Json files = Json::array();
     std::size_t differ = 0;
     for (const protocol::ScriptFile& f : s.script.files) {
-        const std::filesystem::path full = root / f.path;
-        std::error_code ec;
-        std::string status = "same";
-        if (!std::filesystem::is_regular_file(full, ec)) {
-            status = "missing";
-        } else if (const protocol::ScriptFile on_disk = file_of(session, f.path, full);
-                   on_disk.size != f.size || on_disk.digest != f.digest) {
-            status = "changed";
-        }
+        const std::string status =
+            script_file_status(session.provider(), session.state().hash(), root, f);
         if (status != "same") {
             ++differ;
         }

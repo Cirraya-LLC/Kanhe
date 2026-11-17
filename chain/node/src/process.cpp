@@ -172,14 +172,43 @@ Exit block_until_exit(pid_t, clock::time_point) noexcept {
 }
 #endif
 
+/// Makes the child start in `directory`: POSIX 2024's call where the system
+/// has it (macOS 26 and later), else the older one of the same meaning
+/// (glibc 2.29, musl, the BSDs, earlier macOS).
+int add_chdir(posix_spawn_file_actions_t* actions, const char* directory) noexcept {
+#if defined(__APPLE__) && defined(__clang__)
+#if defined(__MAC_26_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= __MAC_26_0
+    if (__builtin_available(macOS 26.0, *)) {
+        return ::posix_spawn_file_actions_addchdir(actions, directory);
+    }
+#endif
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    return ::posix_spawn_file_actions_addchdir_np(actions, directory);
+#pragma clang diagnostic pop
+#else
+    return ::posix_spawn_file_actions_addchdir_np(actions, directory);
+#endif
+}
+
 } // namespace
 
 Result<ChildProcess> ChildProcess::start(const std::string& program,
                                          const std::vector<std::string>& arguments) {
+    return start(program, arguments, ChildOptions{});
+}
+
+Result<ChildProcess> ChildProcess::start(const std::string& program,
+                                         const std::vector<std::string>& arguments,
+                                         const ChildOptions& options) {
     static std::once_flag ignore_sigpipe;
     std::call_once(ignore_sigpipe, [] { std::signal(SIGPIPE, SIG_IGN); });
     if (program.empty() || program.find('\0') != std::string::npos) {
         return fail(Errc::invalid_argument, "a program is named");
+    }
+    const std::string directory = options.directory ? options.directory->string() : std::string();
+    if (options.directory && (directory.empty() || directory.find('\0') != std::string::npos)) {
+        return fail(Errc::invalid_argument, "a working directory is named");
     }
 
     std::array<int, 2> in{-1, -1};
@@ -199,6 +228,11 @@ Result<ChildProcess> ChildProcess::start(const std::string& program,
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, in[0], STDIN_FILENO);
     posix_spawn_file_actions_adddup2(&actions, out[1], STDOUT_FILENO);
+    if (options.directory && add_chdir(&actions, directory.c_str()) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        close_all();
+        return fail(Errc::unavailable, "cannot start a child process in a directory");
+    }
     posix_spawnattr_t attributes;
     posix_spawnattr_init(&attributes);
     sigset_t defaults;
@@ -222,9 +256,15 @@ Result<ChildProcess> ChildProcess::start(const std::string& program,
     }
     argv.push_back(nullptr);
     std::vector<char*> envp;
-    for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
-        if (!std::string_view(*e).starts_with("KANHE_")) {
-            envp.push_back(*e);
+    if (options.environment) {
+        for (const std::string& e : *options.environment) {
+            envp.push_back(const_cast<char*>(e.c_str()));
+        }
+    } else {
+        for (char** e = environ; e != nullptr && *e != nullptr; ++e) {
+            if (!std::string_view(*e).starts_with("KANHE_")) {
+                envp.push_back(*e);
+            }
         }
     }
     envp.push_back(nullptr);

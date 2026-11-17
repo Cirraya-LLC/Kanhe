@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstddef>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -26,6 +27,15 @@ struct ExitStatus {
     [[nodiscard]] bool success() const noexcept { return code == 0 && signal == 0; }
 };
 
+/// Where and with what a child starts, beyond its program and arguments.
+struct ChildOptions {
+    /// Its working directory; by default this process's.
+    std::optional<std::filesystem::path> directory;
+    /// Its whole environment, each entry NAME=VALUE; by default this
+    /// process's, minus every variable whose name starts with KANHE_.
+    std::optional<std::vector<std::string>> environment;
+};
+
 /// A child process with pipes to its stdin and stdout; its stderr is this
 /// process's. It is started without a shell (the program and its arguments
 /// are passed as given; a program without a slash is looked up in PATH), in
@@ -41,6 +51,12 @@ class ChildProcess {
 public:
     [[nodiscard]] static Result<ChildProcess> start(const std::string& program,
                                                     const std::vector<std::string>& arguments);
+    /// The same, in `options.directory` and with `options.environment` if
+    /// given. A program named by a relative path with a slash is best given
+    /// as an absolute one: where it is looked up from then leaves no doubt.
+    [[nodiscard]] static Result<ChildProcess> start(const std::string& program,
+                                                    const std::vector<std::string>& arguments,
+                                                    const ChildOptions& options);
 
     ChildProcess(ChildProcess&& other) noexcept;
     ChildProcess& operator=(ChildProcess&& other) noexcept;
