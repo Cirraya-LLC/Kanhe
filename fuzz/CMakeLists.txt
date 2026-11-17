@@ -31,6 +31,9 @@ kanhe_add_fuzzer(script_fuzz)
 # Credentials (spec/credentials.md): a JWS, its JSON, the addresses it names,
 # base URLs, roles; and a status list's GZIP, from any issuer.
 kanhe_add_fuzzer(credential_fuzz kanhe::verifier)
+# A credential checked against its record's evidence, with the issuer's DID
+# document and status list, as `kanhe credential verify` checks one.
+kanhe_add_fuzzer(credential_verify_fuzz kanhe::verifier kanhe::crypto_openssl)
 kanhe_add_fuzzer(gzip_fuzz kanhe::verifier)
 # The state in a snapshot file, its contracts' code the v0.6 vectors' contract.
 kanhe_add_fuzzer(state_snapshot_fuzz)

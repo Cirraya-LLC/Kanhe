@@ -6,10 +6,12 @@
 # a .pkg with all four programs, and a tarball. Built on a version tag (then
 # kept in a draft release with their SHA-256 sums, for a person to publish) or
 # by hand (then kept as the run's artifacts). macOS runners cost ten times as
-# many minutes as Linux, so this runs only then. A tag's packages also get
-# signed build provenance (SLSA, through Sigstore): anyone can check that a
-# file was built by this workflow from the tagged commit, with
-# `gh attestation verify FILE --repo Cirraya-LLC/Kanhe`.
+# many minutes as Linux, so this runs only then. A tag's packages and their
+# SHA256SUMS also get signed build provenance (SLSA, through Sigstore): anyone
+# can check that a file was built by this workflow from the tagged commit,
+# with `gh attestation verify FILE --repo Cirraya-LLC/Kanhe`. The actions are
+# pinned to commits (the version in a comment beside each), not to tags,
+# which can be moved.
 name: Release
 
 on:
@@ -30,7 +32,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: The tag is the project's version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -45,7 +47,7 @@ jobs:
           .github/scripts/install-linux-tools.sh
           .github/scripts/install-emscripten.sh
           (. /opt/emsdk/emsdk_env.sh && tools/wasm/build.sh build/wasm)
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: wasm
           path: build/wasm
@@ -57,8 +59,8 @@ jobs:
     container: gcc:16-trixie
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: build/wasm
@@ -67,7 +69,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends cmake ninja-build libssl-dev libp11-kit-dev rpm
           WASM_DIR="$PWD/build/wasm" tools/package/linux.sh build/packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: linux-packages
           path: build/packages
@@ -78,8 +80,8 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: wasm
           path: build/wasm
@@ -87,7 +89,7 @@ jobs:
         run: |
           brew install gcc ninja openssl@3
           WASM_DIR="$PWD/build/wasm" tools/package/macos.sh build/packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: macos-packages
           path: build/packages
@@ -103,20 +105,23 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: packages
           pattern: "*-packages"
           merge-multiple: true
-      - name: Build provenance for every package
-        uses: actions/attest@v4
+      # The sums first, so that the attestation covers SHA256SUMS too: a
+      # person who checks files against it can check it as well.
+      - name: The packages' SHA-256 sums
+        run: (cd packages && sha256sum * > SHA256SUMS)
+      - name: Build provenance for every package and the sums
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: "packages/*"
       - name: A draft release with the packages, for a person to publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          (cd packages && sha256sum * > SHA256SUMS)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --draft \
               --title "$GITHUB_REF_NAME" --generate-notes packages/*

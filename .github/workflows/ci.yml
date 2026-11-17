@@ -3,12 +3,15 @@
 
 name: CI
 
+# Text (*.md) and the license change nothing CI checks, except spec/README.md:
+# a chain test reads the specification's revision from it. (In `paths`, a
+# later pattern overrides an earlier one.)
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "LICENSE"]
+    paths: ["**", "!**.md", "!LICENSE", "spec/README.md"]
   pull_request:
-    paths-ignore: ["**.md", "LICENSE"]
+    paths: ["**", "!**.md", "!LICENSE", "spec/README.md"]
   workflow_dispatch:
 
 concurrency:
@@ -26,8 +29,9 @@ env:
 jobs:
   # Which parts the change touches (.github/scripts/changed-parts.sh): a
   # change to the chain runs everything; one to the language skips
-  # ThreadSanitizer; one to an application alone runs only the applications'
-  # tests, and not the Bo compiler's sanitizers.
+  # ThreadSanitizer, unless it touches the front end the console links; one
+  # to an application alone runs only the applications' tests, and not the
+  # Bo compiler's sanitizers.
   changes:
     name: Changed parts
     runs-on: ubuntu-latest
@@ -35,10 +39,11 @@ jobs:
       chain: ${{ steps.parts.outputs.chain }}
       bo: ${{ steps.parts.outputs.bo }}
       apps: ${{ steps.parts.outputs.apps }}
+      tsan: ${{ steps.parts.outputs.tsan }}
       tests: ${{ steps.parts.outputs.tests }}
       tsan_tests: ${{ steps.parts.outputs.tsan_tests }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: parts
@@ -57,7 +62,7 @@ jobs:
     container: gcc:16-trixie
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
         run: .github/scripts/install-linux-tools.sh
@@ -74,7 +79,7 @@ jobs:
       # witness networks run, cosigns the ledger's checkpoint notes.
       - name: Go, for litewitness
         if: needs.changes.outputs.chain == 'true'
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: "1.27.x"
           cache: false
@@ -101,7 +106,7 @@ jobs:
     container: gcc:16-trixie
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
         run: .github/scripts/install-linux-tools.sh
@@ -131,7 +136,7 @@ jobs:
     container: gcc:16-trixie
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
         run: .github/scripts/install-linux-tools.sh
@@ -145,7 +150,7 @@ jobs:
   thread-sanitizer:
     name: Linux (Clang 23 with ThreadSanitizer)
     needs: changes
-    if: needs.changes.outputs.chain == 'true' || needs.changes.outputs.apps == 'true'
+    if: needs.changes.outputs.tsan == 'true'
     runs-on: ubuntu-latest
     # ThreadSanitizer needs a memory layout that the hosts' address
     # randomization can break (Ubuntu 26.04 runners); it then runs itself
@@ -156,7 +161,7 @@ jobs:
       options: --security-opt seccomp=unconfined
     timeout-minutes: 150
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
         run: .github/scripts/install-linux-tools.sh
@@ -180,7 +185,7 @@ jobs:
         # emsdk_env.sh finds its own directory only when sourced from bash.
         shell: bash
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install tools
         run: |
@@ -206,7 +211,7 @@ jobs:
 
       - name: Keep the verifier page
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kanhe-verify
           path: build/wasm/kanhe-verify.html

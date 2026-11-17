@@ -8,9 +8,11 @@
 // the contract parsers start from testvectors/vm-v1.json, protocol-v0.6.json,
 // protocol-v0.7.json (children), and protocol-v0.8.json (requests and
 // answers), and so does the Bo runtime's CBOR reader
-// (contract inputs and outputs). A registrar's pending calls
-// (node/contracts.hpp) are built here as CBOR, without the node library. The
-// Bo pack reader starts from the official packs.
+// (contract inputs and outputs). The Merkle proof verifiers start from
+// testvectors/merkle-sha256.json. A registrar's pending calls
+// (node/contracts.hpp) and invitation codes (client/peers.hpp) are built here
+// as CBOR, without the node or the client library. The Bo pack reader starts
+// from the official packs.
 //
 //   make_seeds DIR    writes DIR/<target>/<name> for each target
 
@@ -27,7 +29,9 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -41,7 +45,9 @@
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/cose.hpp>
+#include <kanhe/core/merkle.hpp>
 #include <kanhe/core/protocol/access.hpp>
+#include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
@@ -57,6 +63,7 @@
 #include <kanhe/ledger/ledger.hpp>
 #include <kanhe/verifier/credentials.hpp>
 #include <kanhe/verifier/gzip.hpp>
+#include <kanhe/verifier/jcs.hpp>
 
 #include "support/timestamp_authority.hpp"
 
@@ -473,7 +480,7 @@ void record_file_seeds(const Seeds& seeds) {
 void form_seeds(const Seeds& seeds) {
     // The first byte picks a sheet (even) or a source (odd).
     seeds.write("bo_form_fuzz", "sheet",
-                std::string("\x00") +
+                std::string(1, '\0') +
                     R"({"sheet": 1, "kind": "rules", "contract": "Lending", "parties": ["owner"],
  "thing": {"name": "Item", "fields": [{"name": "name", "type": "text"},
                                       {"name": "holder", "type": "owner"}]},
@@ -489,6 +496,10 @@ void form_seeds(const Seeds& seeds) {
                                       "  note text\n\ncan share by we\n  active -> shared\n"
                                       "  request sync to partner with note = note within 1 day\n"
                                       "\nwhen sync done\n  -> synced\n");
+    // Lists nested where a piece of text goes, within the default input size.
+    seeds.write("bo_form_fuzz", "nested",
+                std::string(1, '\0') + R"({"sheet": 1, "kind": "rules", "contract": )" +
+                    std::string(1900, '[') + std::string(1900, ']') + "}");
 }
 
 void exchange_seeds(const Seeds& seeds) {
@@ -514,13 +525,17 @@ void exchange_seeds(const Seeds& seeds) {
 void calls_seeds(const Seeds& seeds) {
     // The first byte picks the values' JSON (even) or one value (odd).
     seeds.write("bo_calls_fuzz", "values",
-                std::string("\x00") +
+                std::string(1, '\0') +
                     R"({"cost": "HKD 1_250.50", "starts": "2027年1月6日", "weight": "3 噸",
  "urgent": true, "tags": ["fragile"], "note": "by hand", "count": "500萬",
  "we": "1111111111111111111111111111111111111111111111111111111111111111",
  "buyer": "2222222222222222222222222222222222222222222222222222222222222222"})");
     seeds.write("bo_calls_fuzz", "money", std::string("\x01") + "500萬港元");
     seeds.write("bo_calls_fuzz", "duration", std::string("\x01") + "3 個月");
+    // Lists nested deeper than a value's two levels.
+    seeds.write("bo_calls_fuzz", "nested",
+                std::string(1, '\0') + R"({"tags": )" + std::string(1900, '[') +
+                    std::string(1900, ']') + "}");
 }
 
 void cluster_seeds(const Seeds& seeds) {
@@ -1199,6 +1214,15 @@ void bo_seeds(const Seeds& seeds) {
             users.push_back(read.pack);
         }
     }
+    // A user's pack with an attaching rule of its own (預留座位: reserve +
+    // seat), which the lexer reads with the pack's words.
+    seeds.write("bo_vocab_fuzz", "attach.vocab",
+                R"({"format": 1, "id": "seats", "version": 1, "edition": 1,
+ "concepts": {"act.reserve": {"category": "action"},
+              "field.seat": {"category": "field", "type": "text"}},
+ "languages": {"en": {"name": "seats", "words": {"act.reserve": "reserve", "field.seat": "seat"}},
+               "zh-Hant-HK": {"name": "訂座", "words": {"act.reserve": "預留", "field.seat": "座位"},
+                              "attach": [{"word": "act.reserve", "before": ["field"]}]}}})");
     const bo::PackSetRead with_events = bo::make_pack_set({}, bo::Officials::current, users);
     if (!with_events.set) {
         throw std::runtime_error("the events pack with the official ones");
@@ -1452,6 +1476,221 @@ void timestamp_seeds(const Seeds& seeds) {
                 ByteView(choosing(2, as_bytes(authority.root_pem()))));
 }
 
+/// A credential issued on a ledger and what checking it takes, as
+/// credential_verify_fuzz reads them ("CREDENTIAL\nDID DOCUMENT\nSTATUS
+/// LIST\n" and the evidence): a college's credential key (a device with an
+/// ES256 key, delegated endorsements only) endorses a diploma as status
+/// entry 1/94567; the diploma's evidence as of a checkpoint, two of its
+/// three fields disclosed; the college's DID document and status list. With
+/// both, either, and neither. And the key as a JWK, the evidence as CBOR.
+void credential_evidence_seeds(const Seeds& seeds) {
+    namespace verifier = kanhe::verifier;
+    const auto hash = crypto::HashAlg::sha256;
+    Org college("Example College", 41);
+    const auto device = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::esp256), "key");
+    const protocol::Id device_id =
+        college
+            .submit(protocol::ActorRegisterBody{protocol::ActorKind::device, "Credentials",
+                                                device.public_key(), std::nullopt, std::nullopt})
+            .id;
+    protocol::Scope scope;
+    scope.statement_types = {protocol::StatementType::record_endorse};
+    const protocol::Id delegation =
+        college.submit(protocol::DelegationGrantBody{device_id, scope}).id;
+    const auto fields =
+        must(protocol::commit_fields(
+                 college.provider, hash,
+                 {{"name", college.entropy.bytes<16>(), cbor::Value::text("Chan Siu Ming")},
+                  {"programme", college.entropy.bytes<16>(), cbor::Value::text("Nursing")},
+                  {"grades", college.entropy.bytes<16>(), cbor::Value::text("A, A, B")}}),
+             "fields");
+    const protocol::Id record =
+        college
+            .submit(protocol::RecordRegisterBody{
+                "example.org.diploma/1",
+                Bytes(fields.root.bytes().begin(), fields.root.bytes().end()),
+                fields.leaves.size(),
+                {},
+                cbor::Value::map({{cbor::Value::text("note"), cbor::Value::bytes(Bytes{1})},
+                                  {cbor::Value::text("year"), cbor::Value::integer(2026)}}),
+                std::nullopt,
+                {}})
+            .id;
+
+    const verifier::StatusEntry entry{.list = 1, .index = 94'567};
+    protocol::Statement endorsement;
+    endorsement.ledger_id = college.id();
+    endorsement.actor_id = device_id;
+    endorsement.delegation_id = delegation;
+    endorsement.issued_at = college.clock.now();
+    endorsement.nonce = college.entropy.bytes<16>();
+    endorsement.body = protocol::RecordEndorseBody{record, verifier::credential_role(entry)};
+    must(college.ledger->submit(
+             must(protocol::sign_statement(device, college.provider, hash, endorsement), "sign")
+                 .encoded),
+         "submit");
+    college.clock.advance(1000);
+
+    must(college.ledger->checkpoint(college.log), "checkpoint");
+    auto bundle = must(college.ledger->export_evidence(college.log, record), "export");
+    for (const char* name : {"name", "programme"}) {
+        bundle.disclosures.push_back(
+            must(protocol::disclose_field(college.provider, hash, fields, name), "disclose"));
+    }
+    const Bytes evidence = must(protocol::encode_bundle(bundle), "encode");
+
+    const auto base = *verifier::parse_base_url("https://ledger.example.com");
+    const std::vector<std::string> metadata{"year"};
+    const auto content = verifier::credential_content(
+        must(protocol::verify_bundle(college.provider, evidence), "verify"), base,
+        "AAAAAAAAAAAAAAAAAAAAAA", entry, metadata, std::string("Diploma in Nursing"));
+    if (!content) {
+        throw std::runtime_error("credential: " + content.error());
+    }
+    const std::string credential =
+        must(verifier::sign_credential(device, college.provider, base.did,
+                                       verifier::credential_json(*content)),
+             "sign");
+    const std::string did_document =
+        must(verifier::did_document(college.provider, base,
+                                    std::vector<crypto::PublicKey>{device.public_key()},
+                                    college.id()),
+             "DID document")
+            .dump();
+    // Nothing revoked: the diploma is live.
+    const Bytes bits(verifier::status_list_bytes, 0);
+    const std::string status_list =
+        must(verifier::sign_credential(
+                 device, college.provider, base.did,
+                 verifier::status_list_json(base, "Example College", 1, bits, college.clock.now())),
+             "sign");
+
+    auto write = [&](const std::string& name, const std::string& lines) {
+        Bytes input(lines.begin(), lines.end());
+        input.insert(input.end(), evidence.begin(), evidence.end());
+        seeds.write("credential_verify_fuzz", name, ByteView(input));
+    };
+    write("verified", credential + "\n" + did_document + "\n" + status_list + "\n");
+    write("did-document", credential + "\n" + did_document + "\n\n");
+    write("status-list", credential + "\n\n" + status_list + "\n");
+    write("evidence-only", credential + "\n\n\n");
+    seeds.write("credential_fuzz", "jwk",
+                as_bytes(must(verifier::jcs(must(verifier::public_jwk(device.public_key()), "jwk")),
+                              "jcs")));
+    seeds.write("cbor_decode_fuzz", "evidence", evidence);
+}
+
+/// Invitation codes as `peer invite` writes them (khp_ and the base64url of
+/// their CBOR, client/peers.hpp): one with a URL, a token, and a witness key;
+/// one that gives a relay instead of a URL.
+void invitation_seeds(const Seeds& seeds) {
+    const auto witness = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    const cbor::Value ledger = cbor::Value::bytes(Bytes(32, 0x5a));
+    const cbor::Value organization = cbor::Value::text("Example Supplier Ltd");
+    const cbor::Value token = cbor::Value::text("kht_Q2hhbiBTaXUgTWluZyBzdXBwbGllcg");
+    auto write = [&](const std::string& name, cbor::Map map) {
+        const Bytes encoded = must(cbor::encode(cbor::Value::map(std::move(map))), "encode");
+        seeds.write("invitation_fuzz", name, as_bytes("khp_" + to_base64url(encoded)));
+        seeds.write("cbor_decode_fuzz", "invitation-" + name, encoded);
+    };
+    write("direct", {{cbor::Value::integer(1), cbor::Value::integer(1)},
+                     {cbor::Value::integer(2), ledger},
+                     {cbor::Value::integer(3), organization},
+                     {cbor::Value::integer(4), cbor::Value::text("https://ledger.example.com")},
+                     {cbor::Value::integer(5), token},
+                     {cbor::Value::integer(6), protocol::encode_public_key(witness.public_key())}});
+    write("relayed",
+          {{cbor::Value::integer(1), cbor::Value::integer(1)},
+           {cbor::Value::integer(2), ledger},
+           {cbor::Value::integer(3), organization},
+           {cbor::Value::integer(5), token},
+           {cbor::Value::integer(7),
+            cbor::Value::map(
+                {{cbor::Value::integer(1), cbor::Value::text("https://relay.example.com")},
+                 {cbor::Value::integer(2), cbor::Value::bytes(Bytes(32, 7))},
+                 {cbor::Value::integer(3), protocol::encode_public_key(witness.public_key())}})}});
+}
+
+/// Searches and reports as the HTTP API's query parameters give them, a
+/// NAME=VALUE a line, over the records of search_query_fuzz's index (a
+/// student and a year in each one's metadata) and over instances: each
+/// parses as one of the four kinds.
+void search_query_seeds(const Seeds& seeds) {
+    const std::array<std::pair<std::string_view, std::string_view>, 6> queries{{
+        {"records", "type=example.form/1\nmeta.year.min=2025\nmeta.student=李明 1\nlimit=2\n"
+                    "order=old"},
+        {"records-text", "q=李明\nrevoked=any\ncurrent=1\nsince=2026-01-01\n"
+                         "until=2026-12-31T23:59:59Z"},
+        {"records-registrant",
+         "registrant=0000000000000000000000000000000000000000000000000000000000000000\n"
+         "revoked=no\nlimit=1000\norder=new"},
+        {"record-report", "by=type,state,month\nutc_offset=+08:00\ntype=example.form/1"},
+        {"instances", "status=active\nfinal=0\nfield.amount.min=100\n"
+                      "changed_since=2026-11-01T00:00:00Z\nlimit=10"},
+        {"instance-report", "by=contract,state,week\nsum=amount\nutc_offset=-05:00"},
+    }};
+    for (const auto& [name, query] : queries) {
+        seeds.write("search_query_fuzz", std::string(name), as_bytes(query));
+    }
+}
+
+/// Every proof of testvectors/merkle-sha256.json, as merkle_verify_fuzz
+/// reads one: the index, the old size, and the new size (8 bytes each,
+/// big-endian), the leaf's hash, the old and the new root, and the proof.
+/// An inclusion proof takes the empty tree as the old one; a consistency
+/// proof, the first leaf.
+void merkle_seeds(const Seeds& seeds) {
+    std::ifstream in(KANHE_TESTVECTORS_DIR "/merkle-sha256.json");
+    if (!in) {
+        throw std::runtime_error("cannot read merkle-sha256.json");
+    }
+    const auto doc = nlohmann::json::parse(in);
+    const crypto::openssl::Provider provider;
+    const auto& entries = doc.at("entries");
+    const auto& roots = doc.at("roots");
+    auto hex = [](const nlohmann::json& value) {
+        return must(from_hex(value.get<std::string>()), "hex");
+    };
+    auto leaf = [&](std::uint64_t index) {
+        const Bytes entry = hex(entries.at(static_cast<std::size_t>(index)));
+        const auto digest =
+            must(merkle::leaf_hash(provider, crypto::HashAlg::sha256, entry), "leaf");
+        const ByteView bytes = digest.bytes();
+        return Bytes(bytes.begin(), bytes.end());
+    };
+    auto input = [&](std::uint64_t index, std::uint64_t old_size, std::uint64_t new_size,
+                     const Bytes& leaf_hash, const nlohmann::json& proof) {
+        Bytes out;
+        for (const std::uint64_t n : {index, old_size, new_size}) {
+            for (unsigned i = 0; i < 8; ++i) {
+                out.push_back(static_cast<std::uint8_t>(n >> (56U - 8U * i)));
+            }
+        }
+        for (const Bytes& part : {leaf_hash, hex(roots.at(static_cast<std::size_t>(old_size))),
+                                  hex(roots.at(static_cast<std::size_t>(new_size)))}) {
+            out.insert(out.end(), part.begin(), part.end());
+        }
+        for (const auto& step : proof) {
+            const Bytes digest = hex(step);
+            out.insert(out.end(), digest.begin(), digest.end());
+        }
+        return out;
+    };
+    std::size_t n = 0;
+    for (const auto& v : doc.at("inclusion")) {
+        const auto index = v.at("index").get<std::uint64_t>();
+        seeds.write(
+            "merkle_verify_fuzz", std::format("inclusion-{:03}", n++),
+            input(index, 0, v.at("tree_size").get<std::uint64_t>(), leaf(index), v.at("proof")));
+    }
+    n = 0;
+    for (const auto& v : doc.at("consistency")) {
+        seeds.write("merkle_verify_fuzz", std::format("consistency-{:03}", n++),
+                    input(0, v.at("old_size").get<std::uint64_t>(),
+                          v.at("new_size").get<std::uint64_t>(), leaf(0), v.at("proof")));
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         std::println(stderr, "usage: make_seeds DIR");
@@ -1468,6 +1707,10 @@ int main(int argc, char** argv) {
         record_file_seeds(seeds);
         published_seeds(seeds);
         credential_seeds(seeds);
+        credential_evidence_seeds(seeds);
+        invitation_seeds(seeds);
+        search_query_seeds(seeds);
+        merkle_seeds(seeds);
         claim_seeds(seeds);
         membership_seeds(seeds);
         script_seeds(seeds);

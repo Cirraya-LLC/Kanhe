@@ -48,7 +48,8 @@ Where each component ends up:
 | OpenSSL command-line tool | 3.5 or later | Apache-2.0 | <https://github.com/openssl/openssl> | Generating SM2 test vectors |
 | Emscripten SDK (emsdk) | 6.0.10 | MIT | <https://github.com/emscripten-core/emsdk> | Building the browser verifier |
 | Node.js | | MIT | <https://nodejs.org/> | Running the browser tests |
-| GitHub Actions: `actions/checkout`, `actions/upload-artifact` | v7, v4 | MIT | <https://github.com/actions> | CI |
+| GitHub Actions: `actions/checkout`, `actions/upload-artifact`, `actions/download-artifact`, `actions/setup-go`, `actions/attest` | v7.0.1, v4.6.2, v4.3.0, v5.6.0, v4.2.2, each pinned to its commit in `.github/workflows/` | MIT | <https://github.com/actions> | CI, the release packages, and their build provenance |
+| GitHub Action `msys2/setup-msys2` | v2.33.0, pinned to its commit | MIT | <https://github.com/msys2/setup-msys2> | The Windows build |
 | `gcc:16-trixie` container image | | Various | <https://hub.docker.com/_/gcc> | CI, and the Docker image's build stage (not its final image) |
 
 ## Notices
