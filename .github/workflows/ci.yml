@@ -125,6 +125,7 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git ls-files '*.cpp' '*.hpp' | xargs clang-format-23 --dry-run --Werror
+          git ls-files '*.sh' | xargs python3 tools/check-scripts.py
 
   bo-sanitizers:
     # The Bo compiler is C++26 with reflection and contracts, which only GCC

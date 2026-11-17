@@ -14,7 +14,8 @@
 #   gcc         GCC 16 debug: build, ctest
 #   release     GCC 16 release, as the Docker image builds it: the CLI
 #   clang-asan  Clang 23 with AddressSanitizer and UBSan: build, ctest
-#   format      clang-format-23 on every tracked C++ file
+#   format      clang-format-23 on every tracked C++ file; no script starts
+#               one of its functions with &
 #   bo-asan     GCC 16 with AddressSanitizer and UBSan: the Bo compiler's tests
 #   tsan        Clang 23 with ThreadSanitizer: build, ctest
 # The source is the committed tree (HEAD), or with --worktree the working
@@ -100,7 +101,8 @@ job() {
             cmake --preset clang-asan -DCMAKE_CXX_COMPILER=clang++-23 &&
                 cmake --build --preset clang-asan && ctest --preset clang-asan ;;
         format)
-            xargs clang-format-23 --dry-run --Werror < /mnt/cpp-files.txt ;;
+            xargs clang-format-23 --dry-run --Werror < /mnt/cpp-files.txt &&
+                grep -E '\.sh$' /mnt/files.txt | xargs python3 tools/check-scripts.py ;;
         bo-asan)
             cmake --preset gcc-asan -DCMAKE_CXX_COMPILER=g++ &&
                 cmake --build --preset gcc-asan && ctest --preset gcc-asan ;;

@@ -81,8 +81,9 @@ run ledger snapshot remove | contains 'opens replay the whole log'
 [ "$(run ledger snapshot show --json | json 'd["opened_from"]')" = None ] || fail "removed"
 
 # A server writes them by itself, and checks the one it opened from.
+# Started directly (not through a shell function), so $! is the server itself.
 serve() {
-    run serve --listen 127.0.0.1:0 --json --log-key log.key --checkpoint-interval 1 \
+    "$KANHE" serve --listen 127.0.0.1:0 --json --log-key log.key --checkpoint-interval 1 \
         --snapshot-interval 1 > "$1" 2> "$1.log" &
     SERVERS+=("$!")
     for _ in $(seq 1 300); do

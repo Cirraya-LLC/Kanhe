@@ -408,7 +408,8 @@ run executor connector add inbox --config notices.json --type command --kinds no
 run token create notices --scope executor --out notices.token --ledger "$(dir shipper)" > /dev/null
 PORT="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
 URL="http://127.0.0.1:$PORT"
-run serve --listen "127.0.0.1:$PORT" --ledger "$(dir shipper)" --log-key shipper-log.key --quiet \
+# Started directly (not through a shell function), so $! is the server itself.
+"$KANHE" serve --listen "127.0.0.1:$PORT" --ledger "$(dir shipper)" --log-key shipper-log.key --quiet \
     > server.out 2> server.log &
 SERVER_PID="$!"
 for _ in $(seq 1 100); do
