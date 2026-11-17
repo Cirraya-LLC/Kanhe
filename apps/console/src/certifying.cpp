@@ -379,7 +379,12 @@ http::Response Console::certificates_route(const http::Request& request) const {
             r.body.assign(page.begin(), page.end());
         }
         secure(r);
-        r.headers.emplace_back("Content-Security-Policy", "sandbox; default-src 'none'");
+        if (what == "/qr") {
+            r.headers.emplace_back("Content-Security-Policy", "sandbox; default-src 'none'");
+        } else {
+            // One policy, the page's: its own style applies, nothing else.
+            replace_policy(r, certificate_page_policy);
+        }
         return r;
     }
     if (what == "/credential" && request.method == "POST") {

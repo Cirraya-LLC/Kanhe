@@ -1463,13 +1463,17 @@ std::vector<CommandSpec> chain_commands() {
                {"witness-key", "KEY", "The witness key (file or pkcs11: URI), with --witness-dir"},
                {"witness-public", "",
                 "A public witness: any ledger registers and asks for cosignatures with no token, "
-                "within quotas (serve TLS yourself, so quotas see callers' addresses)"},
+                "within quotas (serve TLS yourself, so quotas see callers' addresses, or see "
+                "--witness-trust-proxy)"},
                {"witness-name", "NAME", "Who runs this public witness, as GET /v1/witness says"},
                {"witness-max-ledgers", "N", "Ledgers a public witness follows (default: 100000)"},
                {"witness-registrations-per-day", "N",
-                "New ledgers from one address in a day (default: 10)"},
+                "New ledgers from one address (an IPv6 address's /64) in a day (default: 10)"},
                {"witness-cosign-interval", "SECONDS",
                 "Between two cosignatures of one ledger (default: 60)"},
+               {"witness-trust-proxy", "",
+                "Behind a reverse proxy on this host: count a public witness's callers by the last "
+                "X-Forwarded-For address, on connections from a loopback address only"},
                {"relay-key", "FILE",
                 "Answer the requests parties send this ledger through its relay (relay use), "
                 "with this relay key (needs --log-key)"},

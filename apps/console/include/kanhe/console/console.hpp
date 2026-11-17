@@ -63,6 +63,14 @@ inline constexpr std::string_view content_security_policy =
     "img-src 'self' blob: data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
     "form-action 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
 
+/// The Content-Security-Policy of a certificate's page to print, in place of
+/// the console's (a browser applies every policy an answer carries, and the
+/// console's would block the page's own style): sandboxed, its inline style,
+/// and nothing loaded from anywhere.
+inline constexpr std::string_view certificate_page_policy =
+    "sandbox; default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; "
+    "base-uri 'none'; form-action 'none'";
+
 /// An origin the console answers for: "http://localhost:7470",
 /// "https://ledger.example.com". Lower case, no path, no default port.
 /// Threads started for one piece of work each (a delivery sealed, a

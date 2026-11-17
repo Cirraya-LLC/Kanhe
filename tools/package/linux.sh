@@ -80,7 +80,9 @@ install -Dm644 "$LINUX/console.env" "$STAGE/etc/kanhe/console.env"
 
 # What each package's scripts do: the server units' user (sysusers.d, or by
 # hand where systemd is not), the menu, and systemd's view of the units.
-# Removing a package keeps every ledger, console, and backup.
+# Removing a package stops and disables its unit (upgrading does not), and
+# keeps every ledger, console, and backup, and the kanhe user that may own
+# them.
 ADD_USER='if command -v systemd-sysusers > /dev/null; then
     systemd-sysusers kanhe.conf || true
 elif ! id kanhe > /dev/null 2>&1 && command -v useradd > /dev/null; then
@@ -89,14 +91,22 @@ elif ! id kanhe > /dev/null 2>&1 && command -v useradd > /dev/null; then
 fi'
 MENU='command -v update-desktop-database > /dev/null && update-desktop-database -q || true'
 UNITS='command -v systemctl > /dev/null && [ -d /run/systemd/system ] && systemctl daemon-reload || true'
+# stop_unit WHEN UNIT: a script's lines that stop and disable UNIT when WHEN,
+# its test for the package being removed rather than upgraded, holds.
+stop_unit() {
+    printf 'if %s && command -v systemctl > /dev/null && [ -d /run/systemd/system ]; then\n' "$1"
+    printf '    systemctl --no-reload disable --now %s || true\nfi' "$2"
+}
 
 # package NAME SUMMARY WHAT DEPENDS RPM_REQUIRES CONFIG AFTER_REMOVAL: the
-# tarball, the .deb, and the .rpm of a staged tree. AFTER_REMOVAL also runs
-# after installing, after the server units' user.
+# tarball, the .deb, and the .rpm of a staged tree, whose unit is
+# NAME.service. AFTER_REMOVAL also runs after installing, after the server
+# units' user.
 package() {
     local name="$1" summary="$2" what="$3" depends="$4" requires="$5" config="$6" removed="$7"
     local post="$ADD_USER
 $removed"
+    local unit="$name.service"
     local stage="$BUILD/stage/$name" text
     text="$DESCRIPTION $what"
 
@@ -124,8 +134,11 @@ $(fmt -w 74 <<< "$text" | sed 's/^/ /')
 CONTROL
     echo "$config" > "$deb/DEBIAN/conffiles"
     printf '#!/bin/sh\nset -e\n%s\nexit 0\n' "$post" > "$deb/DEBIAN/postinst"
+    # Before removing: "$1" is the maintainer script's own (remove, upgrade).
+    printf '#!/bin/sh\nset -e\n%s\nexit 0\n' "$(stop_unit '[ "$1" = remove ]' "$unit")" \
+        > "$deb/DEBIAN/prerm"
     printf '#!/bin/sh\nset -e\n%s\nexit 0\n' "$removed" > "$deb/DEBIAN/postrm"
-    chmod 755 "$deb/DEBIAN/postinst" "$deb/DEBIAN/postrm"
+    chmod 755 "$deb/DEBIAN/postinst" "$deb/DEBIAN/prerm" "$deb/DEBIAN/postrm"
     dpkg-deb --root-owner-group --build "$deb" "$OUT/${name}_${VERSION}_${DEB_ARCH}.deb" > /dev/null
     echo "wrote $OUT/${name}_${VERSION}_${DEB_ARCH}.deb"
 
@@ -151,6 +164,14 @@ cp -a $stage/. %{buildroot}/
 
 %post
 $post
+exit 0
+
+%preun
+$(stop_unit '[ "$1" -eq 0 ]' "$unit")
+exit 0
+
+%postun
+$removed
 exit 0
 
 %files

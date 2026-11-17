@@ -85,6 +85,7 @@
   "approve.checked_here": "已在這個瀏覽器內核實：你的通行密鑰簽署的正是這些內容。",
   "approve.checked_by_console": "此控制台未能在瀏覽器內核實：你看到的是控制台的描述。",
   "approve.mismatch": "控制台的回覆與它要求你簽署的內容不符。沒有簽署任何東西。",
+  "approve.prepare_again": "這次批准不能再用：請返回，重新準備。",
   "nav.settings": "設定",
   "setup.title": "設定你的控制台",
   "setup.intro": "你的名稱（用暱稱亦可）同時是你賬本的名稱。你以通行密鑰（Touch ID、Windows Hello、手機或安全密鑰）登入及批准。",

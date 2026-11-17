@@ -186,6 +186,27 @@ async function waitRunning() {
     shown = JSON.parse(run("record", "show", record, "--json"));
     assert.deepEqual(shown.endorsements.map((e) => e.role), ["reviewed"]);
 
+    // A tap the console refuses (its signature damaged on the way) ends that
+    // approval: the console took what it prepared, so the page offers no
+    // second try of the same, only going back to prepare it again.
+    await page.route("**/console/api/approve", async (route) => {
+      const sent = JSON.parse(route.request().postData());
+      await route.continue({ postData: JSON.stringify({ ...sent, signature: "AAAA" }) });
+    });
+    await page.getByRole("button", { name: "Things" }).click();
+    await page.getByRole("button", { name: "Act on this example.document/1 record" }).click();
+    await page.getByLabel("Role of the endorsement").fill("refused");
+    await page.getByRole("button", { name: "Prepare" }).click();
+    await page.getByText("Checked in this browser").waitFor();
+    await page.getByRole("button", { name: "Approve with your passkey" }).click();
+    await page.getByText("go back and prepare it again").waitFor();
+    assert.equal(await page.getByRole("button", { name: "Approve with your passkey" }).isDisabled(), true);
+    await page.unroute("**/console/api/approve");
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("heading", { name: "Things" }).waitFor();
+    shown = JSON.parse(run("record", "show", record, "--json"));
+    assert.deepEqual(shown.endorsements.map((e) => e.role), ["reviewed"]);
+
     // Anyone verifying the evidence sees Alice was present, verified, on this console.
     run("checkpoint", "create", "--log-key", "log.key");
     run("export", record, "--log-key", "log.key", "--out", "bundle.cbor");

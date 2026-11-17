@@ -5,13 +5,17 @@
 // the network: whatever comes, it must answer without crashing, and a
 // refused registration must leave nothing behind (the witness follows a
 // ledger only once it has cosigned for it). A registration that decodes
-// encodes back to the same parts.
+// encodes back to the same parts. The caller's address, as a connection or
+// a proxy's X-Forwarded-For gives it, reads into a quota key that reads the
+// same again, and a header counts only from a loopback connection.
 
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <unistd.h>
 
 #include <kanhe/client/public_witness.hpp>
@@ -62,6 +66,20 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
             decoded_again->cosign_request != decoded->cosign_request) {
             __builtin_trap();
         }
+    }
+    const std::string_view text(reinterpret_cast<const char*>(data), size);
+    const std::string key = kanhe::client::quota_address(text);
+    if (kanhe::client::quota_address(key) != key) {
+        __builtin_trap();
+    }
+    kanhe::node::http::Request forwarded;
+    forwarded.headers.emplace_back("x-forwarded-for", std::string(text));
+    if (kanhe::client::forwarded_address(forwarded, "192.0.2.1") != "192.0.2.1") {
+        __builtin_trap();
+    }
+    if (const std::string caller = kanhe::client::forwarded_address(forwarded, "127.0.0.1");
+        caller != "127.0.0.1" && text.find(caller) == std::string_view::npos) {
+        __builtin_trap();
     }
     for (const char* path : {"/v1/witness/register", "/v1/witness/cosign"}) {
         kanhe::node::http::Request request;

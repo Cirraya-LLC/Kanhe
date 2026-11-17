@@ -85,6 +85,7 @@
   "approve.checked_here": "已在这个浏览器内核验：你的通行密钥签署的正是这些内容。",
   "approve.checked_by_console": "此控制台无法在浏览器内核验：你看到的是控制台的描述。",
   "approve.mismatch": "控制台的回复与它要求你签署的内容不符。没有签署任何东西。",
+  "approve.prepare_again": "这次批准不能再用：请返回，重新准备。",
   "nav.settings": "设置",
   "setup.title": "设置你的控制台",
   "setup.intro": "你的名称（用昵称也可以）同时是你账本的名称。你用通行密钥（Touch ID、Windows Hello、手机或安全密钥）登录和批准。",

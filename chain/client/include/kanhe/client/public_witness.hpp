@@ -42,10 +42,25 @@ struct WitnessRegistration {
 
 inline constexpr std::size_t max_witness_registration = std::size_t{4} << 20;
 
+/// Whom the registration quota counts a caller as: an IPv4 address as
+/// itself; an IPv6 address by its /64, the block one subscriber or site is
+/// usually given, so that a caller cannot spread over its own addresses
+/// ("2001:db8:1:2::/64"); an IPv4 address on an IPv6 socket
+/// (::ffff:192.0.2.1) as the IPv4 address. Anything else, not an address,
+/// as it is.
+[[nodiscard]] std::string quota_address(std::string_view address);
+
+/// The caller's address as a reverse proxy on this host saw it: when `peer`
+/// (the connection's address) is a loopback address, the last address of
+/// the request's last X-Forwarded-For field, the one that proxy appended;
+/// otherwise, or when that is not an address, `peer`.
+[[nodiscard]] std::string forwarded_address(const node::http::Request& request,
+                                            std::string_view peer);
+
 struct PublicWitnessLimits {
     /// Ledgers followed in all.
     std::size_t max_ledgers = 100'000;
-    /// New ledgers from one caller address in one (UTC) day.
+    /// New ledgers from one caller (quota_address) in one (UTC) day.
     std::size_t registrations_per_day = 10;
     /// Between two cosignatures of one ledger.
     protocol::Timestamp cosign_interval = 60'000;
@@ -80,7 +95,8 @@ private:
     PublicWitnessLimits limits_;
     mutable std::mutex mutex_;
     std::size_t ledgers_ = 0;
-    /// Per caller address: the day (since the epoch) and its registrations.
+    /// Per caller (quota_address): the day (since the epoch) and its
+    /// registrations.
     std::map<std::string, std::pair<std::uint64_t, std::size_t>, std::less<>> registrations_;
     std::map<protocol::IdKey, protocol::Timestamp> cosigned_;
 };

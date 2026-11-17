@@ -5,7 +5,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; connect-src https: http://localhost:* http://127.0.0.1:* data:; img-src data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; connect-src https: http://localhost:* http://127.0.0.1:* data:; img-src data:; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
 <title>Kanhe Verifier</title>
 <style>
@@ -1105,6 +1105,7 @@ SOFTWARE.</pre>
     verify();
   });
   $("ledger").addEventListener("change", verify);
+  $("network-witnesses").addEventListener("change", verify);
   $("trust-nodes").addEventListener("change", verify);
   $("language").addEventListener("change", () => {
     setLanguage($("language").value);

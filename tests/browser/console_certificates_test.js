@@ -124,6 +124,34 @@ async function tap(page, what) {
     assert.match(printed, /Chan, Tai Man/);
     assert.match(printed, /<svg/);
     assert.doesNotMatch(printed, /A, A, B/);
+    // Saved, the page keeps a policy of its own: its style, nothing loaded.
+    assert.match(printed, /<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">/);
+    // As the console serves it, it carries one policy, which lets its own
+    // style apply. (Shown here without the policy's sandbox, which turns
+    // scripts off and has no say over style, so that the check can read the
+    // page.)
+    const served = await a.evaluate(async (token) => {
+      const response = await fetch(`api/certificates/${token}/page?language=en`, {
+        headers: { Authorization: `Bearer ${sessionStorage.getItem("kanhe.session")}` }, cache: "no-store" });
+      return { status: response.status, policy: response.headers.get("content-security-policy"),
+               body: await response.text() };
+    }, address.split("/c/")[1]);
+    assert.equal(served.status, 200);
+    assert.ok(!served.policy.includes(","), `one policy: ${served.policy}`);
+    assert.match(served.policy, /^sandbox; default-src 'none'; style-src 'unsafe-inline';/);
+    const shown = await context.newPage();
+    const refused = [];
+    shown.on("console", (m) => {
+      if (/Content Security Policy|Refused to/.test(m.text())) refused.push(m.text());
+    });
+    await shown.route("http://certificate.test/", (route) => route.fulfill({
+      status: 200, contentType: "text/html; charset=utf-8", body: served.body,
+      headers: { "Content-Security-Policy": served.policy.replace(/^sandbox; /, "") } }));
+    await shown.goto("http://certificate.test/");
+    assert.equal(await shown.locator("main.sheet").evaluate((e) => getComputedStyle(e).backgroundColor),
+                 "rgb(255, 255, 255)", "the page's own style applies");
+    assert.deepEqual(refused, [], "nothing refused on the page");
+    await shown.close();
 
     // Scanning: the record, its printed fields disclosed, issued by a device.
     const response = await fetch(address.replace("localhost", "127.0.0.1"));

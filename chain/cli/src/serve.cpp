@@ -220,8 +220,9 @@ int serve(const Args& args, const ServeDefaults& defaults) {
     if (witness_public && !args.has("witness-dir")) {
         throw UsageError{"--witness-public needs --witness-dir and --witness-key"};
     }
-    for (const char* option : {"witness-name", "witness-max-ledgers",
-                               "witness-registrations-per-day", "witness-cosign-interval"}) {
+    for (const char* option :
+         {"witness-name", "witness-max-ledgers", "witness-registrations-per-day",
+          "witness-cosign-interval", "witness-trust-proxy"}) {
         if (args.has(option) && !witness_public) {
             throw UsageError{std::format("--{} goes with --witness-public", option)};
         }
@@ -251,9 +252,14 @@ int serve(const Args& args, const ServeDefaults& defaults) {
             }
             auto witness = std::make_shared<client::PublicWitness>(
                 *witness_dir, witness_key, args.get("witness-name").value_or(""), limits);
-            options.public_witness = [witness](const node::http::Request& r,
-                                               std::string_view address) {
-                return witness->handle(r, address, ledger::SystemClock{}.now());
+            // Behind a reverse proxy on this host, the quota counts the
+            // address the proxy forwards; never one a remote caller wrote.
+            const bool trust_proxy = args.has("witness-trust-proxy");
+            options.public_witness = [witness, trust_proxy](const node::http::Request& r,
+                                                            std::string_view address) {
+                const std::string caller =
+                    trust_proxy ? client::forwarded_address(r, address) : std::string(address);
+                return witness->handle(r, caller, ledger::SystemClock{}.now());
             };
         }
     }

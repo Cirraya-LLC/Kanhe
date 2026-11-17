@@ -160,7 +160,8 @@ struct CertificatePage {
                                       std::string verify_url);
 
 /// The template a certificate prints with unless another is given: one A4
-/// page, its words in `language`.
+/// page, its words in `language`, with a Content-Security-Policy of its own
+/// (its inline style, and nothing loaded) wherever the file is opened.
 [[nodiscard]] std::string default_certificate_template(std::string_view language);
 
 /// Fills a template: {{kind}}, {{issuer}}, {{issued}}, {{record}},

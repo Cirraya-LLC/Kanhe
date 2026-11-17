@@ -47,6 +47,9 @@ async function verdict(page) {
   // Pure ASCII, so the page survives email, re-encoding, and servers that
   // send no charset.
   assert.ok(/^[\x00-\x7f]*$/.test(fs.readFileSync(pagePath, "latin1")), "the page must be pure ASCII");
+  // Its policy: no <base> to send links elsewhere, no form to post anywhere.
+  assert.match(fs.readFileSync(pagePath, "utf8"),
+               /<meta http-equiv="Content-Security-Policy" content="[^"]*; base-uri 'none'; form-action 'none'">/);
   const server = await serve();
   const base = "http://127.0.0.1:" + server.address().port;
   const browser = await chromium.launch();
@@ -103,6 +106,15 @@ async function verdict(page) {
     assert.equal(v.kind, "warn", "without a ledger id the issuer is unconfirmed");
     await page.fill("#ledger", ledgerId);
     await page.dispatchEvent("#ledger", "change");
+    await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "Verified");
+    // The trusted network witnesses count as soon as they change: a key that
+    // is not one is refused, and taking it out checks the evidence again.
+    await page.fill("#network-witnesses", "not a verifier key");
+    await page.dispatchEvent("#network-witnesses", "change");
+    await page.waitForFunction(() => /network witness/.test(document.getElementById("verdict-detail").textContent));
+    assert.equal((await verdict(page)).kind, "bad");
+    await page.fill("#network-witnesses", "");
+    await page.dispatchEvent("#network-witnesses", "change");
     await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "Verified");
     await page.setInputFiles("#attachment-files", path.join(dir, "report.pdf"));
     await page.waitForFunction(() => /matches/.test(document.getElementById("attachments").textContent));

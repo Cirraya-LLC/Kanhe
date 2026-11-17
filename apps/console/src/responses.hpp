@@ -27,6 +27,16 @@ inline void secure(http::Response& response) {
     response.headers.emplace_back("Cache-Control", "no-store");
 }
 
+/// Gives a secured answer `policy` as its one Content-Security-Policy, in
+/// place of the console's: of two, each would have to allow what it needs.
+inline void replace_policy(http::Response& response, std::string_view policy) {
+    for (auto& [name, value] : response.headers) {
+        if (name == "Content-Security-Policy") {
+            value = std::string(policy);
+        }
+    }
+}
+
 inline http::Response json(int status, const nlohmann::json& value) {
     http::Response response;
     response.status = status;

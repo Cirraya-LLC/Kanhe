@@ -2764,6 +2764,86 @@ TEST_CASE("a public witness follows a ledger only once it cosigns, within quotas
     CHECK(witness.handle(info, "192.0.2.1", t)->status == 405);
 }
 
+TEST_CASE("a public witness counts callers by address: IPv6 by its /64, a proxy's only if local",
+          "[witness][public]") {
+    using kanhe::client::forwarded_address;
+    using kanhe::client::quota_address;
+    CHECK(quota_address("192.0.2.1") == "192.0.2.1");
+    CHECK(quota_address("::ffff:192.0.2.1") == "192.0.2.1");
+    CHECK(quota_address("2001:db8:1:2:3:4:5:6") == "2001:db8:1:2::/64");
+    CHECK(quota_address("2001:DB8:1:2::9") == "2001:db8:1:2::/64");
+    CHECK(quota_address("2001:db8::1") == "2001:db8:0:0::/64");
+    CHECK(quota_address("::1") == "0:0:0:0::/64");
+    CHECK(quota_address("fe80::1%eth0") == "fe80:0:0:0::/64");
+    CHECK(quota_address("1:2:3:4:5:6:192.0.2.1") == "1:2:3:4::/64");
+    // Not an address: as it is.
+    for (const std::string other : {"-", "relay", "", "1.2.3", "1.2.3.256", "01.2.3.4", "1.2.3.4.",
+                                    "1::2::3", ":::", "1:2:3:4:5:6:7:8:9", "1:2:3:4:5:6:7::8",
+                                    "12345::", "g::", ":1::", "::1:", "1.2.3.4::"}) {
+        INFO(other);
+        CHECK(quota_address(other) == other);
+    }
+
+    // Behind a proxy on this host: the address it appended, taken from a
+    // loopback connection only; anything else leaves the connection's.
+    auto carrying = [](std::vector<std::pair<std::string, std::string>> headers) {
+        http::Request r;
+        r.headers = std::move(headers);
+        return r;
+    };
+    const auto proxied = carrying({{"x-forwarded-for", "198.51.100.9, 203.0.113.5"}});
+    CHECK(forwarded_address(proxied, "127.0.0.1") == "203.0.113.5");
+    CHECK(forwarded_address(proxied, "::1") == "203.0.113.5");
+    CHECK(forwarded_address(proxied, "::ffff:127.0.0.1") == "203.0.113.5");
+    CHECK(forwarded_address(proxied, "192.0.2.1") == "192.0.2.1");
+    CHECK(forwarded_address(proxied, "2001:db8::1") == "2001:db8::1");
+    CHECK(forwarded_address(
+              carrying({{"x-forwarded-for", "203.0.113.5"}, {"x-forwarded-for", " 2001:db8::7 "}}),
+              "127.0.0.1") == "2001:db8::7");
+    CHECK(forwarded_address(carrying({{"x-forwarded-for", "unknown"}}), "127.0.0.1") ==
+          "127.0.0.1");
+    CHECK(forwarded_address(carrying({{"x-forwarded-for", "203.0.113.5:4711"}}), "127.0.0.1") ==
+          "127.0.0.1");
+    CHECK(forwarded_address(carrying({}), "127.0.0.1") == "127.0.0.1");
+
+    // The quota by caller: every attempt it counts (here a genesis entry
+    // that is not one) spends that caller's share, and no one else's.
+    FirstRunWorld f;
+    Served served(f);
+    REQUIRE(served.session.ledger().checkpoint(f.w.keys.open("log")));
+    TempDirectory dir;
+    auto key = kanhe::crypto::openssl::KeyPair::generate(kanhe::crypto::SigAlg::ed25519);
+    REQUIRE(key);
+    kanhe::client::PublicWitnessLimits limits;
+    limits.registrations_per_day = 1;
+    kanhe::client::PublicWitness witness(
+        dir.path / "state", std::make_shared<kanhe::crypto::openssl::KeyPair>(std::move(*key)),
+        "unit", limits);
+    const auto attempt = *kanhe::client::encode_witness_registration(
+        {kanhe::Bytes{1, 2, 3},
+         *kanhe::protocol::encode_cosign_request(*served.session.ledger().cosign_request(0))});
+    kanhe::protocol::Timestamp now = 1'800'000'000'000;
+    auto status_from = [&](std::string_view address) {
+        http::Request r;
+        r.method = "POST";
+        r.target = r.path = "/v1/witness/register";
+        r.body = attempt;
+        const auto answer = witness.handle(r, address, now);
+        REQUIRE(answer);
+        return answer->status;
+    };
+    CHECK(status_from("2001:db8:1:2::1") == 400);
+    CHECK(status_from("2001:db8:1:2:ffff::9") == 429); // the same /64
+    CHECK(status_from("2001:db8:1:3::1") == 400);      // another one
+    CHECK(status_from("::ffff:192.0.2.7") == 400);
+    CHECK(status_from("192.0.2.7") == 429); // the same IPv4 address
+    CHECK(status_from("192.0.2.8") == 400);
+    // The next day, each has its share again.
+    now += 24 * 60 * minute;
+    CHECK(status_from("2001:db8:1:2:ffff::9") == 400);
+    CHECK(witness.ledgers() == 0);
+}
+
 TEST_CASE("a relay carries sealed requests and answers between witnessed ledgers", "[relay]") {
     using kanhe::client::RelayId;
     FirstRunWorld fa;

@@ -155,6 +155,8 @@ PAGE="pages/$TOKEN.html"
 contains "Chan, Tai Man" "$PAGE" && contains "Example Academy" "$PAGE" && contains "<svg" "$PAGE" ||
     fail "the page"
 contains "#l=$LEDGER_ID&amp;r=" "$PAGE" || fail "the link, escaped"
+contains -F "content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\"" \
+    "$PAGE" || fail "the page's own policy"
 contains "BA &amp; MA" "pages/$LEE.html" || fail "values are escaped"
 ! contains "A, A, B" "$PAGE" || fail "the grades are not printed"
 contains 'lang="en"' "$PAGE" && contains "Scan the code" "$PAGE"

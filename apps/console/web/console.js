@@ -4727,8 +4727,14 @@ async function approveScreen(prepared, files = new Map(), after = null) {
                                       `#/instance/${summary.instance ?? done.statement_id}`)
                  : backButton(t("nav.things")));
         } catch (error) {
-            notice.replaceChildren(problem(passkeyProblem(error)));
-            button.disabled = false;
+            // An answer from the console ends this approval: the console
+            // takes what it prepared once, refused or not, so the same tap
+            // cannot work again. A passkey not used, or no answer at all,
+            // may be tried again.
+            const answered = error instanceof ApiError;
+            notice.replaceChildren(problem(passkeyProblem(error)),
+                                   ...(answered ? [el("p", { class: "hint", text: t("approve.prepare_again") })] : []));
+            button.disabled = answered;
         } finally {
             status("");
         }

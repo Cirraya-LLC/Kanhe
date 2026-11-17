@@ -85,6 +85,7 @@
   "approve.checked_here": "Checked in this browser: these are the bytes your passkey signs.",
   "approve.checked_by_console": "This console has no check in the browser: what you see is the console's description.",
   "approve.mismatch": "The console's answer does not match what it asked you to sign. Nothing was signed.",
+  "approve.prepare_again": "This approval cannot be used again: go back and prepare it again.",
   "nav.settings": "Settings",
   "setup.title": "Set up your console",
   "setup.intro": "Your name (a nickname works) also names your ledger. Your passkey (Touch ID, Windows Hello, a phone, or a security key) is how you sign in and approve.",

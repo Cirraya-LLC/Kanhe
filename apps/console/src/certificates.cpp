@@ -183,6 +183,7 @@ constexpr std::string_view page_template = R"(<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <title>{{kind}}</title>
 <style>
 @page { size: A4; margin: 0 }

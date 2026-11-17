@@ -2,8 +2,14 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <array>
+#include <cstdint>
+#include <format>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -71,7 +77,210 @@ Result<protocol::Id> ledger_of(ByteView request) {
 
 constexpr protocol::Timestamp day_ms = 24 * 60 * 60'000;
 
+using Ipv4 = std::array<std::uint8_t, 4>;
+using Ipv6 = std::array<std::uint8_t, 16>;
+
+/// A dotted IPv4 address as servers and proxies write one: four decimal
+/// numbers up to 255, with no leading zeros.
+std::optional<Ipv4> parse_ipv4(std::string_view text) {
+    Ipv4 out{};
+    for (std::size_t part = 0; part < out.size(); ++part) {
+        if (part > 0) {
+            if (!text.starts_with('.')) {
+                return std::nullopt;
+            }
+            text.remove_prefix(1);
+        }
+        std::size_t digits = 0;
+        unsigned value = 0;
+        while (digits < text.size() && digits < 4 && text[digits] >= '0' && text[digits] <= '9') {
+            value = value * 10 + static_cast<unsigned>(text[digits] - '0');
+            ++digits;
+        }
+        if (digits == 0 || digits > 3 || value > 255 || (digits > 1 && text.front() == '0')) {
+            return std::nullopt;
+        }
+        out[part] = static_cast<std::uint8_t>(value);
+        text.remove_prefix(digits);
+    }
+    if (!text.empty()) {
+        return std::nullopt;
+    }
+    return out;
+}
+
+/// Groups of one to four hex digits separated by ':', appended to `out`
+/// (eight at most); an empty text has none.
+bool hex_groups(std::string_view text, std::vector<std::uint16_t>& out) {
+    if (text.empty()) {
+        return true;
+    }
+    while (true) {
+        const std::size_t colon = text.find(':');
+        const std::string_view group = text.substr(0, colon);
+        if (group.empty() || group.size() > 4 || out.size() == 8) {
+            return false;
+        }
+        unsigned value = 0;
+        for (const char c : group) {
+            const int digit = c >= '0' && c <= '9'   ? c - '0'
+                              : c >= 'a' && c <= 'f' ? c - 'a' + 10
+                              : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                                                     : -1;
+            if (digit < 0) {
+                return false;
+            }
+            value = value * 16 + static_cast<unsigned>(digit);
+        }
+        out.push_back(static_cast<std::uint16_t>(value));
+        if (colon == std::string_view::npos) {
+            return true;
+        }
+        text.remove_prefix(colon + 1);
+    }
+}
+
+/// An IPv6 address in text (RFC 4291 section 2.2: "::" once at most, and a
+/// dotted IPv4 address as the last 32 bits), without its zone ("%eth0").
+std::optional<Ipv6> parse_ipv6(std::string_view text) {
+    text = text.substr(0, text.find('%'));
+    std::optional<Ipv4> ipv4;
+    if (const std::size_t dot = text.find('.'); dot != std::string_view::npos) {
+        const std::size_t colon = text.rfind(':');
+        if (colon == std::string_view::npos || colon > dot) {
+            return std::nullopt;
+        }
+        ipv4 = parse_ipv4(text.substr(colon + 1));
+        if (!ipv4) {
+            return std::nullopt;
+        }
+        // What comes before it, less the colon that separates them (unless
+        // that colon is half of a "::").
+        text = text.substr(0, colon + 1);
+        if (!text.ends_with("::")) {
+            text.remove_suffix(1);
+        }
+    }
+    const std::size_t gap = text.find("::");
+    std::vector<std::uint16_t> head;
+    std::vector<std::uint16_t> tail;
+    if (gap == std::string_view::npos) {
+        if (!hex_groups(text, head)) {
+            return std::nullopt;
+        }
+    } else if (text.find("::", gap + 1) != std::string_view::npos ||
+               !hex_groups(text.substr(0, gap), head) || !hex_groups(text.substr(gap + 2), tail)) {
+        return std::nullopt;
+    }
+    std::vector<std::uint16_t>& last = gap == std::string_view::npos ? head : tail;
+    if (ipv4) {
+        const Ipv4& b = *ipv4;
+        last.push_back(static_cast<std::uint16_t>((static_cast<unsigned>(b[0]) << 8U) |
+                                                  static_cast<unsigned>(b[1])));
+        last.push_back(static_cast<std::uint16_t>((static_cast<unsigned>(b[2]) << 8U) |
+                                                  static_cast<unsigned>(b[3])));
+    }
+    const std::size_t groups = head.size() + tail.size();
+    if (gap == std::string_view::npos ? groups != 8 : groups > 7) {
+        return std::nullopt;
+    }
+    Ipv6 out{};
+    auto put = [&out](std::size_t at, std::uint16_t group) {
+        out[2 * at] = static_cast<std::uint8_t>(static_cast<unsigned>(group) >> 8U);
+        out[2 * at + 1] = static_cast<std::uint8_t>(static_cast<unsigned>(group) & 0xffU);
+    };
+    for (std::size_t i = 0; i < head.size(); ++i) {
+        put(i, head[i]);
+    }
+    for (std::size_t i = 0; i < tail.size(); ++i) {
+        put(8 - tail.size() + i, tail[i]);
+    }
+    return out;
+}
+
+/// Whether the first `count` bytes are zero.
+bool zeros(const Ipv6& address, std::size_t count) {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (address[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/// ::ffff:a.b.c.d: an IPv4 caller on an IPv6 socket.
+bool mapped_ipv4(const Ipv6& address) {
+    return zeros(address, 10) && address[10] == 0xff && address[11] == 0xff;
+}
+
+std::string ipv4_text(std::uint8_t a, std::uint8_t b, std::uint8_t c, std::uint8_t d) {
+    return std::format("{}.{}.{}.{}", static_cast<unsigned>(a), static_cast<unsigned>(b),
+                       static_cast<unsigned>(c), static_cast<unsigned>(d));
+}
+
+bool loopback(std::string_view address) {
+    if (const auto ipv4 = parse_ipv4(address)) {
+        return (*ipv4)[0] == 127;
+    }
+    if (const auto ipv6 = parse_ipv6(address)) {
+        if (mapped_ipv4(*ipv6)) {
+            return (*ipv6)[12] == 127;
+        }
+        return zeros(*ipv6, 15) && (*ipv6)[15] == 1;
+    }
+    return false;
+}
+
 } // namespace
+
+std::string quota_address(std::string_view address) {
+    if (const auto ipv4 = parse_ipv4(address)) {
+        const Ipv4& b = *ipv4;
+        return ipv4_text(b[0], b[1], b[2], b[3]);
+    }
+    if (const auto ipv6 = parse_ipv6(address)) {
+        const Ipv6& b = *ipv6;
+        if (mapped_ipv4(b)) {
+            return ipv4_text(b[12], b[13], b[14], b[15]);
+        }
+        auto group = [&b](std::size_t i) {
+            return (static_cast<unsigned>(b[2 * i]) << 8U) | static_cast<unsigned>(b[2 * i + 1]);
+        };
+        return std::format("{:x}:{:x}:{:x}:{:x}::/64", group(0), group(1), group(2), group(3));
+    }
+    return std::string(address);
+}
+
+std::string forwarded_address(const node::http::Request& request, std::string_view peer) {
+    if (!loopback(peer)) {
+        return std::string(peer);
+    }
+    // Each proxy appends the address it was called from: the last is the
+    // one this host's proxy saw; those before it, anyone may have written.
+    std::optional<std::string_view> forwarded;
+    for (const auto& [field, value] : request.headers) {
+        if (field == "x-forwarded-for") {
+            forwarded = value;
+        }
+    }
+    if (!forwarded) {
+        return std::string(peer);
+    }
+    std::string_view last = *forwarded;
+    if (const std::size_t comma = last.rfind(','); comma != std::string_view::npos) {
+        last.remove_prefix(comma + 1);
+    }
+    while (!last.empty() && (last.front() == ' ' || last.front() == '\t')) {
+        last.remove_prefix(1);
+    }
+    while (!last.empty() && (last.back() == ' ' || last.back() == '\t')) {
+        last.remove_suffix(1);
+    }
+    if (parse_ipv4(last) || parse_ipv6(last)) {
+        return std::string(last);
+    }
+    return std::string(peer);
+}
 
 Result<Bytes> encode_witness_registration(const WitnessRegistration& registration) {
     return cbor::encode(cbor::Value::map(
@@ -180,13 +389,16 @@ Response PublicWitness::register_ledger(ByteView body, std::string_view address,
     for (auto it = registrations_.begin(); it != registrations_.end();) {
         it = it->second.first == today ? std::next(it) : registrations_.erase(it);
     }
-    auto& [day, count] = registrations_[std::string(address)];
+    auto& [day, count] = registrations_[quota_address(address)];
     day = today;
     if (count >= limits_.registrations_per_day) {
         return too_many("too many registrations from this address today",
                         (today + 1) * day_ms - now);
     }
-    // Every attempt counts: a refused one cost the witness its checks too.
+    // Every attempt counts, before its checks: they are the work the quota
+    // bounds (reading the genesis entry, writing its state, checking the
+    // log key's signature), and a caller cannot spend another's quota, only
+    // that of the address it calls from (an IPv6 address's /64).
     ++count;
     WitnessState state;
     try {

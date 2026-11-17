@@ -80,8 +80,13 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     const http::Request& request = parsed->request;
     const http::Response response = world.web.handle(request);
     require(response.status >= 200 && response.status <= 599);
-    require(std::ranges::any_of(response.headers, [](const auto& h) {
-        return h.first == "Content-Security-Policy" && h.second == console::content_security_policy;
+    // The console's policy on every answer; a certificate's page to print
+    // carries its own in place of it.
+    const bool page = request.path.ends_with("/page");
+    require(std::ranges::any_of(response.headers, [page](const auto& h) {
+        return h.first == "Content-Security-Policy" &&
+               (h.second == console::content_security_policy ||
+                (page && h.second == console::certificate_page_policy));
     }));
     if (response.status == 200) {
         const auto host = request.header("host");

@@ -12,9 +12,10 @@
 # OpenSSL is linked in statically: Homebrew's path is not on other Macs. GCC's
 # C++ library is too, and it needs the system's iconv (std::format).
 # KANHE_DEVELOPER_ID, if set (a "Developer ID Installer: ..." identity in
-# the keychain), signs the package, and KANHE_DEVELOPER_APP_ID the tool;
-# otherwise they are unsigned (the tool ad hoc), and macOS asks the person to
-# allow them. WASM_DIR as in linux.sh.
+# the keychain), signs the package, and KANHE_DEVELOPER_APP_ID the tool, both
+# with Apple's secure time stamp, as notarization requires; otherwise they
+# are unsigned (the tool ad hoc), and macOS asks the person to allow them.
+# WASM_DIR as in linux.sh.
 set -Eeuo pipefail
 trap 'echo "FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
@@ -44,15 +45,21 @@ done
 
 # The package: the tool in /usr/local/bin, its completions, notices, and the
 # standalone verifier page beside it. With KANHE_DEVELOPER_APP_ID (a
-# "Developer ID Application: ..." identity) the tool is signed; otherwise
-# ad hoc.
+# "Developer ID Application: ..." identity) the tool is signed with Apple's
+# secure time stamp, which notarization requires (signing fails if the time
+# stamp service cannot be reached); otherwise ad hoc, with no time stamp.
 PAYLOAD="$BUILD/root"
 rm -rf "$PAYLOAD"
 install -d "$PAYLOAD/usr/local/bin" "$PAYLOAD/usr/local/share/doc/kanhe" \
     "$PAYLOAD/usr/local/share/zsh/site-functions"
+if [ -n "${KANHE_DEVELOPER_APP_ID:-}" ] && [ "$KANHE_DEVELOPER_APP_ID" != - ]; then
+    TIMESTAMP=--timestamp
+else
+    TIMESTAMP=--timestamp=none
+fi
 for p in "${PROGRAMS[@]}"; do
     install -m755 "$BUILD/bin/$p" "$PAYLOAD/usr/local/bin/$p"
-    codesign --force --options runtime --timestamp=none \
+    codesign --force --options runtime "$TIMESTAMP" \
         --sign "${KANHE_DEVELOPER_APP_ID:--}" "$PAYLOAD/usr/local/bin/$p"
     codesign --verify --strict "$PAYLOAD/usr/local/bin/$p"
     "$PAYLOAD/usr/local/bin/$p" completion zsh > "$PAYLOAD/usr/local/share/zsh/site-functions/_$p"
@@ -66,7 +73,7 @@ fi
 pkgbuild --root "$PAYLOAD" --identifier com.cirraya.kanhe --version "$VERSION" \
     --install-location / "$BUILD/component.pkg" > /dev/null
 productbuild --package "$BUILD/component.pkg" \
-    ${KANHE_DEVELOPER_ID:+--sign "$KANHE_DEVELOPER_ID"} \
+    ${KANHE_DEVELOPER_ID:+--sign "$KANHE_DEVELOPER_ID" --timestamp} \
     "$OUT/Kanhe-$VERSION-macos-$ARCH.pkg" > /dev/null
 echo "wrote $OUT/Kanhe-$VERSION-macos-$ARCH.pkg${KANHE_DEVELOPER_ID:+ (signed)}"
 tar -C "$PAYLOAD/usr/local/bin" -czf "$OUT/kanhe-$VERSION-macos-$ARCH.tar.gz" "${PROGRAMS[@]}"

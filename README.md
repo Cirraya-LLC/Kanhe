@@ -442,6 +442,10 @@ and time; never statements, records, fields, parties, or files.
 # The witness's operator: serve it, with TLS of its own (quotas see callers' addresses).
 kanhe serve --listen 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem \
     --witness-dir witness --witness-key witness.key --witness-public --witness-name example
+# Or behind a reverse proxy on the same host, which appends each caller's address to
+# X-Forwarded-For: the quotas count that address, from loopback connections only.
+kanhe serve --listen 127.0.0.1:8080 --witness-dir witness --witness-key witness.key \
+    --witness-public --witness-name example --witness-trust-proxy
 # A ledger: register with it, pinning the key its operator publishes.
 kanhe witness register https://witness.example.org --witness-key witness.pub
 kanhe witness registered            # what each witness cosigned
