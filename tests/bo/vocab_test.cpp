@@ -66,6 +66,8 @@ struct TestVocab {
           {"state.joined", R"("已入會")"},
           {"field.member", R"("會員")"},
           {"unit.dozen", R"("打")"}}}};
+    /// A language's attaching rules, as a list in the file's notation.
+    std::map<std::string, std::string> attach;
     std::string extra;
 
     [[nodiscard]] std::string text() const {
@@ -101,7 +103,11 @@ struct TestVocab {
                 out += (inner ? "" : ", ") + std::string("\"") + k + "\": " + v;
                 inner = false;
             }
-            out += "}}";
+            out += "}";
+            if (const auto rules = attach.find(language); rules != attach.end()) {
+                out += ", \"attach\": " + rules->second;
+            }
+            out += "}";
             first = false;
         }
         out += "}}";
@@ -506,6 +512,47 @@ TEST_CASE("a source uses a user's pack: its words, its terms, its rules", "[bo][
         }
     }
     CHECK(clauses.find("會員") != std::string::npos);
+}
+
+TEST_CASE("a user's pack's attaching words attach, as the official packs' do", "[bo][vocab]") {
+    // 預留座位 is reserve + seat, as 按發票 is by + invoice: the pack's own
+    // rule, for its own words.
+    TestVocab v;
+    v.concepts["act.reserve"] = R"({"category": "action"})";
+    v.concepts["field.seat"] = R"({"category": "field", "type": "text"})";
+    v.words["en"]["act.reserve"] = R"("reserve")";
+    v.words["en"]["field.seat"] = R"("seat")";
+    v.words["zh-Hant-HK"]["act.reserve"] = R"("預留")";
+    v.words["zh-Hant-HK"]["field.seat"] = R"("座位")";
+    TestVocab plain = v;
+    v.attach["zh-Hant-HK"] = R"([{"word": "act.reserve", "before": ["field"]}])";
+    const VocabularyHandle pack = must_read(v);
+    const VocabularyLanguage* chinese = pack->language("zh-Hant-HK");
+    REQUIRE(chinese != nullptr);
+    REQUIRE(chinese->attach.size() == 1);
+    CHECK(chinese->attach[0].word == "club:act.reserve");
+
+    const auto words = [](const PackSet& set, std::string_view source) {
+        const Lexicon lexicon(set);
+        const Lexed lexed = lex(source, lexicon);
+        INFO(all_text(lexed.diagnostics));
+        CHECK(!has_errors(lexed.diagnostics));
+        std::vector<std::string> out;
+        for (const Token& t : lexed.tokens) {
+            if (t.kind == TokenKind::word || t.kind == TokenKind::name) {
+                out.push_back(describe(t));
+            }
+        }
+        return out;
+    };
+    const PackSet set = set_with({pack});
+    const std::vector<std::string> both{"word club:act.reserve", "word club:field.seat"};
+    CHECK(words(set, "預留座位\n") == both);
+    CHECK(words(set, "預留 座位\n") == both);
+    // Without the rule the run is one name, as it would be for any word.
+    const PackSet without = set_with({must_read(plain)});
+    CHECK(words(without, "預留座位\n") == std::vector<std::string>{"name 預留座位"});
+    CHECK(words(without, "預留 座位\n") == both);
 }
 
 TEST_CASE("a bundle embeds a user's pack whole (key 7), and opens with it", "[bo][vocab]") {

@@ -432,8 +432,13 @@ Arguments arguments(const m::Model& model, const Lexicon& lexicon, std::string_v
         for (const m::Field& f : action->inputs) {
             expected.push_back({wire_name(f.word, f.name), f.type, Place::input, false});
         }
+        // As describe() lists them: a role the action binds once may be
+        // left out (the instance may hold it already; the code refuses the
+        // first call without it), but one it binds again on every call
+        // (R23) never may.
         for (const m::Party* p : bound_by(model, *action)) {
-            expected.push_back({wire_name(p->role, p->name), party_type(), Place::role, true});
+            expected.push_back(
+                {wire_name(p->role, p->name), party_type(), Place::role, !p->each_call});
         }
     }
 

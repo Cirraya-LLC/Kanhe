@@ -6,6 +6,8 @@
 // it binds, time rules; values written in each official language's forms,
 // read by the declared type; and every problem by its code.
 
+#include <algorithm>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -212,6 +214,39 @@ TEST_CASE("bo args: values typed by the contract, in any language's forms", "[bo
     CHECK(bound.value->find("carrier") != nullptr);
 }
 
+TEST_CASE("bo args: a role each call names is required, as bo calls says", "[bo][calls]") {
+    // The pool allocates an address to a customer each call names (R23):
+    // the contract's code refuses a call without the customer's ledger, so
+    // the arguments refuse it first, as the form shows it.
+    const std::string source = read_text(golden_dir / "form" / "ip-pool" / "source.bo");
+    const model::Model model = model_of(source);
+    const calls::Description d = calls::describe(model, source, nullptr);
+    const calls::Call* allocate = nullptr;
+    for (const calls::Call& c : d.calls) {
+        if (c.function == "allocate") {
+            allocate = &c;
+        }
+    }
+    REQUIRE(allocate != nullptr);
+    REQUIRE(allocate->inputs.size() == 1);
+    const calls::Input& customer = allocate->inputs[0];
+    CHECK(customer.place == calls::Place::role);
+    CHECK(customer.each_call);
+    CHECK_FALSE(customer.optional);
+    const calls::Arguments left_out = calls::arguments(model, official(), "allocate", {});
+    CHECK_FALSE(left_out.value.has_value());
+    CHECK(codes(left_out) == customer.name + ":missing ");
+    const calls::Arguments given =
+        calls::arguments(model, official(), "allocate", {{customer.name, {std::string(64, 'c')}}});
+    INFO(codes(given));
+    REQUIRE(given.value.has_value());
+    CHECK(given.value->find(customer.name) != nullptr);
+    // A role an action binds once stays optional: the order's carrier.
+    const model::Model deal = model_of(order);
+    CHECK(calls::arguments(deal, official(), "ship", {{"lead", {std::string("1 day")}}})
+              .value.has_value());
+}
+
 TEST_CASE("bo args: every problem by its code", "[bo][calls]") {
     const model::Model model = model_of(order);
     const auto problem = [&](calls::Values values, std::string_view function = "create") {
@@ -271,4 +306,11 @@ TEST_CASE("bo args: values from JSON", "[bo][calls]") {
     CHECK(std::holds_alternative<std::string>(calls::parse_values("not json")));
     CHECK(std::holds_alternative<std::string>(
         calls::parse_values(std::string(calls::max_values_json + 1, ' '))));
+    // Nested as deep as 64 KiB allows: the JSON reader keeps its nesting on
+    // the heap, and a value is read two lists deep at most.
+    const std::size_t deep = (calls::max_values_json - 16) / 2;
+    const std::string nested = std::string(deep, '[') + std::string(deep, ']');
+    CHECK(std::holds_alternative<std::string>(calls::parse_values(R"({"a": )" + nested + "}")));
+    CHECK(std::holds_alternative<std::string>(calls::parse_values(nested)));
+    CHECK(std::holds_alternative<std::string>(calls::parse_values(std::string(2 * deep, '['))));
 }

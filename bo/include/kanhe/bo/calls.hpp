@@ -135,6 +135,8 @@ struct Arguments {
 
 /// The arguments of a call of `function` with `values` (by input name, as
 /// `describe` lists them). Values are read with `lexicon`, the pack set's.
+/// What `describe` marks optional may be left out; anything else left out
+/// is `missing`, a role an action binds on every call (R23) included.
 [[nodiscard]] Arguments arguments(const model::Model& model, const Lexicon& lexicon,
                                   std::string_view function, const Values& values);
 

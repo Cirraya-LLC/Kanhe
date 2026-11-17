@@ -30,6 +30,7 @@
 
 #include <kanhe/bo/lexer.hpp>
 #include <kanhe/bo/messages.hpp>
+#include <kanhe/bo/vocab.hpp>
 
 #include "internal.hpp"
 
@@ -246,7 +247,12 @@ Lexicon::Lexicon(const PackSet& packs) : impl_(std::make_unique<Impl>()) {
         }
         for (const Attachment& attachment : pack.reading.attach) {
             const Word* word = pack.word(attachment.word);
+            // A word of the compiler's table, or of a user's vocabulary pack,
+            // whose rules joined this language pack with its words.
             const Concept* entry = find_concept(attachment.word);
+            if (entry == nullptr) {
+                entry = packs.vocabularies().find_concept(attachment.word);
+            }
             if (word == nullptr || entry == nullptr) {
                 continue;
             }

@@ -286,4 +286,15 @@ TEST_CASE("bo form: sheets that are not sheets", "[bo][form]") {
     CHECK(refused(head + R"(, "packs": ["Finance!"]})").path == "/packs/0");
     CHECK(refused(head + R"(, "tests": [{"name": "\"t\"", "steps": []}]})").path ==
           "/tests/0/steps");
+    // Nested deeper than a stack could recurse: the JSON reader keeps its
+    // nesting on the heap, and the sheet's reader goes only as deep as a
+    // sheet's shape, checking each value's type before it looks inside.
+    const std::size_t deep = 200'000;
+    const std::string nested = std::string(deep, '[') + std::string(deep, ']');
+    CHECK(refused(nested).path == "/");
+    CHECK(refused(std::string(deep, '[')).path.empty());
+    CHECK(refused(head + R"(, "parties": )" + nested + "}").path == "/parties/0");
+    CHECK(
+        refused(head + R"(, "thing": {"name": "T", "fields": [{"name": )" + nested + "}]}}").path ==
+        "/thing/fields/0/name");
 }
