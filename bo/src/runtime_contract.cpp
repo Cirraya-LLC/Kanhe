@@ -31,6 +31,7 @@ constexpr std::uint32_t ledger_size = 32;
 
 /// Aborts with the reason a typed read was given (its parameters 1 and 2).
 void abort_given(Runtime& rt, FunctionBuilder& b) {
+    record_failure(rt, b, [&] { b.get(b.param(1)).get(b.param(2)); });
     b.get(b.param(1)).get(b.param(2)).call(rt.module().host(wasm::Host::abort)).unreachable();
 }
 
@@ -306,6 +307,13 @@ void define_fail_numbered(Runtime& rt, FunctionBuilder& b) {
     const Local digits = b.local(I32);
     const std::uint32_t buffer = rt.number_buffer();
     const std::uint32_t last = buffer + max_numbered_text + 20;
+    if (rt.recording()) {
+        // Only the first failure is kept: its text stays in the buffer.
+        push_failed(rt, b);
+        const Label kept = b.if_();
+        b.return_();
+        b.end(kept);
+    }
     // The text, at most max_numbered_text bytes.
     b.get(length).u32(max_numbered_text).get(length).u32(max_numbered_text).op(i32_lt_u);
     b.op(select).set(length);
@@ -322,8 +330,16 @@ void define_fail_numbered(Runtime& rt, FunctionBuilder& b) {
     }
     b.u32(last).get(p).op(i32_sub).set(digits);
     b.u32(buffer).get(length).op(i32_add).get(p).get(digits).bulk(memory_copy, 20);
+    record_failure(rt, b, [&] { b.u32(buffer).get(length).get(digits).op(i32_add); });
     b.u32(buffer).get(length).get(digits).op(i32_add);
     b.call(rt.module().host(wasm::Host::abort)).unreachable();
+}
+
+void define_fail_with(Runtime& rt, FunctionBuilder& b) {
+    const Local at = b.param(0);
+    const Local length = b.param(1);
+    record_failure(rt, b, [&] { b.get(at).get(length); });
+    b.get(at).get(length).call(rt.module().host(wasm::Host::abort)).unreachable();
 }
 
 } // namespace kanhe::bo::runtime::detail

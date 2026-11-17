@@ -1,7 +1,7 @@
 test "the keeper calls each rule once its time has come" passed home=role.we
   step 1 passed 2027-06-01 accepted active event=active; fuel 6846
-  step 2 passed 2027-06-30 refused "bo:when when.suspend"; fuel 10593
-  step 3 passed 2027-07-01 accepted suspended event=when:when.suspend late=0 event=suspended; fuel 13342
+  step 2 passed 2027-06-30 refused "bo:when when.suspend"; fuel 10632
+  step 3 passed 2027-07-01 accepted suspended event=when:when.suspend late=0 event=suspended; fuel 13381
   step 4 passed 2027-07-31 refused "bo:when when.terminate"; fuel 11168
   step 5 passed 2027-08-01 accepted terminated event=when:when.terminate late=0 event=terminated; fuel 14086
   step 6 passed 2027-12-31 accepted closed event=when:when.closed late=0 event=closed; fuel 14243

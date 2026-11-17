@@ -57,7 +57,10 @@ template <Reason R>
 void define_fail(Runtime& rt, wasm::FunctionBuilder& b) {
     wasm::ModuleWriter& m = rt.module();
     const std::string_view text = text_of(R);
-    b.u32(m.intern(as_bytes(text))).u32(static_cast<std::uint32_t>(text.size()));
+    const std::uint32_t at = m.intern(as_bytes(text));
+    const auto length = static_cast<std::uint32_t>(text.size());
+    detail::record_failure(rt, b, [&] { b.u32(at).u32(length); });
+    b.u32(at).u32(length);
     b.call(m.host(wasm::Host::abort)).unreachable();
 }
 
@@ -122,6 +125,7 @@ const std::array<Spec, all_routines>& specs() {
         {fail_numbered, {{I32, I32, I64}, {}}, define_fail_numbered},
         {out_finish_at, {{I32}, {}}, define_out_finish_at},
         {check_date, {{I64, I64}, {I64}}, define_check_date},
+        {fail_with, {{I32, I32}, {}}, define_fail_with},
     }};
     return table;
 }
@@ -194,6 +198,13 @@ wasm::Func Runtime::get(const Routine routine) {
 
 wasm::Func Runtime::fail(const Reason reason) {
     return get(fail_routines[static_cast<std::size_t>(reason)]);
+}
+
+void Runtime::record_failures(const wasm::Global on, const wasm::Global at,
+                              const wasm::Global length) {
+    // Every routine is written knowing it: none may be written before.
+    BO_ASSERT(emitted_.empty() && !recording_.has_value());
+    recording_ = Recording{on, at, length, module_->reserve(16, 4)};
 }
 
 std::uint32_t Runtime::call_table() {

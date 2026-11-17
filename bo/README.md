@@ -194,8 +194,8 @@ source is not the code's: exit 3); "MALFORMED" when there is no usable bundle; o
 when another compiler, release, or codegen version built it (named, never called a forgery;
 `--require` fails it too). Codegen 4 is the first released; from it on, the compiler keeps
 writing the released codegens before its own, so their deploys still rebuild: this one writes
-codegen 5 and rebuilds codegen 4's deploys with codegen 4 (spec section 16.3 says what 5
-changed).
+codegen 6 and rebuilds codegen 4's and 5's deploys with the codegen each names (spec section
+16.3 says what 5 and 6 changed).
 
 ## Fuel
 
@@ -391,8 +391,10 @@ The same in Traditional Chinese (`bo fmt --language zh-Hant-HK`):
 
 A failed request and one no answer reaches by its deadline (expired) take the rule for failures,
 unless one is written for expiry (`when notify expires`). An answer is never refused, so these
-rules ask no consent and refuse nothing; an instance that has ended takes its answers but asks
-nothing more. The contract text states every request, its deadline, and what happens if it fails.
+rules ask no consent and refuse nothing; from codegen 6 on, a rule that would still refuse the
+call (an overflow, a date past 9999, a request too large) changes nothing, and the answer is
+recorded with the reason in its event (`"refused": "bo:overflow"`); an instance that has ended
+takes its answers but asks nothing more. The contract text states every request, its deadline, and what happens if it fails.
 Tests answer requests as an executor, a keeper, or a person would:
 
 ```

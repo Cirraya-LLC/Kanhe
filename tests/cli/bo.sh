@@ -567,7 +567,7 @@ cp "$BUILDS/agreement-en/source.bo" agreement.bo
 GOLDEN_HASH="$(sed -n 2p "$BUILDS/agreement-en/build.txt" | sed 's/.*sha256 \([0-9a-f]*\),.*/\1/')"
 GOLDEN_SIZE="$(sed -n 2p "$BUILDS/agreement-en/build.txt" | sed 's/^code: \([0-9]*\) bytes.*/\1/')"
 COMPILER="$(run bo version --json | json 'd["compiler"]')"
-contains -E "^kanhe-bo [0-9.]+; codegen 5; edition 1$" <<< "$COMPILER" || fail "the compiler string"
+contains -E "^kanhe-bo [0-9.]+; codegen 6; edition 1$" <<< "$COMPILER" || fail "the compiler string"
 run bo build agreement.bo > out.txt 2> warnings.txt
 contains -Fx "agreement.bo: built contract Agreement (Bo edition 1)" out.txt || fail "build"
 contains -F "functions  amend, close, countersign, create (creates), sign" out.txt || fail "functions"
@@ -1093,7 +1093,7 @@ expect_exit 3 bo rebuild x.boc
 contains -F "DOES NOT REBUILD" out.txt || fail "rebuild of the evidence's deploy: differs"
 # The same, said to be built by a newer codegen version: reported as such,
 # not as a forgery.
-NEWER="$(sed 's/codegen 5/codegen 6/' <<< "$COMPILER")"
+NEWER="$(sed 's/codegen 6/codegen 7/' <<< "$COMPILER")"
 Y="$(deploy_raw other.wasm "$NEWER" agreement.bundle)"
 YB="$(exported "$Y")"
 run bo rebuild "$YB" > out.txt
@@ -1110,14 +1110,18 @@ ZB="$(exported "$Z")"
 run bo rebuild "$ZB" | contains -F "rebuild:  rebuilds" || fail "the same bytes rebuild"
 run bo explain "$ZB" | sed '1,/^$/d' > text.txt
 diff "$TEXTS/agreement/en.txt" text.txt > /dev/null || fail "explain: the same bytes, said to be another codegen's, rebuild"
-# A released codegen this compiler carries is rebuilt with: the agreement's
-# code is the same in codegen 4, and other code differs (no other compiler's).
-OLDER="$(sed 's/codegen 5/codegen 4/' <<< "$COMPILER")"
-OB="$(exported "$(deploy_raw agreement.wasm "$OLDER" agreement.bundle)")"
-run bo rebuild "$OB" --json | json 'd["status"]' | contains -Fx "rebuilds" || fail "rebuild: a carried codegen"
-OX="$(exported "$(deploy_raw other.wasm "$OLDER" agreement.bundle)")"
-expect_exit 3 bo rebuild "$OX"
-contains -F "DOES NOT REBUILD" out.txt || fail "rebuild: other code, said to be a carried codegen's"
+# The released codegens this compiler carries are rebuilt with: the
+# agreement's code is the same in codegens 4 and 5, and other code differs (no
+# other compiler's).
+for OLD in 4 5; do
+    OLDER="$(sed "s/codegen 6/codegen $OLD/" <<< "$COMPILER")"
+    OB="$(exported "$(deploy_raw agreement.wasm "$OLDER" agreement.bundle)")"
+    run bo rebuild "$OB" --json | json 'd["status"]' | contains -Fx "rebuilds" ||
+        fail "rebuild: carried codegen $OLD"
+    OX="$(exported "$(deploy_raw other.wasm "$OLDER" agreement.bundle)")"
+    expect_exit 3 bo rebuild "$OX"
+    contains -F "DOES NOT REBUILD" out.txt || fail "rebuild: other code, said to be codegen $OLD's"
+done
 # Not a bundle, no source, another compiler's name.
 printf 'not a bundle' > junk.bundle
 W="$(deploy_raw agreement.wasm "$COMPILER" junk.bundle)"

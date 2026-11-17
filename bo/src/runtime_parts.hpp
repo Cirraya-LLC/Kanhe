@@ -18,10 +18,63 @@ using wasm::FunctionBuilder;
 /// Writes a routine's body; `rt` gives the routines it calls.
 using Define = void (*)(Runtime& rt, FunctionBuilder& b);
 
-/// Aborts with the reason if the i32 on the stack is not zero.
+/// Returns from the function being written, with zeros for its results.
+inline void return_zeros(Runtime& rt, FunctionBuilder& b) {
+    for (const wasm::ValType type : rt.module().type_of(b.self()).results) {
+        if (type == wasm::ValType::i64) {
+            b.i64(0);
+        } else {
+            b.i32(0);
+        }
+    }
+    b.return_();
+}
+
+/// After a call that may fail: in a module that records failures
+/// (Runtime::record_failures), the call returns from a failure while
+/// recording is on, and so does the function being written, with zeros.
+/// Elsewhere such a call never returns, and nothing is written.
+inline void after_failure(Runtime& rt, FunctionBuilder& b) {
+    if (rt.recording()) {
+        return_zeros(rt, b);
+    }
+}
+
+/// [] -> [i32]: 1 if recording is on and a failure is recorded. Only in a
+/// module that records failures.
+inline void push_failed(Runtime& rt, FunctionBuilder& b) {
+    const Runtime::Recording& r = *rt.recording();
+    b.global_get(r.on).global_get(r.length);
+    b.op(wasm::Op::i32_eqz).op(wasm::Op::i32_eqz).op(wasm::Op::i32_and);
+}
+
+/// In a module that records failures: while recording is on, keeps the
+/// reason `reason` pushes (its address and length) unless one is kept
+/// already, and returns zeros. Writes nothing in other modules, where the
+/// abort that follows is the only way out.
+template <typename Push>
+void record_failure(Runtime& rt, FunctionBuilder& b, const Push& reason) {
+    if (!rt.recording()) {
+        return;
+    }
+    const Runtime::Recording& r = *rt.recording();
+    b.global_get(r.on);
+    const wasm::Label on = b.if_();
+    b.global_get(r.length).op(wasm::Op::i32_eqz);
+    const wasm::Label first = b.if_();
+    reason();
+    b.global_set(r.length).global_set(r.at);
+    b.end(first);
+    return_zeros(rt, b);
+    b.end(on);
+}
+
+/// Aborts with the reason if the i32 on the stack is not zero (or, while a
+/// module records failures, keeps it and returns zeros).
 inline void fail_if(Runtime& rt, FunctionBuilder& b, const Reason reason) {
     const wasm::Label then = b.if_();
     b.call(rt.fail(reason));
+    after_failure(rt, b);
     b.end(then);
 }
 
@@ -69,5 +122,6 @@ void define_expect_ledger(Runtime& rt, FunctionBuilder& b);
 void define_expect_bool(Runtime& rt, FunctionBuilder& b);
 void define_fail_numbered(Runtime& rt, FunctionBuilder& b);
 void define_out_finish_at(Runtime& rt, FunctionBuilder& b);
+void define_fail_with(Runtime& rt, FunctionBuilder& b);
 
 } // namespace kanhe::bo::runtime::detail

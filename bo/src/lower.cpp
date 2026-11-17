@@ -391,6 +391,9 @@ struct Ctx {
     /// answer (its state changes and requests are then skipped), and the
     /// answer's result and reason, texts (empty when it gives none).
     bool answer = false;
+    /// In that rule's own function (from codegen 6 on): a recorded failure
+    /// returns before the next line (bo.md 6.11).
+    bool recorded = false;
     Local final_before{};
     Local result_p{};
     Local result_n{};
@@ -439,6 +442,14 @@ private:
     [[nodiscard]] std::uint32_t intern(ByteView bytes);
     [[nodiscard]] std::uint32_t intern(std::string_view text) { return intern(as_bytes(text)); }
     void refuse(FunctionBuilder& b, std::string_view reason);
+    /// Calls the routine that refuses with `reason`; in a module that
+    /// records failures, returns zeros after it (it returns while recording
+    /// is on).
+    void fail(FunctionBuilder& b, rt::Reason reason);
+    /// Returns from the function being written, with zeros for its results.
+    void return_zeros(FunctionBuilder& b);
+    /// [] -> [i32]: 1 if recording is on and a failure is recorded.
+    void push_failed(FunctionBuilder& b);
     void call_item(FunctionBuilder& b, std::uint32_t key);
     void push_key(FunctionBuilder& b, const Bytes& key);
     // Calls whose cost depends on a size (cost.hpp), each with its size.
@@ -487,6 +498,12 @@ private:
     void emit_approve(wasm::Func f);
     void emit_rule(const RuleInfo& rule);
     void emit_reply(wasm::Func f);
+    /// The rules for answers, each where its kind and outcome match.
+    void answer_rules(Ctx& c, Local kind, Local kind_length, Local status);
+    /// From codegen 6 on: the rules for answers as a function of their own,
+    /// [kind, its length, status, result, its length, reason, its length,
+    /// final before] -> [], which a recorded failure returns from.
+    [[nodiscard]] wasm::Func answer_rules_function();
     void request(Ctx& c, const m::Request& r);
     void write_answer_event(FunctionBuilder& b);
     /// The params of the contract's requests, the most any has.
@@ -499,6 +516,11 @@ private:
     void now(Ctx& c);
     void due(Ctx& c);
     void shift(Ctx& c, const m::Expr& duration, bool earlier);
+    /// [time] -> [time]: a time moved by a fixed duration, which from
+    /// codegen 6 on refuses the call outside the years 1 to 9999 (bo:date,
+    /// 5.5), as add_months does for a calendar one; codegens 4 and 5 left
+    /// it unchecked.
+    void fixed_shift_check(FunctionBuilder& b);
     void moment(Ctx& c, const m::Trigger& trigger);
     void entry_check(Ctx& c);
     void depth_check(Ctx& c);
@@ -649,6 +671,14 @@ private:
     /// request's kind (address, length), its id, and the answer's status.
     bool requests_used_ = false;
     std::size_t answer_transitions_ = 0;
+    /// From codegen 6 on, a contract with rules for answers records the
+    /// failures in them (bo.md 6.11): the globals runtime::Recording names.
+    bool records_ = false;
+    wasm::Global failures_on_{};
+    wasm::Global failure_at_{};
+    wasm::Global failure_length_{};
+    /// Each rule for answers' state changes, in the model's order.
+    std::vector<std::size_t> answer_rule_transitions_;
     /// The most requests one call makes (at most 16, the checker sees to it).
     std::uint64_t most_requests_ = 0;
     wasm::Func reply_function_{};
@@ -1257,6 +1287,7 @@ void Lowering::plan_answers() {
         own.wire = std::string(m::reply_function);
         support(own, r.body, true);
         answer_transitions_ = std::max(answer_transitions_, own.transitions);
+        answer_rule_transitions_.push_back(own.transitions);
     }
     // The answer's event, and each state change.
     if (answer_transitions_ + 1 > max_build_events) {
@@ -1346,6 +1377,9 @@ void Lowering::plan() {
     plan_actions();
     plan_rules();
     plan_answers();
+    // From codegen 6 on, the rules for answers record their failures
+    // instead of refusing the answer (bo.md 6.11).
+    records_ = codegen_ >= 6 && requests_used_ && !model_.answers.empty();
     plan_charges();
     // The interface: the creation, each action that has a function, approve,
     // each time rule, and the reply (at most 256, spec section 15).
@@ -1377,24 +1411,47 @@ void Lowering::plan() {
                       {{"action", r.wire}, {"limit", std::to_string(max_build_events)}});
             }
         }
+        // An answer reports its event too: the ledger could never record an
+        // answer whose rule makes a bill past the limit.
+        for (std::size_t i = 0; i < answer_rule_transitions_.size(); ++i) {
+            const m::AnswerRule& r = model_.answers[i];
+            if (answer_rule_transitions_[i] + 1 == max_build_events && sets_bill(r.body)) {
+                error(r.span, "build.too-many-events",
+                      {{"action", std::string(m::reply_function)},
+                       {"limit", std::to_string(max_build_events)}});
+            }
+        }
     }
     since_used_ = m::uses_since(model_);
     if (!states_.empty()) {
         plan_finals();
     }
     // The globals the module will hold, within the profile's limit (the
-    // runtime's four included).
+    // runtime's four included), as emit adds them: a module past it is
+    // refused here, before any is added.
     std::size_t globals = 2 + 4 + roles_.size();
     for (const FieldSlot& slot : fields_) {
-        globals += pair_rep(slot.rep) ? 2U : 1U;
+        // Its value, a text's or a list's length, and whether a date that
+        // may hold none holds one.
+        globals += (pair_rep(slot.rep) ? 2U : 1U) + (slot.dated ? 1U : 0U);
     }
     globals += (previous_used_ ? 1U : 0U) + (proposals_ ? 8U : 0U) + (since_used_ ? 1U : 0U);
     globals += rules_.empty() ? 0 : 2 * rules_.size() + 5;
     globals += requests_used_ ? 6U : 0U;
+    globals += records_ ? 3U : 0U;
     if (bill_slot_) {
         globals += 9;
         for (const ChargeInfo& k : charges_) {
             globals += k.charge->per_document ? 3U : 4U;
+        }
+    }
+    if (parts_used_) {
+        // Parts issued, their amounts, and their recipients; and for each
+        // field `with` sets on them, its value (and length) and whether it
+        // was given.
+        globals += 3;
+        for (const auto& entry : part_fields_) {
+            globals += pair_rep(fields_[entry.first].rep) ? 3U : 2U;
         }
     }
     if (globals > vm::max_globals) {
@@ -1415,7 +1472,36 @@ std::uint32_t Lowering::intern(const ByteView bytes) {
 
 void Lowering::refuse(FunctionBuilder& b, const std::string_view reason) {
     b.u32(intern(reason)).u32(static_cast<std::uint32_t>(reason.size()));
+    if (rt_.recording()) {
+        // It returns while failures are recorded (6.11; from codegen 6 on).
+        b.call(rt_.get(Routine::fail_with));
+        return_zeros(b);
+        return;
+    }
     b.call(module_.host(wasm::Host::abort)).unreachable();
+}
+
+void Lowering::fail(FunctionBuilder& b, const rt::Reason reason) {
+    b.call(rt_.fail(reason));
+    if (rt_.recording()) {
+        return_zeros(b);
+    }
+}
+
+void Lowering::return_zeros(FunctionBuilder& b) {
+    for (const wasm::ValType type : module_.type_of(b.self()).results) {
+        if (type == I64) {
+            b.i64(0);
+        } else {
+            b.i32(0);
+        }
+    }
+    b.return_();
+}
+
+void Lowering::push_failed(FunctionBuilder& b) {
+    const rt::Runtime::Recording& r = *rt_.recording();
+    b.global_get(r.on).global_get(r.length).op(i32_eqz).op(i32_eqz).op(i32_and);
 }
 
 void Lowering::call_item(FunctionBuilder& b, const std::uint32_t key) {
@@ -1949,7 +2035,12 @@ wasm::Func Lowering::list_reader(const Rep element) {
     }
     b.get(item).get(item).call(item_end).get(item).op(i32_sub).return_();
     b.end(bad);
-    b.get(reason).get(length).call(module_.host(wasm::Host::abort)).unreachable();
+    if (rt_.recording()) {
+        b.get(reason).get(length).call(rt_.get(Routine::fail_with));
+        return_zeros(b);
+    } else {
+        b.get(reason).get(length).call(module_.host(wasm::Host::abort)).unreachable();
+    }
     module_.define(std::move(b));
     return f;
 }
@@ -2301,7 +2392,7 @@ wasm::Func Lowering::load_instance() {
     b.tee(instance).op(i32_eqz);
     {
         const Label none = b.if_();
-        b.call(rt_.fail(rt::Reason::input));
+        fail(b, rt::Reason::input);
         b.end(none);
     }
     b.get(instance);
@@ -2322,7 +2413,7 @@ wasm::Func Lowering::load_instance() {
             b.u32(static_cast<std::uint32_t>(i)).global_set(state_).br(found);
             b.end(same);
         }
-        b.call(rt_.fail(rt::Reason::input));
+        fail(b, rt::Reason::input);
         b.end(found);
     }
     b.get(st);
@@ -2379,7 +2470,7 @@ wasm::Func Lowering::load_instance() {
         b.tee(p).op(i32_eqz);
         {
             const Label missing = b.if_();
-            b.call(rt_.fail(rt::Reason::input));
+            fail(b, rt::Reason::input);
             b.end(missing);
         }
         b.get(p).load(i32_load8_u).u32(0xF6).op(i32_ne);
@@ -2397,7 +2488,7 @@ wasm::Func Lowering::load_instance() {
                 b.u32(static_cast<std::uint32_t>(i + 1)).global_set(previous_).br(found);
                 b.end(same);
             }
-            b.call(rt_.fail(rt::Reason::input));
+            fail(b, rt::Reason::input);
             b.end(found);
             b.end(some);
         }
@@ -2410,7 +2501,7 @@ wasm::Func Lowering::load_instance() {
         b.tee(p).op(i32_eqz);
         {
             const Label missing = b.if_();
-            b.call(rt_.fail(rt::Reason::input));
+            fail(b, rt::Reason::input);
             b.end(missing);
         }
         b.get(p).global_set(bill_old_);
@@ -2448,7 +2539,7 @@ wasm::Func Lowering::load_instance() {
         b.get(fired).load(i32_load8_u).u32(0xE0).op(i32_and).u32(0xA0).op(i32_ne).op(i32_or);
         {
             const Label other = b.if_();
-            b.call(rt_.fail(rt::Reason::input));
+            fail(b, rt::Reason::input);
             b.end(other);
         }
         for (const RuleInfo& rule : rules_) {
@@ -2457,7 +2548,7 @@ wasm::Func Lowering::load_instance() {
             b.tee(p).op(i32_eqz);
             {
                 const Label missing = b.if_();
-                b.call(rt_.fail(rt::Reason::input));
+                fail(b, rt::Reason::input);
                 b.end(missing);
             }
             b.get(p).load(i32_load8_u).u32(0xF6).op(i32_ne);
@@ -2477,7 +2568,7 @@ wasm::Func Lowering::load_instance() {
         b.get(p).load(i32_load8_u).u32(0xE0).op(i32_and).u32(0x80).op(i32_ne).op(i32_or);
         {
             const Label other = b.if_();
-            b.call(rt_.fail(rt::Reason::input));
+            fail(b, rt::Reason::input);
             b.end(other);
         }
         b.get(p).global_set(pending_);
@@ -2677,7 +2768,7 @@ wasm::Func Lowering::write_accept() {
         b.u32(static_cast<std::uint32_t>(max_state_size)).op(i32_gt_u);
         {
             const Label large = b.if_();
-            b.call(rt_.fail(rt::Reason::output));
+            fail(b, rt::Reason::output);
             b.end(large);
         }
         b.cap_end(max_state_size);
@@ -2877,6 +2968,14 @@ wasm::Func Lowering::write_accept() {
         b.u32(rt::layout::output_base).get(*start).u32(rt::layout::output_base).op(i32_sub);
         out_raw(b, most_requests_ * (m::max_request_params + 128));
         b.end(some);
+        if (rt_.recording()) {
+            // A failure recorded on the way: no output yet, so that the
+            // answer can be written again without its rule (6.11).
+            push_failed(b);
+            const Label failed = b.if_();
+            b.return_();
+            b.end(failed);
+        }
         b.get(*start).call(rt_.get(Routine::out_finish_at));
     } else {
         b.call(rt_.get(Routine::out_finish));
@@ -3652,6 +3751,14 @@ void Lowering::statements(Ctx& c, const std::vector<m::Statement>& list) {
             too_large_ = true;
             return;
         }
+        if (c.recorded) {
+            // A failure recorded: the rule stops before its next line, and
+            // the reply puts back what it changed (6.11).
+            b.global_get(failure_length_);
+            const Label failed = b.if_();
+            b.return_();
+            b.end(failed);
+        }
         std::visit(
             Overloaded{
                 [&](const m::Requires& r) { requirement(c, r); },
@@ -3729,7 +3836,12 @@ void Lowering::requirement(Ctx& c, const m::Requires& r) {
         const Label failed = b.if_();
         const std::string prefix = "bo:requires " + c.wire + " ";
         b.u32(intern(prefix)).u32(static_cast<std::uint32_t>(prefix.size())).i64(number);
-        b.call(rt_.get(Routine::fail_numbered)).unreachable();
+        b.call(rt_.get(Routine::fail_numbered));
+        if (rt_.recording()) {
+            return_zeros(b);
+        } else {
+            b.unreachable();
+        }
         b.end(failed);
     }
     if (guard) {
@@ -3827,6 +3939,14 @@ void Lowering::shift(Ctx& c, const m::Expr& duration, const bool earlier) {
         b.i64(model_.utc_offset_ms).call(rt_.get(Routine::add_months));
     } else {
         b.call(rt_.get(Routine::add));
+        fixed_shift_check(b);
+    }
+}
+
+void Lowering::fixed_shift_check(FunctionBuilder& b) {
+    // A time moved by days is a date too (5.5; from codegen 6 on).
+    if (codegen_ >= 6) {
+        b.i64(model_.utc_offset_ms).call(rt_.get(Routine::check_date));
     }
 }
 
@@ -3848,6 +3968,7 @@ void Lowering::moment(Ctx& c, const m::Trigger& trigger) {
             shift(c, *trigger.value, false);
         } else {
             b.i64(static_cast<std::int64_t>(day_ms)).call(rt_.get(Routine::add));
+            fixed_shift_check(b);
         }
         return;
     case m::TriggerKind::held:
@@ -4171,10 +4292,114 @@ void Lowering::emit_reply(const wasm::Func f) {
     b.get(kind_n).global_set(answer_kind_length_);
     b.get(id).global_set(answer_id_);
     b.get(status).global_set(answer_status_);
-    // The rule for it: done (1), failed (2), expired (3; a rule for failures
-    // takes it unless one is for expiry, R33).
+    if (!records_) {
+        // Codegens 4 and 5: the rule in this function, whose refusals refuse
+        // the answer.
+        answer_rules(c, kind, kind_n, status);
+        finish(b);
+        module_.define(std::move(b));
+        return;
+    }
+    // From codegen 6 on, a rule for answers never refuses the answer
+    // (6.11). Everything it can change is saved here first: the fields its
+    // lines set, the state, the events so far, the previous state and since,
+    // the bill and its charges, the requests drafted, and where the output
+    // goes. Then the rule runs in a function of its own with failures
+    // recorded: the first failure keeps its reason, and each routine and the
+    // rule return from it. The accept is written next, still recording, so
+    // that a state or an output too large is such a failure too, and it
+    // hands over nothing once one is recorded. If one was, recording stops,
+    // what was saved is put back, and the answer is accepted as the
+    // instance was, its event carrying the reason.
+    std::set<std::size_t> set_fields;
+    const auto collect = [&](const std::vector<m::Statement>& list, const auto& self) -> void {
+        for (const m::Statement& st : list) {
+            if (const auto* assign = std::get_if<m::Set>(&st.node)) {
+                set_fields.insert(
+                    field_index_.at(m::key(assign->target.concept_entry, assign->target.name)));
+            } else if (const auto* branch = std::get_if<m::If>(&st.node)) {
+                self(branch->then, self);
+                self(branch->otherwise, self);
+            } else if (const auto* repeat = std::get_if<m::Each>(&st.node)) {
+                self(repeat->body, self);
+            }
+        }
+    };
     for (const m::AnswerRule& r : model_.answers) {
-        b.get(kind).get(kind_n).u32(intern(r.kind)).u32(static_cast<std::uint32_t>(r.kind.size()));
+        collect(r.body, collect);
+    }
+    std::vector<std::pair<wasm::Global, Local>> saved;
+    const auto save = [&](const wasm::Global g) {
+        const Local kept = b.local(module_.global_type(g));
+        b.global_get(g).set(kept);
+        saved.emplace_back(g, kept);
+    };
+    for (const std::size_t index : set_fields) {
+        const FieldSlot& slot = fields_[index];
+        save(slot.first);
+        if (pair_rep(slot.rep)) {
+            save(slot.second);
+        }
+        if (slot.dated) {
+            save(slot.present);
+        }
+    }
+    save(state_);
+    save(events_);
+    if (previous_used_) {
+        save(previous_);
+    }
+    if (since_used_) {
+        save(since_);
+    }
+    if (bill_slot_) {
+        for (const wasm::Global g : {bill_new_, bill_at_, bill_length_, bill_time_, bill_price_,
+                                     bill_total_, bill_divisor_}) {
+            save(g);
+        }
+        for (const ChargeInfo& k : charges_) {
+            save(k.applies);
+            save(k.rate);
+            save(k.amount);
+            if (!k.charge->per_document) {
+                save(k.line);
+            }
+        }
+    }
+    save(requests_);
+    save(rt_.var(rt::Var::out));
+    b.i32(1).global_set(failures_on_);
+    for (const Local l :
+         {kind, kind_n, status, c.result_p, c.result_n, c.reason_p, c.reason_n, c.final_before}) {
+        b.get(l);
+    }
+    b.call(answer_rules_function());
+    b.global_get(failure_length_).op(i32_eqz);
+    {
+        const Label ran = b.if_();
+        b.call(write_accept());
+        b.end(ran);
+    }
+    b.i32(0).global_set(failures_on_);
+    b.global_get(failure_length_);
+    {
+        const Label refused = b.if_();
+        for (const auto& [g, kept] : saved) {
+            b.get(kept).global_set(g);
+        }
+        finish(b);
+        b.end(refused);
+    }
+    module_.define(std::move(b));
+}
+
+void Lowering::answer_rules(Ctx& c, const Local kind, const Local kind_length, const Local status) {
+    // The rule for the answer: done (1), failed (2), expired (3; a rule for
+    // failures takes it unless one is for expiry, R33).
+    FunctionBuilder& b = *c.b;
+    for (const m::AnswerRule& r : model_.answers) {
+        b.get(kind).get(kind_length);
+        b.u32(intern(r.kind)).u32(static_cast<std::uint32_t>(r.kind.size()));
         equal_bytes(b, r.kind.size());
         switch (r.outcome) {
         case m::Outcome::done:
@@ -4195,13 +4420,34 @@ void Lowering::emit_reply(const wasm::Func f) {
         statements(c, r.body);
         b.end(applies);
     }
-    finish(b);
+}
+
+wasm::Func Lowering::answer_rules_function() {
+    const wasm::Func f = module_.declare({{I32, I32, I32, I32, I32, I32, I32, I32}, {}});
+    FunctionBuilder b = module_.begin(f);
+    Ctx c;
+    c.b = &b;
+    c.wire = std::string(m::reply_function);
+    c.signer = b.local(I32);
+    c.t32 = b.local(I32);
+    c.t64 = b.local(I64);
+    c.t64b = b.local(I64);
+    c.answer = true;
+    c.recorded = true;
+    c.result_p = b.param(3);
+    c.result_n = b.param(4);
+    c.reason_p = b.param(5);
+    c.reason_n = b.param(6);
+    c.final_before = b.param(7);
+    answer_rules(c, b.param(0), b.param(1), b.param(2));
     module_.define(std::move(b));
+    return f;
 }
 
 void Lowering::write_answer_event(FunctionBuilder& b) {
     // ["answer", {"kind": KIND, "status": "done" / "failed" / "expired",
-    // "request": ID}], keys in canonical order.
+    // "request": ID}], keys in canonical order; from codegen 6 on, with
+    // "refused": REASON when the rule for the answer changed nothing.
     b.global_get(answer_event_);
     const Label some = b.if_();
     const wasm::Func head = rt_.get(Routine::out_head);
@@ -4209,11 +4455,27 @@ void Lowering::write_answer_event(FunctionBuilder& b) {
     constexpr std::string_view answer_event = "answer";
     b.u32(intern(answer_event)).u32(static_cast<std::uint32_t>(answer_event.size()));
     out_text(b, answer_event.size());
-    b.i32(5).i64(3).call(head);
+    b.i32(5).i64(3);
     std::vector<std::pair<Bytes, int>> keys{
         {text_cbor("kind"), 0}, {text_cbor("request"), 1}, {text_cbor("status"), 2}};
+    if (rt_.recording()) {
+        // "refused": the reason the rule for the answer would have refused
+        // the call with, when it changed nothing (6.11; from codegen 6 on).
+        b.global_get(failure_length_).op(i32_eqz).op(i32_eqz).op(i64_extend_i32_u).op(i64_add);
+        keys.emplace_back(text_cbor("refused"), 3);
+    }
+    b.call(head);
     std::ranges::sort(keys);
     for (const auto& [key, which] : keys) {
+        if (which == 3) {
+            b.global_get(failure_length_);
+            const Label refused = b.if_();
+            out_key(b, key);
+            b.global_get(failure_at_).global_get(failure_length_);
+            out_text(b, vm::max_abort_reason);
+            b.end(refused);
+            continue;
+        }
         out_key(b, key);
         if (which == 0) {
             b.global_get(answer_kind_).global_get(answer_kind_length_);
@@ -4476,6 +4738,7 @@ void Lowering::reference(Ctx& c, const m::Expr& e) {
         now(c);
         due(c);
         b.i64(static_cast<std::int64_t>(day_ms)).call(rt_.get(Routine::add));
+        fixed_shift_check(b);
         b.op(i64_ge_s);
         if (model_.due == m::DueKind::period) {
             // Not before a service is subscribed to.
@@ -4830,6 +5093,14 @@ void Lowering::emit() {
         for (wasm::Global* g : {&requests_, &answer_event_, &answer_kind_, &answer_kind_length_,
                                 &answer_id_, &answer_status_}) {
             *g = module_.add_global(I32, 0);
+        }
+        if (records_) {
+            // The rules for answers record their failures (6.11): before
+            // any routine is written, since each is written knowing it.
+            for (wasm::Global* g : {&failures_on_, &failure_at_, &failure_length_}) {
+                *g = module_.add_global(I32, 0);
+            }
+            rt_.record_failures(failures_on_, failure_at_, failure_length_);
         }
     }
     if (parts_used_) {

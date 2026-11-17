@@ -1479,6 +1479,39 @@ TEST_CASE("bo build: what this version does not compile yet", "[bo][build]") {
         events += std::format("  s{} -> s{}\n", i, i + 1);
     }
     CHECK(build_codes(events) == "build.too-many-events");
+    // An answer reports its event, each state change of its rule, and the
+    // bill the rule makes: 64 at most, or the ledger could never record it.
+    const auto answered = [&](const int changes, const bool bill) {
+        std::string source = head + "thing R\n  invoice list HKD\n\ncan go by we\n"
+                                    "  request sync within 1 day\nwhen sync done\n";
+        if (bill) {
+            source += "  invoice = (HKD 1, HKD 2)\n";
+        }
+        for (int i = 0; i < changes; ++i) {
+            source += std::format("  -> s{}\n", i);
+        }
+        return source;
+    };
+    CHECK(vm::load(build_text(answered(63, false)).code).has_value());
+    CHECK(vm::load(build_text(answered(62, true)).code).has_value());
+    CHECK(build_codes(answered(63, true)) == "build.too-many-events");
+    // The globals a module holds, within the profile's 1,024: here 12 and
+    // 5 for each text field the parts get (its value and length on the
+    // instance and on the parts, and whether it was given). 203 such fields
+    // would need 1,027: refused before any code is written.
+    const auto parted = [](const int fields) {
+        std::string source = "contract C\nparties we\n\nthing R\n  amount HKD\n  holder we\n";
+        std::string with;
+        for (int i = 0; i < fields; ++i) {
+            source += std::format("  t{} text\n", i);
+            with += std::format("{}t{} = \"x\"", i == 0 ? "" : ", ", i);
+        }
+        return source +
+               "\ncan divide by we with parts, recipients\n  create parts to recipients with " +
+               with + "\n";
+    };
+    CHECK(vm::load(build_text(parted(202)).code).has_value());
+    CHECK(build_codes(parted(203)) == "build.too-large");
     std::string texts = head + "can go by we\n";
     for (int i = 0; i < 40; ++i) {
         texts += std::format("  if now > 2027-01-0{}\n    reject \"{} {}\"\n", 1 + i % 9, i,

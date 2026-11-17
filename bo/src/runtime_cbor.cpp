@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 
 #include <kanhe/bo/runtime.hpp>
 #include <kanhe/bo/wasm.hpp>
@@ -336,9 +337,25 @@ void define_out_reserve(Runtime& rt, FunctionBuilder& b) {
     const Local n = b.param(0);
     const Local at = b.local(I32);
     const wasm::Global out = rt.var(Var::out);
+    const std::optional<Runtime::Recording>& recording = rt.recording();
+    if (recording) {
+        // Once a failure is recorded, output goes to the sink, and what was
+        // written stays where it is, to be dropped (bo.md 6.11).
+        push_failed(rt, b);
+        const Label failed = b.if_();
+        b.u32(recording->sink).return_();
+        b.end(failed);
+    }
     b.global_get(out).set(at);
     b.get(n).u32(layout::output_end).get(at).op(i32_sub).op(i32_gt_u);
-    fail_if(rt, b, Reason::output);
+    if (recording) {
+        const Label full = b.if_();
+        b.call(rt.fail(Reason::output));
+        b.u32(recording->sink).return_();
+        b.end(full);
+    } else {
+        fail_if(rt, b, Reason::output);
+    }
     b.get(at).get(n).op(i32_add).global_set(out);
     b.get(at);
 }
@@ -408,6 +425,18 @@ void define_out_raw(Runtime& rt, FunctionBuilder& b) {
     b.sizes({layout::output_end - layout::output_base});
     const Local p = b.param(0);
     const Local n = b.param(1);
+    if (rt.recording()) {
+        // Nothing is copied to the sink.
+        const Local at = b.local(I32);
+        b.get(n).call(rt.get(Routine::out_reserve), {b.size(0)}).set(at);
+        push_failed(rt, b);
+        const Label failed = b.if_();
+        b.return_();
+        b.end(failed);
+        b.get(at).get(p).get(n);
+        b.bulk(memory_copy, b.size(0));
+        return;
+    }
     b.get(n).call(rt.get(Routine::out_reserve), {b.size(0)}).get(p).get(n);
     b.bulk(memory_copy, b.size(0));
 }
@@ -441,6 +470,13 @@ void define_out_close(Runtime& rt, FunctionBuilder& b) {
     b.global_get(out).get(mark).op(i32_sub).set(length);
     b.get(count).call(rt.get(Routine::out_head_size)).tee(size);
     b.call(rt.get(Routine::out_reserve), {9}).get(size).op(i32_add).set(end);
+    if (rt.recording()) {
+        // Output goes to the sink: nothing is moved.
+        push_failed(rt, b);
+        const Label failed = b.if_();
+        b.return_();
+        b.end(failed);
+    }
     b.get(mark).get(size).op(i32_add).get(mark).get(length).bulk(memory_copy, b.size(0));
     b.get(mark).global_set(out);
     // The head again, written where it goes: its bytes were reserved above.

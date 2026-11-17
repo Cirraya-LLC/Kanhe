@@ -46,7 +46,7 @@ namespace kanhe::bo::wasm {
 /// whenever any emitted byte changes. 4 is the first released; 1 to 3 came
 /// before it and are not written. The compiler writes its own, and carries
 /// the released ones from oldest_codegen on, so that their deploys rebuild.
-inline constexpr std::uint32_t codegen_version = 5;
+inline constexpr std::uint32_t codegen_version = 6;
 inline constexpr std::uint32_t oldest_codegen = 4;
 
 enum class ValType : std::uint8_t { i32 = 0x7F, i64 = 0x7E };

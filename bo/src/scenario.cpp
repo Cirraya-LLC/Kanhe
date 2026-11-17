@@ -448,7 +448,14 @@ void Runner::accept(const m::Step& step, const protocol::ContractAccept& a, Ledg
         const cbor::Value* status = e.data.find("status");
         if (e.name == "answer" && kind != nullptr && kind->as_text() != nullptr &&
             status != nullptr && status->as_text() != nullptr) {
-            r.events.push_back("answer:" + *kind->as_text() + ":" + *status->as_text());
+            std::string answered = "answer:" + *kind->as_text() + ":" + *status->as_text();
+            // A rule for the answer that would have refused the call, and
+            // changed nothing (from codegen 6 on, bo.md 6.11).
+            if (const cbor::Value* refused = e.data.find("refused");
+                refused != nullptr && refused->as_text() != nullptr) {
+                answered += " refused \"" + *refused->as_text() + "\"";
+            }
+            r.events.push_back(std::move(answered));
             continue;
         }
         // A time rule's event: its function, and how late the call came.

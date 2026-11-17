@@ -22,6 +22,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
@@ -33,6 +34,7 @@
 #include <kanhe/bo/pack.hpp>
 #include <kanhe/bo/scenario.hpp>
 #include <kanhe/bo/values.hpp>
+#include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/vm.hpp>
 #include <kanhe/crypto/openssl.hpp>
@@ -90,6 +92,36 @@ Tested tested(std::string_view source) {
 std::string results_of(std::string_view source) {
     const Tested t = tested(source);
     return dump(*t.compiled.model, t.results);
+}
+
+/// An answer a step gave, given again with a result of `size` bytes (more
+/// than a test step's text may hold), on `code`.
+struct Rerun {
+    protocol::ContractInput input;
+    vm::Outcome run;
+};
+
+Rerun answer_again(const Bytes& code, const StepResult& step, const std::size_t size) {
+    REQUIRE(!step.calls.empty());
+    Rerun out;
+    out.input = step.calls.back().input;
+    REQUIRE(out.input.request.has_value());
+    cbor::Map arguments;
+    arguments.push_back({cbor::Value::text("result"), cbor::Value::text(std::string(size, 'x'))});
+    out.input.arguments = cbor::Value::map(std::move(arguments));
+    const auto bytes = protocol::encode_contract_input(out.input);
+    REQUIRE(bytes.has_value());
+    const auto module = vm::load(code);
+    REQUIRE(module.has_value());
+    auto run = vm::run(*module, *bytes, provider(), crypto::HashAlg::sha256);
+    REQUIRE(run.has_value());
+    out.run = std::move(*run);
+    return out;
+}
+
+/// True if the step's events hold `event`.
+bool has_event(const StepResult& step, std::string_view event) {
+    return std::ranges::find(step.events, event) != step.events.end();
 }
 
 /// The golden cases: a name and the source it runs.
@@ -293,6 +325,175 @@ test "a date moved by days stays a date"
     CHECK_FALSE(ran.tests[0].passed);
     CHECK_FALSE(ran.tests[1].passed);
     CHECK(old.build->code != t.compiled.build->code);
+}
+
+TEST_CASE("bo test: a time a condition or a rule moves by days stays a date", "[bo][test]") {
+    // 30 days before 0001-01-10 is in the year 0, and a day or three after
+    // 9999-12-31 in the year 10000: computing them refuses the call (spec
+    // section 5.5), as a calendar duration's always did.
+    const std::string source = R"(contract Window
+parties we
+
+thing W
+  due date
+
+can look by we
+  requires 30 days before due
+  -> seen
+can inspect by we
+  requires overdue
+  -> noticed
+
+when overdue 3 days
+  -> flagged
+
+test "times within the years 1 to 9999"
+  we create with due = 2026-01-20
+  we look -> seen
+  keeper flagged at 2026-01-23 -> flagged
+  we inspect -> noticed
+test "before the year 1"
+  we create with due = 0001-01-10
+  we look -> refused "bo:date"
+test "after the year 9999"
+  we create with due = 9999-12-31
+  keeper flagged -> refused "bo:date"
+  we inspect -> refused "bo:date"
+)";
+    const Tested t = tested(source);
+    REQUIRE(t.results.tests.size() == 3);
+    CHECK(t.results.tests[0].passed);
+    CHECK(t.results.tests[1].passed);
+    CHECK(t.results.tests[2].passed);
+    // Codegen 5, carried so that its deploys rebuild, compared such times
+    // as they were: the condition held, and the rule's time had not come.
+    const Compiled old = compile(source, official_set(), CompileOptions{.codegen = 5});
+    REQUIRE(old.build);
+    const TestResults ran = run_tests(*old.model, *old.build, provider());
+    REQUIRE(ran.tests.size() == 3);
+    CHECK(ran.tests[0].passed);
+    CHECK_FALSE(ran.tests[1].passed);
+    CHECK_FALSE(ran.tests[2].passed);
+    CHECK(old.build->code != t.compiled.build->code);
+}
+
+TEST_CASE("bo test: a rule for answers that would refuse changes nothing, and the answer is "
+          "recorded",
+          "[bo][test]") {
+    // From codegen 6 on (spec bo.md 6.11): the rule sets the note, then
+    // overflows; the note is put back, and the answer closes its request
+    // with the reason in its event.
+    const std::string source = R"(contract Notice
+parties we
+
+thing T
+  tries number = 9223372036854775807
+  note text = ""
+
+can send by we
+  request notify within 1 day
+
+when notify fails
+  note = reason
+  tries = tries + 1
+
+test "an overflow in the rule"
+  we create
+  we send
+  executor notify fails with reason = "down" -> tries = 9223372036854775807, note = ""
+  executor notify fails -> refused
+)";
+    const Tested t = tested(source);
+    REQUIRE(t.results.tests.size() == 1);
+    const TestResult& current = t.results.tests[0];
+    CHECK(current.passed);
+    REQUIRE(current.steps.size() == 4);
+    CHECK(has_event(current.steps[2], "answer:notify:failed refused \"bo:overflow\""));
+    CHECK(current.steps[3].happened == Happened::no_request);
+    // Codegen 5, carried so that its deploys rebuild, refused the answer,
+    // and its request stayed open.
+    const Compiled old = compile(source, official_set(), CompileOptions{.codegen = 5});
+    REQUIRE(old.build);
+    const TestResults ran = run_tests(*old.model, *old.build, provider());
+    REQUIRE(ran.tests.size() == 1);
+    CHECK_FALSE(ran.tests[0].passed);
+    REQUIRE(ran.tests[0].steps.size() >= 3);
+    CHECK(ran.tests[0].steps[2].happened == Happened::refused);
+    CHECK(ran.tests[0].steps[2].reason == "bo:overflow");
+    CHECK(old.build->code != t.compiled.build->code);
+}
+
+TEST_CASE("bo test: a service's rules for answers that would refuse change nothing", "[bo][test]") {
+    // The standard terms' rules (R34, R35). A payment received when the
+    // service is suspended and paid until 9999-12-24 moves the due date to
+    // 9999-12-31, and asks whether the service is still overdue: from the
+    // day after, which is no date. And an invoice whose result is too long
+    // for the collection's params (4,096 bytes).
+    const std::string source = R"(use commerce
+use services
+contract Hosting
+parties we, customer
+
+service Plan
+  price weekly HKD 10
+
+can subscribe by customer
+when overdue 1 day suspend
+
+test "a payment that would ask about a day past 9999"
+  we create at 9999-12-24
+  customer subscribe -> active, paid until = 9999-12-24, billed until = 9999-12-31
+  executor invoice done with result = "INV-1"
+  keeper suspend at 9999-12-25 -> suspended
+  executor collect done -> suspended, paid until = 9999-12-24
+test "an invoice"
+  we create at 2027-01-10
+  customer subscribe -> active, paid until = 2027-01-10, billed until = 2027-01-17
+  executor invoice done with result = "INV-1"
+)";
+    const Tested t = tested(source);
+    REQUIRE(t.results.tests.size() == 2);
+    CHECK(t.results.tests[0].passed);
+    CHECK(t.results.tests[1].passed);
+    REQUIRE(t.results.tests[0].steps.size() == 5);
+    CHECK(has_event(t.results.tests[0].steps[4], "answer:collect:done refused \"bo:date\""));
+    CHECK(t.results.tests[0].steps[4].requests.empty());
+    // The invoice again, its result 4,100 bytes: the collection's params
+    // would be too large, so the answer is recorded and changes nothing.
+    REQUIRE(t.results.tests[1].steps.size() == 3);
+    const Rerun again = answer_again(t.compiled.build->code, t.results.tests[1].steps[2], 4100);
+    REQUIRE(again.run.ok());
+    const auto output = protocol::decode_contract_output(again.run.output, again.input.home);
+    REQUIRE(output.has_value());
+    const auto* accept = std::get_if<protocol::ContractAccept>(&*output);
+    REQUIRE(accept != nullptr);
+    REQUIRE(again.input.instance.has_value());
+    CHECK(std::ranges::equal(accept->state.bytes(), again.input.instance->state.bytes()));
+    CHECK(accept->status == again.input.instance->status);
+    CHECK(accept->requests.empty());
+    REQUIRE(accept->events.size() == 1);
+    CHECK(accept->events[0].name == "answer");
+    const cbor::Value* refused = accept->events[0].data.find("refused");
+    REQUIRE(refused != nullptr);
+    REQUIRE(refused->as_text() != nullptr);
+    CHECK(*refused->as_text() == "bo:request collect");
+    // Codegen 5 accepted the payment, paying it until 9999-12-31 and
+    // comparing the day after as it was (the service stays suspended); and
+    // it refused the invoice's answer, which left its request open.
+    const Compiled old = compile(source, official_set(), CompileOptions{.codegen = 5});
+    REQUIRE(old.build);
+    const TestResults ran = run_tests(*old.model, *old.build, provider());
+    REQUIRE(ran.tests.size() == 2);
+    CHECK_FALSE(ran.tests[0].passed);
+    REQUIRE(ran.tests[0].steps.size() == 5);
+    CHECK(ran.tests[0].steps[4].happened == Happened::accepted);
+    CHECK(ran.tests[0].steps[4].state == "suspended");
+    CHECK(ran.tests[1].passed);
+    REQUIRE(ran.tests[1].steps.size() == 3);
+    const Rerun before = answer_again(old.build->code, ran.tests[1].steps[2], 4100);
+    CHECK(before.run.trap == vm::Trap::aborted);
+    CHECK(std::string(before.run.abort_reason.begin(), before.run.abort_reason.end()) ==
+          "bo:request collect");
 }
 
 TEST_CASE("bo test: a step expects the values of fields after its call", "[bo][test]") {

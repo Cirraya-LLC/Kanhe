@@ -26,7 +26,9 @@
 ///
 /// Refusals. A routine that cannot go on aborts the call (host `abort`) with
 /// a reason "bo:CODE" (see Reason), which tools render through the language
-/// packs.
+/// packs. In a module that records failures (Runtime::record_failures, from
+/// codegen 6 on), a failure while recording is on keeps its reason instead
+/// and returns zeros from where it happened.
 namespace kanhe::bo::runtime {
 
 /// Where a compiled contract keeps what, in its 16 pages (1 MiB). The memory
@@ -242,8 +244,14 @@ enum class Routine : std::uint8_t {
 
     /// [i64 time, i64 offset] -> [i64 time]: the time, if its local date is
     /// in the years 1 to 9999; bo:date otherwise (a date moved by a fixed
-    /// duration, from codegen 5 on).
+    /// duration, from codegen 5 on; a time a rule's event, a condition on
+    /// time, or a request's deadline moves by one, from codegen 6 on).
     check_date,
+
+    /// [i32 reason, i32 length] -> []: aborts with the reason, a text in
+    /// memory (a refusal compiled code words itself, in a module that records
+    /// failures; elsewhere it calls `abort` directly).
+    fail_with,
 };
 
 /// The runtime's globals.
@@ -286,6 +294,27 @@ public:
     /// The routines emitted so far, in order.
     [[nodiscard]] const std::vector<Routine>& emitted() const noexcept { return emitted_; }
 
+    /// What a module that records failures keeps.
+    struct Recording {
+        /// i32: 1 while failures are recorded instead of refusing the call.
+        wasm::Global on;
+        /// i32 each: the first failure's reason (a text in memory) and its
+        /// length, 0 while there is none.
+        wasm::Global at;
+        wasm::Global length;
+        /// 16 bytes of scratch where output goes once a failure is recorded
+        /// (what the call wrote so far stays, to be dropped).
+        std::uint32_t sink = 0;
+    };
+    /// Makes the module record failures (from codegen 6 on, for a contract's
+    /// rules for answers, bo.md 6.11): while `on` is 1, a failure keeps its
+    /// reason, the first one only, instead of aborting; the routine it
+    /// happened in returns zeros, and so does each routine above it, which
+    /// sees the failure and stops writing output. Before any routine is
+    /// emitted.
+    void record_failures(wasm::Global on, wasm::Global at, wasm::Global length);
+    [[nodiscard]] const std::optional<Recording>& recording() const noexcept { return recording_; }
+
 private:
     wasm::ModuleWriter* module_;
     std::vector<std::optional<wasm::Func>> functions_;
@@ -294,6 +323,7 @@ private:
     std::optional<std::uint32_t> call_table_;
     std::optional<std::uint32_t> needs_area_;
     std::optional<std::uint32_t> number_buffer_;
+    std::optional<Recording> recording_;
 };
 
 } // namespace kanhe::bo::runtime
