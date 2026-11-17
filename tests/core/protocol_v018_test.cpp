@@ -143,6 +143,44 @@ TEST_CASE("v0.18 sources: where one stood at a time", "[protocol][vectors][v018]
     }
 }
 
+TEST_CASE("v0.18 sources: what does not decode does not encode", "[protocol][v018]") {
+    auto id = [](std::uint8_t b) {
+        return *protocol::to_id(kanhe::Bytes(32, b));
+    };
+    protocol::Statement s;
+    s.ledger_id = id(1);
+    s.actor_id = id(2);
+    s.issued_at = 1'800'000'000'000;
+    protocol::RecordRegisterBody b;
+    b.record_type = "example.org.report/1";
+    b.field_root = kanhe::Bytes(32, 3);
+    b.field_count = 1;
+    const protocol::Source one{id(1), id(4)};
+    b.sources = {one};
+    s.body = b;
+    const auto fine = protocol::encode_payload(s);
+    REQUIRE(fine);
+    // Named twice, or more than 64: refused before any bytes are made.
+    b.sources = {one, protocol::Source{id(5), id(4)}, one};
+    s.body = b;
+    const auto twice = protocol::encode_payload(s);
+    REQUIRE_FALSE(twice);
+    CHECK(twice.error().code == kanhe::Errc::invalid_argument);
+    CHECK(std::string(twice.error().detail).find("twice") != std::string::npos);
+    b.sources.clear();
+    for (std::uint8_t i = 0; i < 65; ++i) {
+        b.sources.push_back({id(1), id(static_cast<std::uint8_t>(10 + i))});
+    }
+    s.body = b;
+    const auto many = protocol::encode_payload(s);
+    REQUIRE_FALSE(many);
+    CHECK(many.error().code == kanhe::Errc::invalid_argument);
+    CHECK(std::string(many.error().detail).find("at most 64") != std::string::npos);
+    b.sources.pop_back();
+    s.body = b;
+    CHECK(protocol::encode_payload(s));
+}
+
 TEST_CASE("v0.18 scripts and sources: a bank's log replayed, with every refusal in place",
           "[protocol][vectors][v018]") {
     for (const auto& ledger : vectors()["replay"]["ledgers"]) {

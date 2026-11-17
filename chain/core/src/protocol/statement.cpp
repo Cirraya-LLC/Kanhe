@@ -2,6 +2,7 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <span>
 #include <string>
 #include <utility>
 
@@ -262,6 +263,16 @@ Status check_body(const Body& body) {
                         if (b.attachments[i].name == b.attachments[j].name) {
                             return fail(Errc::malformed, "attachment names must be unique");
                         }
+                    }
+                }
+                // Sources (v0.18), as decoding takes them: at most 64, none
+                // twice, so that nothing encodes what does not decode.
+                if (b.sources.size() > max_sources) {
+                    return fail(Errc::limit_exceeded, "a registration names at most 64 sources");
+                }
+                for (std::size_t i = 0; i < b.sources.size(); ++i) {
+                    if (std::ranges::contains(std::span(b.sources).first(i), b.sources[i])) {
+                        return fail(Errc::malformed, "a registration names a source twice");
                     }
                 }
                 if (b.metadata) {

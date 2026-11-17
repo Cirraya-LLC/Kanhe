@@ -27,7 +27,12 @@ set -Eeuo pipefail
 trap 'echo "FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
 KANHE="${1:-kanhe}"
-case "$KANHE" in */*) KANHE="$(cd "$(dirname "$KANHE")" && pwd)/$(basename "$KANHE")" ;; esac
+# A path, made absolute; a name, found on PATH (bo and the others are beside it).
+case "$KANHE" in
+*/*) KANHE="$(cd "$(dirname "$KANHE")" && pwd)/$(basename "$KANHE")" ;;
+*) FOUND="$(command -v "$KANHE")" || { echo "$KANHE is not on PATH: give its path" >&2; exit 1; }
+   KANHE="$FOUND" ;;
+esac
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -n "${2:-}" ]; then
     WORK="$2"; KEEP=1; mkdir -p "$WORK"

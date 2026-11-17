@@ -31,7 +31,7 @@ Every script needs a `kanhe` built with the Bo compiler (GCC 16: the `gcc-*` pre
 the release build, and the Docker image have it):
 
 ```sh
-cmake --preset gcc-release && cmake --build --preset gcc-release --target kanhe
+cmake --preset gcc-release && cmake --build --preset gcc-release --target kanhe bo kanhe-console kanhe-index
 examples/lending/lending.sh build/gcc-release/bin/kanhe                  # in a temporary directory
 examples/lending/lending.sh build/gcc-release/bin/kanhe ./lending-demo   # keep the ledgers
 ```
