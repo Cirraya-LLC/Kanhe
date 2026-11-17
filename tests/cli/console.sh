@@ -161,6 +161,15 @@ PORT=$(json 'd["port"]' < public.json)
 # Signing in begins one; until then there are none, and none to revoke.
 [ "$(status_of GET "$PORT" /console/api/session "ledger.example.com")" = 401 ] ||
     fail "no session without a token"
+# Scripts and where records came from: read with a session, changed from the page.
+[ "$(status_of GET "$PORT" /console/api/scripts "ledger.example.com")" = 401 ] ||
+    fail "the scripts need a session"
+[ "$(status_of GET "$PORT" "/console/api/scripts/$(printf '%064d' 0)" "ledger.example.com")" = 401 ] ||
+    fail "a script needs a session"
+[ "$(status_of GET "$PORT" /console/api/sources "ledger.example.com")" = 401 ] ||
+    fail "the sources need a session"
+[ "$(status_of POST "$PORT" "/console/api/records/$(printf '%064d' 0)/source-proofs" \
+    "ledger.example.com")" = 403 ] || fail "keeping a source's proof comes from the console"
 run kanhe-console session list > out.txt
 grep -q "no console sessions" out.txt || fail "console session list"
 [ "$(run kanhe-console session list --json)" = "[]" ] || fail "console session list --json"

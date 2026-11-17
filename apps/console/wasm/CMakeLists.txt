@@ -16,5 +16,5 @@ target_link_options(kanhe_console_wasm PRIVATE
     -sALLOW_MEMORY_GROWTH=1
     -sDYNAMIC_EXECUTION=0
     -sFILESYSTEM=0
-    "-sEXPORTED_FUNCTIONS=_malloc,_free,_kanhe_describe_payload,_kanhe_presence_challenge,_kanhe_field_root,_kanhe_attachment_commitment,_kanhe_proof_reset,_kanhe_proof_attachment,_kanhe_proof_verify,_kanhe_free"
+    "-sEXPORTED_FUNCTIONS=_malloc,_free,_kanhe_describe_payload,_kanhe_presence_challenge,_kanhe_field_root,_kanhe_attachment_commitment,_kanhe_digest,_kanhe_proof_reset,_kanhe_proof_attachment,_kanhe_proof_verify,_kanhe_free"
     "-sEXPORTED_RUNTIME_METHODS=HEAPU8,UTF8ToString")

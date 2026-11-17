@@ -3,10 +3,11 @@
 
 // A thing's page and its proof. A record's page shows what the ledger holds
 // (its type, state, registrant, endorsements, public metadata, the files it
-// commits to) and, to those allowed, its private fields and kept files,
-// opened with the console's vault key and checked against the ledger. Its
-// proof is the node's evidence bundle plus the field disclosures and file
-// openings the person chose: what `kanhe export --disclose` writes.
+// commits to, and where it came from: its sources and its script) and, to
+// those allowed, its private fields and kept files, opened with the
+// console's vault key and checked against the ledger. Its proof is the
+// node's evidence bundle plus the field disclosures and file openings the
+// person chose: what `kanhe export --disclose` writes.
 
 #include <algorithm>
 #include <cctype>
@@ -168,6 +169,11 @@ http::Response Console::record_route(const http::Request& request) const {
     }
 
     std::optional<http::Response> answer;
+    // The page, and what it needs read outside the ledger's lock: the
+    // proofs kept of its sources on other ledgers.
+    std::optional<nlohmann::json> page;
+    std::vector<protocol::Source> sources;
+    std::optional<protocol::Id> own;
     served->read_state([&](const protocol::LedgerState& state) {
         const protocol::RecordState* r = state.record(*id);
         if (r == nullptr) {
@@ -266,33 +272,41 @@ http::Response Console::record_route(const http::Request& request) const {
         auto hex_or_null = [](const std::optional<protocol::CompactId>& v) {
             return v ? nlohmann::json(to_hex(v->bytes())) : nlohmann::json();
         };
-        answer = json(
-            200, {{"id", to_hex(id->bytes())},
-                  {"type", r->record_type},
-                  {"kind", kind_name.empty() ? nlohmann::json() : nlohmann::json(kind_name)},
-                  {"state", r->state},
-                  {"revoked", r->revoked},
-                  {"registrant", actor_view(state, r->registrant)},
-                  {"index", r->registered_at_index},
-                  {"field_count", r->field_count},
-                  {"metadata", metadata},
-                  {"files", files},
-                  {"endorsements", endorsements},
-                  {"history", r->history.size()},
-                  {"supersedes", hex_or_null(r->supersedes)},
-                  {"superseded_by", hex_or_null(r->superseded_by)},
-                  {"superseded_index",
-                   r->superseded_by ? nlohmann::json(r->superseded_at_index) : nlohmann::json()},
-                  {"versions", versions},
-                  {"claim", r->record_type == protocol::claim_type ? claim_view(state, *r, *body)
-                                                                   : nlohmann::json()},
-                  // "Confirm a condition": on a live document whose fields
-                  // this person may read.
-                  {"may_claim", vault.has_value() && !r->revoked && !r->superseded_by &&
-                                    protocol::find_record_type(r->record_type) == nullptr},
-                  {"private",
-                   {{"allowed", allowed}, {"locked", allowed && locked}, {"fields", fields}}}});
+        sources = body->sources;
+        own = state.ledger_id();
+        nlohmann::json view = {
+            {"id", to_hex(id->bytes())},
+            {"type", r->record_type},
+            {"kind", kind_name.empty() ? nlohmann::json() : nlohmann::json(kind_name)},
+            {"state", r->state},
+            {"revoked", r->revoked},
+            {"registrant", actor_view(state, r->registrant)},
+            {"index", r->registered_at_index},
+            {"field_count", r->field_count},
+            {"metadata", metadata},
+            {"files", files},
+            {"endorsements", endorsements},
+            {"history", r->history.size()},
+            {"supersedes", hex_or_null(r->supersedes)},
+            {"superseded_by", hex_or_null(r->superseded_by)},
+            {"superseded_index",
+             r->superseded_by ? nlohmann::json(r->superseded_at_index) : nlohmann::json()},
+            {"versions", versions},
+            {"claim", r->record_type == protocol::claim_type ? claim_view(state, *r, *body)
+                                                             : nlohmann::json()},
+            // "Confirm a condition": on a live document whose fields
+            // this person may read.
+            {"may_claim", vault.has_value() && !r->revoked && !r->superseded_by &&
+                              protocol::find_record_type(r->record_type) == nullptr},
+            {"private", {{"allowed", allowed}, {"locked", allowed && locked}, {"fields", fields}}},
+            // Where it came from (v0.18): its sources and its script.
+            {"made_from", made_from(state, *r, *body)}};
+        page = std::move(view);
     });
+    if (page) {
+        add_kept_proofs((*page)["made_from"], *id, sources, *own);
+        return json(200, *page);
+    }
     return std::move(*answer);
 }
 

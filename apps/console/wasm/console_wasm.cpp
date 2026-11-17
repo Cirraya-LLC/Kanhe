@@ -30,6 +30,7 @@
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/verifier/report.hpp>
@@ -134,7 +135,10 @@ Json describe(const protocol::Statement& s) {
              {"ledger", hex_or_null(s.ledger_id)},
              {"actor", hex_or_null(s.actor_id)},
              {"delegation", hex_or_null(s.delegation_id)},
-             {"issued_at", s.issued_at}};
+             {"issued_at", s.issued_at},
+             // The script its provenance names (v0.18), which the page
+             // compares with the one it shows.
+             {"script", hex_or_null(s.provenance ? s.provenance->script : std::nullopt)}};
     if (const auto* e = std::get_if<protocol::RecordEndorseBody>(&s.body)) {
         out["record"] = to_hex(e->record.bytes());
         out["role"] = e->role;
@@ -154,6 +158,30 @@ Json describe(const protocol::Statement& s) {
                                    {"commitment", to_hex(a.commitment)}});
         }
         out["attachments"] = attachments;
+        // The records it was made from (v0.18).
+        Json sources = Json::array();
+        for (const protocol::Source& source : g->sources) {
+            sources.push_back({{"ledger", to_hex(source.ledger.bytes())},
+                               {"record", to_hex(source.record.bytes())}});
+        }
+        out["sources"] = sources;
+        // A script's approval (v0.18): its files' digests, which the page
+        // compares with those it computed from the files.
+        if (g->record_type == protocol::script_type && g->metadata) {
+            if (const auto script = protocol::decode_script(*g->metadata)) {
+                Json files = Json::array();
+                for (const protocol::ScriptFile& f : script->files) {
+                    files.push_back(
+                        {{"path", f.path}, {"size", f.size}, {"digest", to_hex(f.digest)}});
+                }
+                out["script_approval"] = {
+                    {"name", script->name},
+                    {"version", script->version},
+                    {"files", files},
+                    {"deterministic", script->deterministic},
+                    {"runtime", script->runtime ? Json(*script->runtime) : Json()}};
+            }
+        }
         // A contract consent's terms, which the page compares with the
         // proposal it shows.
         if (g->record_type == protocol::contract_consent_type && g->metadata) {
@@ -351,6 +379,20 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_attachment_commitment(const std::uint8_t* conte
         return to_c_string({{"ok", false}, {"error", digest.error().detail}});
     }
     return to_c_string({{"ok", true}, {"commitment", to_hex(digest->bytes())}});
+}
+
+/// A file's digest under a ledger's hash (its COSE id), as hex: what a
+/// script's approval names for each of its files (v0.18).
+EMSCRIPTEN_KEEPALIVE char* kanhe_digest(const std::uint8_t* content, std::size_t size, int hash) {
+    const auto alg = crypto::hash_alg_from_cose(hash);
+    if (!alg) {
+        return to_c_string({{"ok", false}, {"error", "not a hash"}});
+    }
+    const auto digest = provider().digest(*alg, ByteView(content, size));
+    if (!digest) {
+        return to_c_string({{"ok", false}, {"error", digest.error().detail}});
+    }
+    return to_c_string({{"ok", true}, {"digest", to_hex(digest->bytes())}});
 }
 
 /// Verifying a proof, as `kanhe verify` and the standalone page do: the

@@ -13,15 +13,16 @@ compiler beside it.
 `kanhe-console status`, `open`, and `stop` manage it. A company serves it on its server with
 `kanhe-console run --listen 0.0.0.0:443 --tls-cert … --public-url https://ledger.example.com`
 (beyond this computer only over TLS, here or by a proxy in front). It sets a ledger up for
-one person or a team, signs people in, registers documents with their fields and files, shows a
-thing's page, shares and verifies proof, writes, tests, and deploys rules, creates things under
-them and acts on them, connects with other organizations (consents, documents, witnessing each
-other, public witnesses, relays), runs machines and AI agents, backs itself up, and approves each
-statement with a passkey. Not yet: Windows.
+one person or a team, signs people in, registers documents with their fields and files and what
+they were made from, approves the scripts that make records, shows a thing's page, shares and
+verifies proof, writes, tests, and deploys rules, creates things under them and acts on them,
+connects with other organizations (consents, documents, witnessing each other, public
+witnesses, relays), runs machines and AI agents, backs itself up, and approves each statement
+with a passkey. Not yet: Windows.
 
 | Path | What it holds |
 |---|---|
-| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, things and rules, parties, people, automation, backups, the witness, and the relay |
+| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, parties, people, automation, backups, the witness, and the relay |
 | `web/` | The page (`index.html`, `console.js`, `console.css`) and its catalogs in three languages (`web/i18n/`) |
 | `wasm/` | Its checks in the browser, built to WebAssembly (`tools/wasm/build.sh`) and embedded when `KANHE_CONSOLE_WASM_DIR` names them |
 | `cli/` | The `kanhe-console` program |
@@ -114,6 +115,27 @@ kanhe-console settings show
   kanhe-console certificate credential --type example.org.diploma/1 --out wallet \
       --url https://ledger.example.com
   ```
+- **Scripts.** A script is a program whose output becomes records (a report a device makes, an
+  executor's answers). The **Scripts** screen lists the ledger's scripts: name, version,
+  whether deterministic, what runs it, its files with their sizes and digests, who approved it
+  and when, and whether it was withdrawn since. An owner or an admin approves a new one, as
+  `kanhe script approve` does: they choose its files or its folder, the browser computes each
+  file's digest under the ledger's hash and sends only paths, sizes, and digests (never the
+  files), and the page checks in WebAssembly that the bytes it approves name exactly those; the
+  ledger takes a script only from a person in person, with the person verified. A script's page
+  checks files someone has against the approval, in the browser (the same, changed, missing, or
+  not in it; nothing is uploaded), and withdraws it with a reason and a tap (its record revoked,
+  as `script revoke`): records can then no longer name it.
+- **Where a record came from.** "Register a document" may name what the document was made from:
+  records of this ledger, chosen from its live ones, and records of other ledgers, by that
+  ledger's id and the record's, with the record's proof (that ledger's evidence of it), which the
+  console checks and keeps with the new record (as `record issue --source ... --source-proof`);
+  and the approved script that made it (`--script`). A record's page shows its sources, each as
+  it stood when the record was made and as it stands now (live, revoked, or replaced), the other
+  ledgers' organizations and standing as their kept proofs show them, with a warning when a
+  source was revoked or replaced since (the record itself stays as it is), and the script with
+  who approved it and whether it was withdrawn; a proof of a source on another ledger is kept
+  from there too (`record source prove`). The Verify screen reports the same from a proof.
 - **Claims.** "Confirm a condition" on a document's page confirms that its fields meet a
   condition without showing them ("monthly_salary is above HKD 30,000.00", not the salary): the
   console checks the conditions against the document's private data, the page checks the claim's

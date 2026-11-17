@@ -180,6 +180,11 @@ dl.facts dd {
     margin: 0;
 }
 
+/* A source revoked or replaced since, a script withdrawn. */
+dl.facts dd.bad {
+    color: var(--danger);
+}
+
 .id {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     overflow-wrap: anywhere;

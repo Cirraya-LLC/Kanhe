@@ -82,7 +82,7 @@ async function fits(page, name) {
 }
 
 const screens = ["#/", "#/things", "#/new", "#/reports", "#/kinds", "#/rules", "#/parties",
-                 "#/people", "#/automation", "#/exchange", "#/verify", "#/settings"];
+                 "#/people", "#/automation", "#/scripts", "#/exchange", "#/verify", "#/settings"];
 
 /// Opens a screen from the menu if it has an entry there, else by its
 /// address; the menu closes again, and the bar stays short.

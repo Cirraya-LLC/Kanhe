@@ -487,8 +487,22 @@ http::Response Console::route(const http::Request& request) const {
         return ready() ? instance_route(request)
                        : error(503, "unavailable", "this console keeps no users or sessions");
     }
+    if (request.path.starts_with("/console/api/records/") &&
+        request.path.ends_with("/source-proofs")) {
+        return ready() ? source_proof_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
     if (request.path.starts_with("/console/api/records/")) {
         return ready() ? record_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
+    if (request.path == "/console/api/scripts" ||
+        request.path.starts_with("/console/api/scripts/")) {
+        return ready() ? scripts_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
+    if (request.path == "/console/api/sources") {
+        return ready() ? sources_route(request)
                        : error(503, "unavailable", "this console keeps no users or sessions");
     }
     if (request.path == "/console/api/certificates/start") {

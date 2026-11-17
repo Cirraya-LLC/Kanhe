@@ -31,10 +31,12 @@
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/peers.hpp>
 #include <kanhe/node/record_files.hpp>
+#include <kanhe/node/sources.hpp>
 
 #include "responses.hpp"
 
@@ -218,6 +220,12 @@ http::Response Console::prepare_route(const http::Request& request) const {
         signer.role != Role::owner && signer.role != Role::admin) {
         return error(403, "forbidden", "only an owner or an admin approves people and machines");
     }
+    // A script is code that makes records: approving it is as deploying
+    // rules (and the ledger takes it only from a person in person).
+    if ((action == "script.approve" || action == "script.withdraw") && signer.role != Role::owner &&
+        signer.role != Role::admin) {
+        return error(403, "forbidden", "only an owner or an admin approves or withdraws scripts");
+    }
     const bool calling =
         action == "contract.create" || action == "contract.call" || action == "request.answer";
     if (served == nullptr || !submitter()) {
@@ -321,6 +329,21 @@ http::Response Console::prepare_route(const http::Request& request) const {
         auto& [registration, d] = std::get<0>(drafted);
         body = protocol::Body{std::move(registration)};
         draft = std::move(d);
+    } else if (action == "script.approve") {
+        // Its files' digests, as the browser computed them.
+        auto drafted = script_draft(intent);
+        if (auto* refused = std::get_if<http::Response>(&drafted)) {
+            return std::move(*refused);
+        }
+        auto& [registration, d] = std::get<0>(drafted);
+        body = protocol::Body{std::move(registration)};
+        draft = std::move(d);
+    } else if (action == "script.withdraw") {
+        auto withdrawal = script_withdrawal(intent);
+        if (auto* refused = std::get_if<http::Response>(&withdrawal)) {
+            return std::move(*refused);
+        }
+        body = protocol::Body{std::get<protocol::RecordRevokeBody>(std::move(withdrawal))};
     } else if (action == "record.register") {
         auto drafted = register_draft(intent, signer.user);
         if (auto* problem = std::get_if<std::string>(&drafted)) {
@@ -346,6 +369,7 @@ http::Response Console::prepare_route(const http::Request& request) const {
     const auto actor = id_of(user->actor);
     Prepared prepared;
     std::string problem;
+    std::string forbidden;
     nlohmann::json summary;
     // A call the contract would not take now: what its dry run decided.
     nlohmann::json declined;
@@ -359,6 +383,11 @@ http::Response Console::prepare_route(const http::Request& request) const {
         }
         protocol::Statement& s = prepared.statement;
         s.body = std::get<protocol::Body>(std::move(body));
+        // The script a registration came from, in its provenance (v0.18).
+        if (draft && draft->script) {
+            s.provenance = protocol::Provenance{};
+            s.provenance->script = *draft->script;
+        }
         std::optional<std::string> record_type;
         std::optional<protocol::Id> contract;
         if (const auto* e = std::get_if<protocol::RecordEndorseBody>(&s.body)) {
@@ -392,6 +421,12 @@ http::Response Console::prepare_route(const http::Request& request) const {
                                 std::holds_alternative<protocol::RecordRevokeBody>(s.body);
         if (on_records && !record_type) {
             problem = "no such record on this ledger";
+            return;
+        }
+        // A script is withdrawn by an owner or an admin, as it is approved.
+        if (on_records && *record_type == protocol::script_type && signer.role != Role::owner &&
+            signer.role != Role::admin) {
+            forbidden = "only an owner or an admin approves or withdraws scripts";
             return;
         }
         s.ledger_id = state.ledger_id();
@@ -430,6 +465,9 @@ http::Response Console::prepare_route(const http::Request& request) const {
         prepared.kid = *kid;
         prepared.challenge = *challenge;
         summary = describe(s, state);
+        // Where it comes from: its sources and script, or the script a
+        // revocation withdraws.
+        summary.update(provenance_summary(state, s));
         if (calling) {
             // Run as the ledger will run it, with the person's presence: the
             // page shows what it decides, and a call it would not take is
@@ -447,6 +485,9 @@ http::Response Console::prepare_route(const http::Request& request) const {
                 digest ? nlohmann::json(to_hex(digest->bytes())) : nlohmann::json();
         }
     });
+    if (!forbidden.empty()) {
+        return error(403, "forbidden", forbidden);
+    }
     if (!problem.empty()) {
         return error(409, "conflict", problem);
     }
@@ -504,6 +545,10 @@ http::Response Console::prepare_route(const http::Request& request) const {
                    !terms.is_null()) {
             // An access record's terms, which the page checks in the bytes too.
             summary["access"] = terms;
+        } else if (g.record_type == protocol::script_type && g.metadata) {
+            // A script's approval: its files' digests, which the page checks
+            // in the bytes against those it computed from the files.
+            summary["script_approval"] = script_terms(*g.metadata);
         } else if (g.metadata) {
             for (const auto& entry : *g.metadata->as_map()) {
                 metadata[*entry.key.as_text()] = *entry.value.as_text();
@@ -801,6 +846,8 @@ Console::sign_approval(const http::Request& request) const {
         return error(500, "internal", "the submission could not be encoded");
     }
     Signing signing{std::move(*encoded), true, draft.uploads};
+    signing.uploads.insert(signing.uploads.end(), draft.proof_uploads.begin(),
+                           draft.proof_uploads.end());
     // A certificate's record: published once registered, its printed fields
     // disclosed (certifying.cpp).
     if (std::ranges::any_of(load_kinds(services_.directory), [&](const Kind& k) {
@@ -809,6 +856,21 @@ Console::sign_approval(const http::Request& request) const {
         signing.after = [this, type = registration.record_type,
                          fields = draft.vault.fields](const protocol::Id& id) {
             publish_certificate(id, type, fields);
+        };
+    }
+    // Its sources' proofs, kept with it once it is registered: its evidence
+    // carries them wherever it is served (a proof not kept is kept again
+    // from its page).
+    if (!draft.source_proofs.empty()) {
+        signing.after = [this, then = std::move(signing.after),
+                         proofs = draft.source_proofs](const protocol::Id& id) {
+            if (then) {
+                then(id);
+            }
+            for (const auto& [kept_source, kept_proof] : proofs) {
+                static_cast<void>(node::keep_source_proof(services_.directory.parent_path(), id,
+                                                          kept_source, kept_proof));
+            }
         };
     }
     return signing;

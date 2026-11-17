@@ -657,6 +657,17 @@ void text_seeds(const Seeds& seeds) {
                 "POST /console/api/recover/begin HTTP/1.1\r\nHost: localhost:7470\r\n"
                 "Origin: http://localhost:7470\r\nContent-Length: 52\r\n\r\n"
                 "{\"recovery_code\":\"abcd efgh ijkl mnop qrst uvwx yz\"}");
+    seeds.write(
+        "console_request_fuzz", "script",
+        "GET /console/api/scripts/" + std::string(64, 'a') +
+            " HTTP/1.1\r\nHost: localhost:7470\r\n"
+            "Authorization: Bearer khs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n");
+    seeds.write("console_request_fuzz", "sources",
+                "GET /console/api/sources?type=example.org.photo/1 HTTP/1.1\r\n"
+                "Host: localhost:7470\r\n\r\n");
+    seeds.write("console_request_fuzz", "source-proofs",
+                "POST /console/api/records/source-proofs HTTP/1.1\r\nHost: localhost:7470\r\n"
+                "Origin: http://localhost:7470\r\nContent-Length: 15\r\n\r\n{\"upload\":\"00\"}");
     seeds.write("console_request_fuzz", "rebinding",
                 "GET /console/ HTTP/1.1\r\nHost: attacker.example:7470\r\n"
                 "Origin: https://attacker.example\r\n\r\n");

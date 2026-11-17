@@ -934,6 +934,7 @@ async function thingScreen(id) {
         line("claim.source", el("a", { href: `#/thing/${c.source}`, text: c.source_type ?? c.source }));
         parts.push(el("h2", { text: t("claim.title") }), claim);
     }
+    parts.push(...madeFromView(thing));
     if (thing.versions.length > 1) {
         parts.push(el("h2", { text: t("thing.versions_title") }),
                    el("ol", { class: "versions" }, thing.versions.map((v, n) => {
@@ -992,13 +993,19 @@ async function thingScreen(id) {
     const share = el("button", { type: "button", class: "primary", text: t("share.button") });
     share.addEventListener("click", () => shareScreen(thing));
     actions.append(share);
-    if (state.who.role !== "viewer" && !thing.revoked) {
+    const script = thing.type === SCRIPT_TYPE;
+    if (script) {
+        // A script's approval: its page shows its files, checks them, and
+        // withdraws it.
+        actions.append(" ", el("a", { href: `#/script/${thing.id}`, class: "button", text: t("scripts.open") }));
+    }
+    if (state.who.role !== "viewer" && !thing.revoked && !script) {
         const act = el("button", { type: "button", text: t("act.button"),
                                    "aria-label": t("act.label", { type: thing.type }) });
         act.addEventListener("click", () => actScreen({ id: thing.id, type: thing.type }));
         actions.append(" ", act);
     }
-    if (state.who.role !== "viewer" && !thing.superseded_by && !thing.claim) {
+    if (state.who.role !== "viewer" && !thing.superseded_by && !thing.claim && !script) {
         actions.append(" ", el("a", { href: `#/new/${thing.id}`, class: "button",
                                       text: t("thing.new_version") }));
     }
@@ -1009,6 +1016,102 @@ async function thingScreen(id) {
     }
     parts.push(actions);
     show(...parts);
+}
+
+/// A script's approval on the ledger (v0.18).
+const SCRIPT_TYPE = "kanhe.script/1";
+
+/// A source as the approval names it, in a line.
+function sourceText(s) {
+    return s.local
+        ? t("approve.source_local", { name: s.kind ?? s.type ?? s.record.slice(0, 12), id: s.record.slice(0, 12) })
+        : t("approve.source_other", { id: s.record.slice(0, 12), ledger: s.party ?? s.ledger.slice(0, 12) });
+}
+
+/// A source's status, in the reader's words.
+const sourceStatus = (key) => t(`made.status.${key ?? "unknown"}`);
+
+/// Where a record came from (v0.18): the script that made it and the
+/// records it was made from, each as it stood when this one was made and
+/// as it stands now, with a warning when one was revoked or replaced since.
+/// A source on another ledger shows what the proof kept here says of it.
+function madeFromView(thing) {
+    const made = thing.made_from;
+    if (!made || (!made.script && made.sources.length === 0)) {
+        return [];
+    }
+    const parts = [el("h2", { text: t("made.title") })];
+    if (made.stale) {
+        parts.push(el("div", { class: "notice replaced", role: "status" }, el("p", { text: t("made.stale") })));
+    }
+    const facts = el("dl", { class: "facts" });
+    if (made.script) {
+        const s = made.script;
+        const dd = s.name
+            ? el("dd", { class: s.status === "withdrawn" ? "bad" : null },
+                 el("a", { href: `#/script/${s.id}`, text: `${s.name} ${s.version}` }), " ",
+                 t("made.script_line", { person: s.approved_by.name ?? short(s.approved_by.id).text,
+                                         time: timeText(s.approved_at) }),
+                 s.status === "withdrawn"
+                     ? t("made.script_withdrawn", { time: s.withdrawn_at ? timeText(s.withdrawn_at) : "" })
+                     : t("made.script_still"))
+            : el("dd", { class: "id", text: s.id });
+        facts.append(el("dt", { text: t("made.by_script") }), dd);
+    }
+    for (const s of made.sources) {
+        facts.append(el("dt", { text: t("made.source") }), sourceView(thing, s));
+    }
+    parts.push(facts);
+    return parts;
+}
+
+function sourceView(thing, s) {
+    const changed = s.now === "revoked" || s.now === "replaced";
+    const now = sourceStatus(s.now) + (s.changed_at ? t("made.on", { time: timeText(s.changed_at) }) : "");
+    const dd = el("dd", { class: changed ? "bad" : null });
+    if (s.local) {
+        dd.append(el("a", { href: `#/thing/${s.record}`, text: s.kind ?? s.type ?? short(s.record).text }), " ",
+                  s.type === null ? t("made.local_unknown")
+                                  : t("made.local_line", { then: sourceStatus(s.at_record), now }));
+        if (s.replaced_by) {
+            dd.append(" ", el("a", { href: `#/thing/${s.replaced_by}`, text: t("made.open_newer") }));
+        }
+        return dd;
+    }
+    const ledger = s.organization ?? s.party ?? short(s.ledger).text;
+    dd.append(s.type !== null
+        ? t("made.remote_line", { type: s.type, ledger, then: sourceStatus(s.at_record), now,
+                                  time: timeText(s.as_of) })
+        : t(s.proof_kept ? "made.remote_bad_proof" : "made.remote_no_proof",
+            { ledger, problem: s.proof_problem ?? "" }),
+              " ", el("span", { class: "id", text: `${s.record.slice(0, 12)}...` }));
+    if (state.who.role !== "viewer" && thing.private.allowed) {
+        dd.append(" ", keepProofInput(thing, s));
+    }
+    return dd;
+}
+
+/// Keeps the proof of a source on another ledger (its ledger's evidence of
+/// it, as a file) with the record, in place of the one before: the
+/// record's proof then carries it, and its page reads the source from it.
+function keepProofInput(thing, s) {
+    const label = t(s.proof_kept ? "made.replace_proof" : "made.keep_proof", { id: s.record.slice(0, 12) });
+    const input = el("input", { type: "file", accept: ".cbor,application/cbor", "aria-label": label });
+    const out = el("span", { role: "status" });
+    input.addEventListener("change", async () => {
+        const file = input.files[0];
+        if (!file) {
+            return;
+        }
+        try {
+            const upload = await uploadFile(file);
+            await api("POST", `records/${thing.id}/source-proofs`, { upload });
+            await thingScreen(thing.id);
+        } catch (error) {
+            out.replaceChildren(problem(t("error.server", { message: error.message })));
+        }
+    });
+    return el("span", {}, el("label", {}, label, " ", input), out);
 }
 
 /// Confirming a condition on a document's fields without them (a claim,
@@ -1199,6 +1302,7 @@ function reportView(given) {
                       el("span", { class: "hint", text: e.registered_at }));
         })));
     }
+    parts.push(...reportMadeFrom(report));
     const disclosed = Object.entries(report.disclosed_fields ?? {});
     if (disclosed.length > 0) {
         parts.push(el("h2", { text: t("verify.disclosed") }));
@@ -1218,6 +1322,47 @@ function reportView(given) {
     }
     parts.push(el("p", { class: "hint", text: t(report.complete ? "verify.complete"
                                                                 : "verify.incomplete") }));
+    return parts;
+}
+
+/// Where the proof's record came from, as the verifier reports it (v0.18):
+/// the scripts its events name, with their approvals, and its sources, each
+/// as it stood when the record was made and at the checkpoint.
+function reportMadeFrom(report) {
+    const scripts = report.scripts ?? [];
+    const sources = report.sources ?? [];
+    if (scripts.length === 0 && sources.length === 0) {
+        return [];
+    }
+    const facts = el("dl", { class: "facts" });
+    for (const s of scripts) {
+        facts.append(el("dt", { text: t("made.by_script") }), el("dd", {
+            class: s.withdrawn_at ? "bad" : null,
+            text: t("verify.script_line", { name: s.name, version: s.version, files: s.files.length,
+                                            person: s.approved_by.name, time: isoText(s.approved_at) }) +
+                (s.deterministic ? t("verify.script_deterministic") : "") +
+                (s.withdrawn_at ? t("made.script_withdrawn", { time: isoText(s.withdrawn_at) })
+                                : t("made.script_still")),
+        }));
+    }
+    let stale = false;
+    for (const s of sources) {
+        const changed = s.at_checkpoint === "revoked" || s.at_checkpoint === "replaced";
+        stale = stale || changed;
+        const now = sourceStatus(s.at_checkpoint) + (s.changed_at ? t("made.on", { time: isoText(s.changed_at) }) : "");
+        const text = !s.provided
+            ? t("verify.source_missing", { id: s.record.slice(0, 12), ledger: s.ledger.slice(0, 12) })
+            : t(s.local ? "verify.source_local" : "verify.source_remote", {
+                type: s.type, ledger: s.organization ?? s.ledger.slice(0, 12), then: sourceStatus(s.at_record),
+                now, time: isoText(s.checkpoint_time) }) +
+                (s.trust_node ? t("verify.source_trust_node", { name: s.trust_node }) : "");
+        facts.append(el("dt", { text: t("made.source") }), el("dd", { class: changed ? "bad" : null, text }));
+    }
+    const parts = [el("h2", { text: t("made.title") })];
+    if (stale) {
+        parts.push(el("p", { class: "notice replaced", role: "status", text: t("made.stale") }));
+    }
+    parts.push(facts);
     return parts;
 }
 
@@ -1468,13 +1613,14 @@ async function newDocumentScreen(supersedes = null) {
     };
     chooser.addEventListener("change", render);
     render();
+    const madeFrom = await madeFromPart();
     const prepare = el("button", { type: "submit", class: "primary", text: t("act.prepare") });
     const form = el("form", { novalidate: true },
                     old ? el("p", { class: "notice", text: t("register.replaces_hint", {
                         name: old.kind ?? old.type, id: old.id }) }) : null,
                     el("div", { class: "field" },
                        el("label", { for: "register-kind", text: t("register.kind") }), chooser),
-                    area, notice, prepare);
+                    area, madeFrom.part, notice, prepare);
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         prepare.disabled = true;
@@ -1498,9 +1644,16 @@ async function newDocumentScreen(supersedes = null) {
                 uploads.push(id);
                 files.set(id, new Uint8Array(await file.arrayBuffer()));
             }
+            // Where it came from: the sources' proofs uploaded, checked and
+            // kept by the console with the record.
+            const { sources, proofs, script } = madeFrom.read();
+            const sourceProofs = [];
+            for (const proof of proofs) {
+                sourceProofs.push(await uploadFile(proof));
+            }
             const prepared = await api("POST", "prepare", {
                 action: "record.register", kind: chooser.value, fields, files: uploads,
-                supersedes: old ? old.id : null,
+                supersedes: old ? old.id : null, sources, source_proofs: sourceProofs, script,
             });
             await approveScreen(prepared, files);
         } catch (error) {
@@ -1512,6 +1665,110 @@ async function newDocumentScreen(supersedes = null) {
         }
     });
     show(el("h1", { text: t(old ? "register.new_version_title" : "register.title") }), form);
+}
+
+/// What a new document was made from (v0.18), all optional: records of
+/// this ledger, chosen from its live ones; another ledger's, by its id and
+/// the record's, with its proof (that ledger's evidence of it) if there is
+/// one, which the console checks and keeps with the record; and the
+/// approved script that made it.
+async function madeFromPart() {
+    const made = await api("GET", "sources").catch(() => ({ records: [], scripts: [] }));
+    const chosen = [];
+    const list = el("ul", { "aria-live": "polite" });
+    const render = () => {
+        list.replaceChildren(...chosen.map((c, i) => {
+            const remove = el("button", { type: "button", text: t("register.source_remove"),
+                                          "aria-label": t("register.source_remove_label", { name: c.label }) });
+            remove.addEventListener("click", () => {
+                chosen.splice(i, 1);
+                render();
+            });
+            return el("li", {}, `${c.label} `, remove);
+        }));
+    };
+    const sourceNotice = el("div", { role: "status" });
+    const local = el("select", { id: "register-source" }, el("option", { value: "", text: "" }),
+                     made.records.map((r) => el("option", {
+                         value: r.id, text: t("register.source_option", {
+                             name: r.kind ?? r.type, id: r.id.slice(0, 12), index: r.index }) })));
+    const addLocal = el("button", { type: "button", text: t("register.source_add") });
+    addLocal.addEventListener("click", () => {
+        const r = made.records.find((x) => x.id === local.value);
+        if (r && !chosen.some((c) => c.record === r.id)) {
+            chosen.push({ ledger: null, record: r.id, proof: null,
+                          label: t("approve.source_local", { name: r.kind ?? r.type, id: r.id.slice(0, 12) }) });
+            render();
+        }
+    });
+    const [ledgerField, ledgerInput] = field("register-source-ledger", t("register.source_ledger"),
+                                             t("register.source_ids_hint"), { maxlength: 64, spellcheck: "false" });
+    const [recordField, recordInput] = field("register-source-record", t("register.source_record"),
+                                             t("register.source_ids_hint"), { maxlength: 64, spellcheck: "false" });
+    const proofInput = el("input", { id: "register-source-proof", type: "file", accept: ".cbor,application/cbor" });
+    const addOther = el("button", { type: "button", text: t("register.source_add_other") });
+    addOther.addEventListener("click", async () => {
+        sourceNotice.replaceChildren();
+        let ledger = ledgerInput.value.trim().toLowerCase();
+        let record = recordInput.value.trim().toLowerCase();
+        const proof = proofInput.files[0] ?? null;
+        let label = null;
+        if (proof) {
+            // What the proof is of, checked in this browser where it can be.
+            const check = await loadChecker();
+            const report = check ? check.verify(new Uint8Array(await proof.arrayBuffer()), new Map(), "") : null;
+            if (report?.record?.id && report?.ledger?.id && !report.error) {
+                ledger ||= report.ledger.id;
+                record ||= report.record.id;
+                label = t("register.source_other_named", { type: report.record.type,
+                                                           ledger: report.ledger.organization,
+                                                           id: report.record.id.slice(0, 12) });
+            }
+        }
+        if (!/^[0-9a-f]{64}$/.test(ledger) || !/^[0-9a-f]{64}$/.test(record)) {
+            sourceNotice.replaceChildren(problem(t("register.source_ids")));
+            return;
+        }
+        if (chosen.some((c) => c.record === record && c.ledger === ledger)) {
+            return;
+        }
+        chosen.push({ ledger, record, proof,
+                      label: (label ?? t("approve.source_other", { id: record.slice(0, 12), ledger: ledger.slice(0, 12) })) +
+                          (proof ? t("register.source_with_proof") : "") });
+        ledgerInput.value = "";
+        recordInput.value = "";
+        proofInput.value = "";
+        render();
+    });
+    const script = el("select", { id: "register-script" },
+                      el("option", { value: "", text: t("register.script_none") }),
+                      made.scripts.map((s) => el("option", { value: s.id, text: `${s.name} ${s.version}` })));
+    const part = el("fieldset", {}, el("legend", { text: t("register.made_from") }),
+                    el("p", { class: "hint", text: t("register.made_from_hint") }), list,
+                    made.records.length
+                        ? el("div", { class: "field" },
+                             el("label", { for: "register-source", text: t("register.source_local") }),
+                             local, " ", addLocal)
+                        : null,
+                    el("details", {}, el("summary", { text: t("register.source_other") }),
+                       ledgerField, recordField,
+                       el("div", { class: "field" },
+                          el("label", { for: "register-source-proof", text: t("register.source_proof") }),
+                          proofInput,
+                          el("span", { class: "hint", text: t("register.source_proof_hint") })),
+                       addOther),
+                    sourceNotice,
+                    el("div", { class: "field" },
+                       el("label", { for: "register-script", text: t("register.script") }), script,
+                       el("span", { class: "hint", text: t("register.script_hint") })));
+    return {
+        part,
+        read: () => ({
+            sources: chosen.map((c) => (c.ledger ? { ledger: c.ledger, record: c.record } : { record: c.record })),
+            proofs: chosen.filter((c) => c.proof).map((c) => c.proof),
+            script: script.value || null,
+        }),
+    };
 }
 
 // --- Settings ----------------------------------------------------------------------
@@ -2132,6 +2389,280 @@ function machineSetupScreen(actor, delegation, name, agent) {
     show(el("h1", { text: t("automation.setup_title", { name }) }),
          el("p", { class: "hint", text: t(agent ? "automation.setup_agent" : "automation.setup_executor") }),
          form, result);
+}
+
+// --- Scripts --------------------------------------------------------------------------
+
+/// A file's digest under the ledger's hash (its COSE id), as hex: with the
+/// browser's own SHA-256, or the console's checks for another hash. The
+/// file never leaves this browser.
+async function fileDigest(bytes, hash) {
+    if (hash === -16 && globalThis.crypto?.subtle) {
+        const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+        return [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+    const check = await loadChecker();
+    const out = check ? check.digest(bytes, hash) : null;
+    if (!out?.ok) {
+        throw new Error(t("scripts.no_digest"));
+    }
+    return out.digest;
+}
+
+/// A script's file is named by its path in the script's folder: relative,
+/// "/" between its parts, none empty, "." or "..".
+const validScriptPath = (path) => path.length > 0 && new TextEncoder().encode(path).length <= 1024 &&
+    path.split("/").every((part) => part !== "" && part !== "." && part !== "..");
+
+/// The files chosen, each with its path, size, and digest: a folder's by
+/// their paths below it, leaving out hidden ones (names starting with a
+/// dot), as the command line does; files chosen one by one by their names.
+async function scriptFiles(lists, hash) {
+    const out = new Map();
+    for (const list of lists) {
+        for (const file of list) {
+            const inFolder = Boolean(file.webkitRelativePath);
+            const path = inFolder ? file.webkitRelativePath.split("/").slice(1).join("/") : file.name;
+            if (inFolder && path.split("/").some((part) => part.startsWith("."))) {
+                continue;
+            }
+            if (!validScriptPath(path)) {
+                throw new Error(t("scripts.bad_path", { path }));
+            }
+            if (out.has(path)) {
+                throw new Error(t("scripts.twice", { path }));
+            }
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            out.set(path, { path, size: file.size, digest: await fileDigest(bytes, hash) });
+        }
+    }
+    return [...out.values()];
+}
+
+const byPath = (a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+const sameFiles = (a, b) => canonical([...(a ?? [])].sort(byPath)) === canonical([...b].sort(byPath));
+
+function scriptFileTable(caption, files) {
+    return table(caption, [
+        ["scripts.path", (f) => f.path],
+        ["scripts.size", (f) => sizeText(f.size)],
+        ["scripts.digest", (f) => ({ id: true, text: f.digest })],
+    ], files);
+}
+
+/// A file input and a folder input for a script's files: `changed` runs
+/// when either changes.
+function scriptInputs(prefix, changed) {
+    const files = el("input", { type: "file", id: `${prefix}-files`, multiple: true });
+    const folder = el("input", { type: "file", id: `${prefix}-folder`, multiple: true, webkitdirectory: true });
+    files.addEventListener("change", changed);
+    folder.addEventListener("change", changed);
+    return {
+        lists: () => [folder.files, files.files],
+        parts: [el("div", { class: "field" }, el("label", { for: `${prefix}-files`, text: t("scripts.choose_files") }),
+                   files),
+                el("div", { class: "field" }, el("label", { for: `${prefix}-folder`, text: t("scripts.choose_folder") }),
+                   folder, el("span", { class: "hint", text: t("scripts.folder_hint") }))],
+    };
+}
+
+const whenText = (ms) => (ms ? timeText(ms) : "");
+
+/// Scripts: what the ledger approved, in person, by its files' digests,
+/// and what was withdrawn; owners and admins approve one here.
+async function scriptsScreen() {
+    const listed = await api("GET", "scripts");
+    const parts = [flash(), keysNotice(), el("h1", { text: t("scripts.title") }),
+                   el("p", { class: "hint", text: t("scripts.intro") })];
+    parts.push(...table(t("scripts.list"), [
+        ["column.name", (s) => el("a", { href: `#/script/${s.id}`, text: `${s.name} ${s.version}` })],
+        ["scripts.files", (s) => String(s.files.length)],
+        ["scripts.deterministic", (s) => yesNo(s.deterministic)],
+        ["scripts.approved_by", (s) => t("scripts.approved_line", {
+            name: s.approved_by.name ?? short(s.approved_by.id).text, time: whenText(s.approved_at) })],
+        ["column.state", (s) => (s.status === "withdrawn"
+            ? t("scripts.withdrawn_on", { time: whenText(s.withdrawn_at) }) : t("scripts.approved"))],
+    ], listed.scripts));
+    if (listed.may_approve) {
+        parts.push(approveScriptForm(listed));
+    }
+    show(...parts);
+}
+
+/// Approving a script: its name, version, files (their digests computed
+/// here; only paths, sizes, and digests are sent), whether deterministic,
+/// what runs it, and a note; then one passkey tap.
+function approveScriptForm(listed) {
+    const [nameField, name] = field("script-name", t("scripts.name"), t("scripts.name_hint"),
+                                    { maxlength: 128, spellcheck: "false" });
+    const [versionField, version] = field("script-version", t("scripts.version"), t("scripts.version_hint"),
+                                          { maxlength: 64, spellcheck: "false" });
+    const [runtimeField, runtime] = field("script-runtime", t("scripts.runtime"), t("scripts.runtime_hint"),
+                                          { maxlength: 128 });
+    const [noteField, note] = field("script-note", t("scripts.note"), t("scripts.note_hint"), { maxlength: 1000 });
+    const deterministic = el("input", { type: "checkbox", id: "script-deterministic" });
+    const chosen = el("div", { "aria-live": "polite" });
+    const notice = el("div", { role: "status" });
+    let computed = [];
+    let pending = Promise.resolve();
+    const inputs = scriptInputs("script", () => {
+        pending = (async () => {
+            notice.replaceChildren();
+            status(t("status.working"));
+            try {
+                computed = await scriptFiles(inputs.lists(), listed.hash.cose);
+                chosen.replaceChildren(...(computed.length ? scriptFileTable(t("scripts.chosen"), computed) : []));
+            } catch (error) {
+                computed = [];
+                chosen.replaceChildren();
+                notice.replaceChildren(problem(error.message));
+            } finally {
+                status("");
+            }
+        })();
+    });
+    const prepare = el("button", { type: "submit", class: "primary", text: t("act.prepare") });
+    const form = el("form", { novalidate: true }, nameField, versionField, ...inputs.parts,
+                    el("p", { class: "hint", text: t("scripts.files_hint", { hash: listed.hash.name }) }),
+                    chosen, el("label", { class: "check" }, deterministic, " ", t("scripts.deterministic_box")),
+                    runtimeField, noteField, notice, prepare);
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        prepare.disabled = true;
+        try {
+            await pending;
+            if (computed.length === 0) {
+                notice.replaceChildren(problem(t("scripts.no_files")));
+                return;
+            }
+            const prepared = await api("POST", "prepare", {
+                action: "script.approve", name: name.value.trim(), version: version.value.trim(),
+                runtime: runtime.value.trim(), deterministic: deterministic.checked, note: note.value.trim(),
+                files: computed,
+            });
+            // The console's terms are the files this browser fingerprinted.
+            if (!sameFiles(prepared.summary.script_approval?.files, computed)) {
+                show(el("h1", { text: t("approve.title") }), problem(t("approve.mismatch")),
+                     goButton(t("nav.scripts"), "#/scripts"));
+                return;
+            }
+            await approveScreen(prepared);
+        } catch (error) {
+            notice.replaceChildren(problem(error.status === 423 ? t("keys.locked")
+                                                                : t("error.server", { message: error.message })));
+        } finally {
+            prepare.disabled = false;
+        }
+    });
+    return el("section", {}, el("h2", { text: t("scripts.approve_title") }),
+              el("p", { class: "hint", text: t("scripts.approve_intro") }), form);
+}
+
+/// A script's page: its approval, its files, a check of files in this
+/// browser against them, and its withdrawal.
+async function scriptScreen(id) {
+    const s = await api("GET", `scripts/${id}`);
+    const facts = el("dl", { class: "facts" });
+    const fact = (key, value, attributes = {}) => {
+        facts.append(el("dt", { text: t(key) }), el("dd", { text: String(value), ...attributes }));
+    };
+    fact("scripts.version", s.version);
+    fact("scripts.deterministic", yesNo(s.deterministic));
+    fact("scripts.runtime", s.runtime ?? t("value.none"));
+    fact("scripts.approved_by", t(s.in_person === "hardware-key" ? "scripts.in_person_key" : "scripts.in_person_passkey",
+                                  { name: s.approved_by.name ?? short(s.approved_by.id).text, time: whenText(s.approved_at) }));
+    fact("column.state", s.status === "withdrawn" ? t("scripts.withdrawn_on", { time: whenText(s.withdrawn_at) })
+                                                  : t("scripts.approved"));
+    if (s.withdraw_reason) {
+        fact("act.reason", s.withdraw_reason);
+    }
+    fact("thing.entry", s.index);
+    fact("column.id", s.id, { class: "id" });
+    const parts = [flash(), keysNotice(), el("h1", { text: `${s.name} ${s.version}` })];
+    if (s.status === "withdrawn") {
+        parts.push(el("div", { class: "notice replaced", role: "status" },
+                      el("p", { text: t("scripts.withdrawn_notice", { time: whenText(s.withdrawn_at) }) })));
+    }
+    parts.push(facts, ...scriptFileTable(t("scripts.files_title"), s.files), checkFilesPart(s));
+    if (s.may_withdraw) {
+        parts.push(withdrawScriptForm(s));
+    }
+    parts.push(el("p", { class: "actions" },
+                  el("a", { href: `#/thing/${s.id}`, class: "button", text: t("scripts.open_record") }), " ",
+                  goButton(t("nav.scripts"), "#/scripts")));
+    show(...parts);
+}
+
+/// Files someone has, compared with the approval in this browser: the
+/// same, changed, missing, or not in it. Nothing is sent.
+function checkFilesPart(s) {
+    const result = el("div", { "aria-live": "polite" });
+    const inputs = scriptInputs("check", async () => {
+        try {
+            const chosen = await scriptFiles(inputs.lists(), s.hash.cose);
+            const atPath = new Map(chosen.map((f) => [f.path, f]));
+            // A file chosen on its own is found by its name too, if no other
+            // has that name.
+            const byName = new Map();
+            for (const f of chosen) {
+                const name = f.path.split("/").pop();
+                byName.set(name, byName.has(name) ? null : f);
+            }
+            const used = new Set();
+            const lines = s.files.map((f) => {
+                let mine = atPath.get(f.path);
+                if (!mine) {
+                    const named = byName.get(f.path.split("/").pop());
+                    mine = named && !used.has(named.path) && !s.files.some((g) => g.path === named.path)
+                        ? named : undefined;
+                }
+                if (mine) {
+                    used.add(mine.path);
+                }
+                const verdict = !mine ? "missing" : mine.size === f.size && mine.digest === f.digest ? "same" : "changed";
+                return { path: f.path, verdict };
+            });
+            const extra = chosen.filter((f) => !used.has(f.path));
+            const differ = lines.filter((l) => l.verdict !== "same").length;
+            result.replaceChildren(
+                el("p", { class: differ ? "notice replaced" : "notice", role: "status",
+                          text: differ ? t("scripts.check_differ", { n: differ, of: s.files.length })
+                                       : t(s.status === "withdrawn" ? "scripts.check_same_withdrawn"
+                                                                    : "scripts.check_same") }),
+                el("ul", {}, lines.map((l) => el("li", { class: l.verdict === "same" ? null : "bad",
+                                                        text: t(`scripts.check.${l.verdict}`, { path: l.path }) })),
+                   extra.map((f) => el("li", { text: t("scripts.check.extra", { path: f.path }) }))));
+        } catch (error) {
+            result.replaceChildren(problem(error.message));
+        }
+    });
+    return el("section", {}, el("h2", { text: t("scripts.check_title") }),
+              el("p", { class: "hint", text: t("scripts.check_intro") }), ...inputs.parts, result);
+}
+
+/// Withdrawing a script: its record revoked, with a reason, with a tap.
+function withdrawScriptForm(s) {
+    const [reasonField, reason] = field("script-reason", t("act.reason"), t("scripts.reason_hint"), { maxlength: 1000 });
+    const notice = el("div", { role: "status" });
+    const button = el("button", { type: "submit", text: t("scripts.withdraw") });
+    const form = el("form", { novalidate: true }, reasonField, notice, button);
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        button.disabled = true;
+        try {
+            const prepared = await api("POST", "prepare", { action: "script.withdraw", script: s.id,
+                                                             reason: reason.value.trim() });
+            await approveScreen(prepared, new Map(), async () => el("p", { class: "notice",
+                text: t("scripts.withdrawn_done", { name: `${s.name} ${s.version}` }) }));
+        } catch (error) {
+            notice.replaceChildren(problem(error.status === 423 ? t("keys.locked")
+                                                                : t("error.server", { message: error.message })));
+        } finally {
+            button.disabled = false;
+        }
+    });
+    return el("section", {}, el("h2", { text: t("scripts.withdraw_title") }),
+              el("p", { class: "hint", text: t("scripts.withdraw_intro") }), form);
 }
 
 // --- People --------------------------------------------------------------------------
@@ -4370,6 +4901,7 @@ async function loadChecker() {
                                          new TextEncoder().encode(JSON.stringify(request))),
             commitment: (content, salt, hash) =>
                 call("_kanhe_attachment_commitment", content, salt, hash),
+            digest: (content, hash) => call("_kanhe_digest", content, hash),
         };
     } catch {
         checker = null;
@@ -4435,6 +4967,14 @@ function registrationAgrees(check, decoded, prepared, files) {
     }
     // An access record's terms are the ones the page showed.
     if (!sameTerms(decoded.access, summary.access)) {
+        return false;
+    }
+    // The records it was made from, and a script's approval: the files'
+    // digests this page computed (v0.18).
+    const named = (summary.sources ?? []).map(({ ledger, record }) => ({ ledger, record }));
+    if (canonical(decoded.sources ?? []) !== canonical(named) ||
+        Boolean(decoded.script_approval) !== Boolean(summary.script_approval) ||
+        (summary.script_approval && canonical(decoded.script_approval) !== canonical(summary.script_approval))) {
         return false;
     }
     if (decoded.attachments.length !== summary.files.length) {
@@ -4557,10 +5097,12 @@ async function approveScreen(prepared, files = new Map(), after = null) {
         const decoded = check.describe(payload);
         const own = check.challenge(payload, new Uint8Array(fromBase64url(prepared.kid)),
                                     prepared.hash);
-        const matches = registering ? registrationAgrees(check, decoded, prepared, files)
+        const matches = (registering ? registrationAgrees(check, decoded, prepared, files)
             : deploying ? deployAgrees(decoded, summary)
             : calling ? callAgrees(decoded, summary)
-            : PEOPLE_KEYS[summary.type] ? peopleAgrees(decoded, summary) : agrees(decoded, summary);
+            : PEOPLE_KEYS[summary.type] ? peopleAgrees(decoded, summary) : agrees(decoded, summary)) &&
+            // The script its provenance names, if any (v0.18).
+            (decoded.script ?? null) === (summary.script ?? null);
         if (!matches || !own.ok || own.challenge !== challenge) {
             show(el("h1", { text: t("approve.title") }), problem(t("approve.mismatch")),
                  backButton(t("nav.things")));
@@ -4578,7 +5120,9 @@ async function approveScreen(prepared, files = new Map(), after = null) {
     const consenting = summary.record_type === "kanhe.contract-consent/1";
     const access = summary.access;
     const machine = summary.type === "actor-register" && summary.kind !== 1;
-    fact("approve.action", t(consenting ? "approve.type.consent"
+    fact("approve.action", t(summary.script_approval ? "approve.type.script-approve"
+        : summary.withdraws ? "approve.type.script-withdraw"
+        : consenting ? "approve.type.consent"
         : summary.claim ? (summary.claim.answers ? "approve.type.access_answer" : "approve.type.claim")
         : access ? (access.condition ? "approve.type.access_question" : `approve.type.access_${access.kind}`)
         : machine ? "approve.type.machine-register" : `approve.type.${summary.type}`));
@@ -4668,6 +5212,28 @@ async function approveScreen(prepared, files = new Map(), after = null) {
     } else if (summary.type === "delegation-revoke") {
         fact("people.delegation", summary.delegation);
     }
+    if (summary.script_approval) {
+        // A script's approval: what will be on the ledger, file by file.
+        const a = summary.script_approval;
+        fact("scripts.name", a.name);
+        fact("scripts.version", a.version);
+        fact("scripts.deterministic", yesNo(a.deterministic));
+        fact("scripts.runtime", a.runtime);
+        for (const f of a.files) {
+            facts.append(el("dt", { text: t("scripts.file") }),
+                         el("dd", {}, `${f.path}, ${sizeText(f.size)} `, el("span", { class: "id", text: f.digest })));
+        }
+    }
+    if (summary.withdraws) {
+        fact("scripts.script", `${summary.withdraws.name} ${summary.withdraws.version}`);
+    }
+    // Where it comes from (v0.18).
+    if (summary.script) {
+        fact("approve.made_by", summary.script_name ?? summary.script);
+    }
+    for (const s of summary.sources ?? []) {
+        fact("approve.made_from", sourceText(s));
+    }
     if (registering) {
         for (const f of summary.fields) {
             facts.append(el("dt", { text: t("register.private_field", { name: f.name }) }),
@@ -4717,10 +5283,13 @@ async function approveScreen(prepared, files = new Map(), after = null) {
             show(el("h1", { text: t("approve.done_title") }),
                  el("p", { role: "status", text: t("approve.done", { index: done.index }) }),
                  el("p", { class: "id", text: done.statement_id }), followed,
-                 registering && !consenting && !access ? el("p", {}, el("a", { href: `#/thing/${done.statement_id}`,
+                 summary.script_approval ? el("p", {}, el("a", { href: `#/script/${done.statement_id}`,
+                                                                 text: t("scripts.open") }))
+                 : registering && !consenting && !access ? el("p", {}, el("a", { href: `#/thing/${done.statement_id}`,
                                                      text: t("register.open") }))
                              : null,
                  rules ? goButton(t("rules.done"), "#/rules")
+                 : summary.script_approval || summary.withdraws ? goButton(t("nav.scripts"), "#/scripts")
                  : access ? goButton(t("nav.parties"), "#/parties")
                  : PEOPLE_KEYS[summary.type] ? goButton(t("nav.people"), "#/people")
                  : calling ? goButton(t("thing.open"),
@@ -4774,6 +5343,7 @@ function chrome() {
         : hash.startsWith("#/parties") || hash.startsWith("#/access/") ? "parties"
         : hash.startsWith("#/people") ? "people"
         : hash.startsWith("#/automation") ? "automation"
+        : hash.startsWith("#/scripts") || hash.startsWith("#/script/") ? "scripts"
         : hash.startsWith("#/reports") ? "reports"
         : hash.startsWith("#/kinds") ? "kinds"
         : hash.startsWith("#/rules") ? "rules"
@@ -4828,6 +5398,7 @@ async function route() {
         const thing = hash.match(/^#\/thing\/([0-9a-f]{64})$/);
         const newVersion = hash.match(/^#\/new\/([0-9a-f]{64})$/);
         const instance = hash.match(/^#\/instance\/([0-9a-f]{64})$/);
+        const script = hash.match(/^#\/script\/([0-9a-f]{64})$/);
         const create = hash.match(/^#\/create\/([0-9a-f]{64})$/);
         const act = hash.match(/^#\/act\/([0-9a-f]{64})\/([^/]+)$/);
         const asked = hash.match(/^#\/access\/request\/([0-9a-f]{64})$/);
@@ -4838,6 +5409,8 @@ async function route() {
             : asked ? accessRequestScreen(asked[1])
             : delivered ? accessDeliveryScreen(delivered[1])
             : instance ? instanceScreen(instance[1])
+            : script ? scriptScreen(script[1])
+            : hash.startsWith("#/scripts") ? scriptsScreen()
             : create ? createScreen(create[1])
             : opened ? exchangeScreen(opened[1])
             : hash.startsWith("#/exchange") ? exchangeScreen()

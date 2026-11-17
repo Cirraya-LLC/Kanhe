@@ -5,8 +5,10 @@
 // the console's folder, then a registration prepared from a kind, its
 // fields, and those files. The fields get fresh salts and are committed as
 // the command line commits them; private ones stay in the vault, public
-// ones go into the metadata. Nothing is sealed or sent until the person's
-// passkey approves the statement (approve.cpp).
+// ones go into the metadata. A registration may also name what it was made
+// from: records of this ledger or of others (with their proofs) and the
+// approved script that made it (provenance.cpp). Nothing is sealed or sent
+// until the person's passkey approves the statement (approve.cpp).
 
 #include <algorithm>
 #include <filesystem>
@@ -259,6 +261,11 @@ Console::register_draft(const nlohmann::json& intent, const std::string& user) c
         draft.vault.attachments.push_back(salt);
     }
     draft.uploads = std::move(ids);
+    // Where it came from (v0.18): the records it was made from, the script
+    // that made it, and its sources' proofs (provenance.cpp).
+    if (auto problem = provenance_draft(intent, user, body, draft)) {
+        return *std::move(problem);
+    }
     return std::pair(std::move(body), std::move(draft));
 }
 

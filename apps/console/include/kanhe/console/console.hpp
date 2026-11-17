@@ -185,11 +185,23 @@ struct Draft {
     /// For an access receipt: the delivery it acknowledges, kept under its
     /// grant's id once it is signed.
     std::optional<std::pair<protocol::Id, Bytes>> delivery;
+    /// The approved script its provenance names (v0.18), if any.
+    std::optional<protocol::Id> script;
+    /// The proofs of its sources on other ledgers, checked, kept with the
+    /// record once it is registered; and the uploads they came from.
+    std::vector<std::pair<protocol::Source, Bytes>> source_proofs;
+    std::vector<std::string> proof_uploads;
 };
 
 /// The terms an access request's, grant's, or receipt's metadata holds, as
 /// the page shows them and its checks compare them; null for other types.
 [[nodiscard]] nlohmann::json access_terms(std::string_view type, const cbor::Value& metadata);
+
+/// The terms a script's approval holds (a `kanhe.script/1` record's
+/// metadata: its name, version, files, whether deterministic, its runtime),
+/// as the page shows them and its checks compare them; null if they do not
+/// read as a script's.
+[[nodiscard]] nlohmann::json script_terms(const cbor::Value& metadata);
 
 struct Prepared {
     std::string user;
@@ -677,6 +689,60 @@ private:
     /// checked against the ledger; nothing if it cannot be.
     [[nodiscard]] std::optional<client::Vault> private_data(const protocol::LedgerState& state,
                                                             const protocol::Id& record) const;
+    /// Scripts and sources (provenance.cpp). GET /console/api/scripts: the
+    /// ledger's scripts, approved and withdrawn, with the ledger's hash and
+    /// whether this user may approve one; GET .../scripts/ID, one.
+    [[nodiscard]] http::Response scripts_route(const http::Request& request) const;
+    /// GET /console/api/sources: what a registration may name as where it
+    /// came from: this ledger's live records of kinds, newest first, and the
+    /// approved scripts.
+    [[nodiscard]] http::Response sources_route(const http::Request& request) const;
+    /// POST /console/api/records/ID/source-proofs: the proof of one of the
+    /// record's sources on another ledger (an upload: that ledger's
+    /// evidence), checked and kept with it, in place of the one before.
+    [[nodiscard]] http::Response source_proof_route(const http::Request& request) const;
+    /// A script's approval from the page's intent: its name, version,
+    /// runtime, whether deterministic, and its files' paths, sizes, and
+    /// digests (computed in the browser, which never sends the files); its
+    /// note committed as its one field.
+    [[nodiscard]] std::variant<std::pair<protocol::RecordRegisterBody, Draft>, http::Response>
+    script_draft(const nlohmann::json& intent) const;
+    /// A script's withdrawal: its record revoked, with a reason.
+    [[nodiscard]] std::variant<protocol::RecordRevokeBody, http::Response>
+    script_withdrawal(const nlohmann::json& intent) const;
+    /// A registration's sources, its script, and its sources' proofs, from
+    /// the intent, checked as the ledger checks them: into `body` and
+    /// `draft`, or why not.
+    [[nodiscard]] std::optional<std::string> provenance_draft(const nlohmann::json& intent,
+                                                              const std::string& user,
+                                                              protocol::RecordRegisterBody& body,
+                                                              Draft& draft) const;
+    /// What an approval shows of where a statement comes from: a
+    /// registration's sources (with their kinds or ledgers' names), the
+    /// script its provenance names, and the script a revocation withdraws.
+    [[nodiscard]] nlohmann::json provenance_summary(const protocol::LedgerState& state,
+                                                    const protocol::Statement& statement) const;
+    /// A log entry's statement, and when the ledger registered it.
+    struct Logged {
+        protocol::Statement statement;
+        protocol::Timestamp registered_at = 0;
+    };
+    [[nodiscard]] std::optional<Logged> logged(std::uint64_t index) const;
+    /// A script's record as the Scripts screen shows it.
+    [[nodiscard]] nlohmann::json script_view(const protocol::LedgerState& state,
+                                             const protocol::RecordState& record) const;
+    /// Where a record came from, for its page: each source with where it
+    /// stood when the record was registered and where it stands now, and
+    /// the script its registration names. Sources on other ledgers are
+    /// filled in by `add_kept_proofs`, outside the ledger's lock.
+    [[nodiscard]] nlohmann::json made_from(const protocol::LedgerState& state,
+                                           const protocol::RecordState& record,
+                                           const protocol::RecordRegisterBody& body) const;
+    /// Each source on another ledger whose proof is kept here: its
+    /// organization, type, and statuses, as the proof shows them.
+    void add_kept_proofs(nlohmann::json& made, const protocol::Id& record,
+                         const std::vector<protocol::Source>& sources,
+                         const protocol::Id& ledger) const;
     [[nodiscard]] nlohmann::json settings_view(Role role) const;
     [[nodiscard]] http::Response enroll_begin(const http::Request& request) const;
     [[nodiscard]] http::Response enroll_finish(const http::Request& request) const;

@@ -43,6 +43,7 @@
 #include <kanhe/console/setup.hpp>
 #include <kanhe/console/users.hpp>
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/exchange.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/core/protocol/witness.hpp>
@@ -54,6 +55,7 @@
 #include <kanhe/node/keeper.hpp>
 #include <kanhe/node/peers.hpp>
 #include <kanhe/node/record_files.hpp>
+#include <kanhe/node/sources.hpp>
 
 #include "support/authenticator.hpp"
 #include "support/ledger_world.hpp"
@@ -1815,6 +1817,393 @@ TEST_CASE("a proof discloses the fields and files chosen, and verifies", "[conso
     CHECK(proof(f.w, viewer, {{"record", record}, {"disclose", {"taken"}}}).status == 403);
     CHECK(proof(f.w, owner, {{"record", record}, {"disclose", {"colour"}}}).status == 400);
     CHECK(proof(f.w, owner, {{"record", std::string(64, '0')}}).status == 404);
+}
+
+namespace {
+
+/// A file's digest under SHA-256, as the console's page computes it (the
+/// first run's ledger hashes with SHA-256).
+std::string sha256_hex(std::string_view content) {
+    const auto digest = provider().digest(kanhe::crypto::HashAlg::sha256, kanhe::as_bytes(content));
+    REQUIRE(digest);
+    return kanhe::to_hex(digest->bytes());
+}
+
+/// Approves a script of one file as `token`'s user, with a tap; its id.
+std::string approve_script(FirstRunWorld& f, const std::string& token) {
+    const auto prepared = f.w.post_as(
+        "/console/api/prepare",
+        {{"action", "script.approve"},
+         {"name", "monthly-report"},
+         {"version", "1.0"},
+         {"files", nlohmann::json::array({nlohmann::json{
+                       {"path", "main.py"}, {"size", 5}, {"digest", sha256_hex("print")}}})}},
+        token);
+    REQUIRE(prepared.status == 200);
+    const auto approved = approve(f.w, token, nlohmann::json::parse(body(prepared)), f.alice);
+    REQUIRE(approved.status == 201);
+    return nlohmann::json::parse(body(approved))["statement_id"].get<std::string>();
+}
+
+nlohmann::json local_source(const std::string& record) {
+    return nlohmann::json{{"record", record}};
+}
+
+} // namespace
+
+TEST_CASE("scripts: approved in person by an owner, listed, and withdrawn with a tap",
+          "[console][scripts]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string main_py = "print('a report')\n";
+    const std::string total_py = "def total(rows): return sum(rows)\n";
+    // As the page sends them: the files' paths, sizes, and digests, never
+    // the files, in any order.
+    const nlohmann::json files = nlohmann::json::array(
+        {nlohmann::json{
+             {"path", "src/main.py"}, {"size", main_py.size()}, {"digest", sha256_hex(main_py)}},
+         nlohmann::json{{"path", "lib/total.py"},
+                        {"size", total_py.size()},
+                        {"digest", sha256_hex(total_py)}}});
+    const nlohmann::json intent{{"action", "script.approve"},
+                                {"name", "monthly-report"},
+                                {"version", "1.0"},
+                                {"files", files},
+                                {"deterministic", true},
+                                {"runtime", "python 3.12"},
+                                {"note", "read by two people"}};
+    auto prepare = [&](const nlohmann::json& with, const std::string& as) {
+        return f.w.post_as("/console/api/prepare", with, as);
+    };
+    auto changed = [&](const std::string& key, nlohmann::json value) {
+        nlohmann::json with = intent;
+        with[key] = std::move(value);
+        return prepare(with, owner).status;
+    };
+    // Only owners and admins approve scripts.
+    CHECK(prepare(intent, f.w.session_for("Mia", console::Role::member)).status == 403);
+    CHECK(prepare(intent, f.w.session_for("Vera", console::Role::viewer)).status == 403);
+    // What the ledger would refuse is refused first, in words.
+    CHECK(changed("name", "") == 400);
+    CHECK(changed("version", std::string(65, 'v')) == 400);
+    CHECK(changed("files", nlohmann::json::array()) == 400);
+    CHECK(changed("files",
+                  nlohmann::json::array({nlohmann::json{
+                      {"path", "../escape.py"}, {"size", 1}, {"digest", sha256_hex("x")}}})) ==
+          400);
+    CHECK(changed("files", nlohmann::json::array({nlohmann::json{
+                               {"path", "a.py"}, {"size", 1}, {"digest", "abcd"}}})) == 400);
+    CHECK(changed("files", nlohmann::json::array({nlohmann::json{
+                               {"path", "a.py"}, {"size", -1}, {"digest", sha256_hex("x")}}})) ==
+          400);
+    CHECK(changed("files", nlohmann::json::array({files[0], files[0]})) == 400);
+    CHECK(changed("deterministic", "yes") == 400);
+
+    const auto answer = prepare(intent, owner);
+    REQUIRE(answer.status == 200);
+    const auto prepared = nlohmann::json::parse(body(answer));
+    const auto& summary = prepared["summary"];
+    CHECK(summary["record_type"] == "kanhe.script/1");
+    CHECK(summary["script"].is_null());
+    CHECK(summary["sources"].empty());
+    // Its terms, which the page compares with the files it fingerprinted;
+    // ascending by path, as the ledger takes them; its note its one field.
+    const auto& terms = summary["script_approval"];
+    CHECK(terms["name"] == "monthly-report");
+    CHECK(terms["version"] == "1.0");
+    CHECK(terms["deterministic"] == true);
+    CHECK(terms["runtime"] == "python 3.12");
+    REQUIRE(terms["files"].size() == 2);
+    CHECK(terms["files"][0]["path"] == "lib/total.py");
+    CHECK(terms["files"][1]["path"] == "src/main.py");
+    CHECK(terms["files"][1]["size"] == main_py.size());
+    CHECK(terms["files"][1]["digest"] == sha256_hex(main_py));
+    CHECK(summary["metadata"].empty());
+    REQUIRE(summary["fields"].size() == 1);
+    CHECK(summary["fields"][0]["value"] == "read by two people");
+    const auto approved = approve(f.w, owner, prepared, f.alice);
+    REQUIRE(approved.status == 201);
+    const std::string id = nlohmann::json::parse(body(approved))["statement_id"].get<std::string>();
+
+    // On the ledger: a script, approved by Alice in person.
+    const auto script = *kanhe::protocol::to_id(*kanhe::from_hex(id));
+    const auto* record = served.session.ledger().state().record(script);
+    REQUIRE(record != nullptr);
+    CHECK(record->record_type == "kanhe.script/1");
+    const auto index = *served.session.ledger().state().statement_index(script);
+    CHECK(served.session.statement(index).statement.presence.has_value());
+
+    // Listed, with the ledger's hash the page computes digests under.
+    const auto listed = nlohmann::json::parse(body(f.w.get("/console/api/scripts", owner)));
+    CHECK(listed["may_approve"] == true);
+    CHECK(listed["hash"]["name"] == "SHA-256");
+    CHECK(listed["hash"]["cose"] == -16);
+    REQUIRE(listed["scripts"].size() == 1);
+    const auto& shown = listed["scripts"][0];
+    CHECK(shown["id"] == id);
+    CHECK(shown["status"] == "approved");
+    CHECK(shown["approved_by"]["name"] == "Alice");
+    CHECK(shown["in_person"] == "passkey");
+    CHECK(shown["withdrawn_at"].is_null());
+    CHECK(shown["files"].size() == 2);
+    const std::string viewer = f.w.session_for("Vic", console::Role::viewer);
+    CHECK(nlohmann::json::parse(body(f.w.get("/console/api/scripts", viewer)))["may_approve"] ==
+          false);
+    const auto one = nlohmann::json::parse(body(f.w.get("/console/api/scripts/" + id, owner)));
+    CHECK(one["name"] == "monthly-report");
+    CHECK(one["may_withdraw"] == true);
+    CHECK(one["hash"]["cose"] == -16);
+    CHECK(f.w.get("/console/api/scripts/" + std::string(64, '0'), owner).status == 404);
+    CHECK(f.w.get("/console/api/scripts/xyz", owner).status == 400);
+    CHECK(f.w.post_as("/console/api/scripts", nlohmann::json::object(), owner).status == 405);
+    // Offered to the document form; a script is no document to name as a
+    // source.
+    const auto offered = nlohmann::json::parse(body(f.w.get("/console/api/sources", owner)));
+    REQUIRE(offered["scripts"].size() == 1);
+    CHECK(offered["scripts"][0]["name"] == "monthly-report");
+    CHECK(offered["records"].empty());
+
+    // Withdrawn by an owner or an admin only, its record's revocation too.
+    const std::string member = f.w.session_for("Max", console::Role::member);
+    CHECK(prepare({{"action", "script.withdraw"}, {"script", id}}, member).status == 403);
+    CHECK(
+        prepare({{"action", "script.withdraw"}, {"script", std::string(64, '0')}}, owner).status ==
+        404);
+    const auto withdrawal = prepare(
+        {{"action", "script.withdraw"}, {"script", id}, {"reason", "replaced by 1.1"}}, owner);
+    REQUIRE(withdrawal.status == 200);
+    const auto withdrawing = nlohmann::json::parse(body(withdrawal));
+    CHECK(withdrawing["summary"]["type"] == "record-revoke");
+    CHECK(withdrawing["summary"]["record"] == id);
+    CHECK(withdrawing["summary"]["withdraws"]["name"] == "monthly-report");
+    CHECK(withdrawing["summary"]["withdraws"]["version"] == "1.0");
+    REQUIRE(approve(f.w, owner, withdrawing, f.alice).status == 201);
+    CHECK(served.session.ledger().state().record(script)->revoked);
+    const auto after = nlohmann::json::parse(body(f.w.get("/console/api/scripts/" + id, owner)));
+    CHECK(after["status"] == "withdrawn");
+    CHECK(after["withdraw_reason"] == "replaced by 1.1");
+    CHECK(after["withdrawn_at"].is_number());
+    CHECK(after["may_withdraw"] == false);
+    // Once: and records can no longer name it.
+    CHECK(prepare({{"action", "script.withdraw"}, {"script", id}}, owner).status == 409);
+    CHECK(nlohmann::json::parse(body(f.w.get("/console/api/sources", owner)))["scripts"].empty());
+}
+
+TEST_CASE("a document names its sources and its script; its page shows where it came from",
+          "[console][sources]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string source = kanhe::to_hex(register_photo(f, owner, "the first photo").bytes());
+    const std::string script = approve_script(f, owner);
+    // The form's choices: this ledger's live documents, the approved scripts.
+    const auto offered = nlohmann::json::parse(body(f.w.get("/console/api/sources", owner)));
+    REQUIRE(offered["records"].size() == 1);
+    CHECK(offered["records"][0]["id"] == source);
+    CHECK(offered["records"][0]["kind"] == "Photo");
+    CHECK(
+        nlohmann::json::parse(body(f.w.get("/console/api/sources?type=other/1", owner)))["records"]
+            .empty());
+    REQUIRE(offered["scripts"].size() == 1);
+    CHECK(offered["scripts"][0]["id"] == script);
+
+    auto prepare = [&](const nlohmann::json& more) {
+        const auto file = nlohmann::json::parse(body(upload(f.w, owner, "photo.jpg", "derived")));
+        nlohmann::json intent{{"action", "record.register"},
+                              {"kind", "example.org.photo/1"},
+                              {"fields", {{"place", "Kowloon Bay"}}},
+                              {"files", nlohmann::json::array({file["upload"]})}};
+        intent.update(more);
+        return f.w.post_as("/console/api/prepare", intent, owner);
+    };
+    // What the ledger refuses, said first: no such record, a record that is
+    // no document, a source named twice, a document that is no script.
+    CHECK(prepare({{"sources", nlohmann::json::array({local_source(std::string(64, 'a'))})}})
+              .status == 400);
+    CHECK(prepare({{"sources", nlohmann::json::array({local_source(script)})}}).status == 400);
+    CHECK(
+        prepare({{"sources", nlohmann::json::array({local_source(source), local_source(source)})}})
+            .status == 400);
+    CHECK(prepare({{"script", source}}).status == 400);
+    CHECK(prepare({{"sources", "a list"}}).status == 400);
+
+    // Made from the photo, by the script: in the registration and its
+    // provenance, and shown before the tap.
+    const auto made_answer =
+        prepare({{"sources", nlohmann::json::array({local_source(source)})}, {"script", script}});
+    REQUIRE(made_answer.status == 200);
+    const auto prepared = nlohmann::json::parse(body(made_answer));
+    CHECK(prepared["summary"]["script"] == script);
+    CHECK(prepared["summary"]["script_name"] == "monthly-report 1.0");
+    REQUIRE(prepared["summary"]["sources"].size() == 1);
+    CHECK(prepared["summary"]["sources"][0]["record"] == source);
+    CHECK(prepared["summary"]["sources"][0]["local"] == true);
+    CHECK(prepared["summary"]["sources"][0]["kind"] == "Photo");
+    const auto approved = approve(f.w, owner, prepared, f.alice);
+    REQUIRE(approved.status == 201);
+    const std::string derived =
+        nlohmann::json::parse(body(approved))["statement_id"].get<std::string>();
+    const auto derived_id = *kanhe::protocol::to_id(*kanhe::from_hex(derived));
+    const auto statement =
+        served.session.statement(*served.session.ledger().state().statement_index(derived_id))
+            .statement;
+    REQUIRE(statement.provenance);
+    REQUIRE(statement.provenance->script);
+    CHECK(kanhe::to_hex(statement.provenance->script->bytes()) == script);
+    const auto& registration = std::get<kanhe::protocol::RecordRegisterBody>(statement.body);
+    REQUIRE(registration.sources.size() == 1);
+    CHECK(registration.sources[0].ledger == served.session.state().ledger_id());
+    CHECK(kanhe::to_hex(registration.sources[0].record.bytes()) == source);
+
+    // Its page: the photo live when it was made and now; the script approved.
+    auto made_from = [&] {
+        return nlohmann::json::parse(
+            body(f.w.get("/console/api/records/" + derived, owner)))["made_from"];
+    };
+    auto made = made_from();
+    REQUIRE(made["sources"].size() == 1);
+    CHECK(made["sources"][0]["kind"] == "Photo");
+    CHECK(made["sources"][0]["at_record"] == "live");
+    CHECK(made["sources"][0]["now"] == "live");
+    CHECK(made["stale"] == false);
+    CHECK(made["script"]["name"] == "monthly-report");
+    CHECK(made["script"]["status"] == "approved");
+    // The photo's own page names nothing.
+    const auto plain =
+        nlohmann::json::parse(body(f.w.get("/console/api/records/" + source, owner)));
+    CHECK(plain["made_from"]["sources"].empty());
+    CHECK(plain["made_from"]["script"].is_null());
+
+    // The photo revoked since: a warning on the record, which stays as it is.
+    const auto revoke = f.w.post_as(
+        "/console/api/prepare",
+        {{"action", "record.revoke"}, {"record", source}, {"reason", "taken again"}}, owner);
+    REQUIRE(revoke.status == 200);
+    REQUIRE(approve(f.w, owner, nlohmann::json::parse(body(revoke)), f.alice).status == 201);
+    made = made_from();
+    CHECK(made["sources"][0]["at_record"] == "live");
+    CHECK(made["sources"][0]["now"] == "revoked");
+    CHECK(made["sources"][0]["changed_at"].is_number());
+    CHECK(made["stale"] == true);
+    // A revoked record is no source now; a withdrawn script names nothing.
+    CHECK(prepare({{"sources", nlohmann::json::array({local_source(source)})}}).status == 400);
+    const auto withdrawal = f.w.post_as("/console/api/prepare",
+                                        {{"action", "script.withdraw"}, {"script", script}}, owner);
+    REQUIRE(withdrawal.status == 200);
+    REQUIRE(approve(f.w, owner, nlohmann::json::parse(body(withdrawal)), f.alice).status == 201);
+    CHECK(prepare({{"script", script}}).status == 400);
+    CHECK(made_from()["script"]["status"] == "withdrawn");
+
+    // Its proof says the same, wherever it is checked.
+    const auto evidence = proof(f.w, owner, {{"record", derived}});
+    REQUIRE(evidence.status == 200);
+    kanhe::protocol::VerifyOptions options;
+    options.expected_ledger = served.session.state().ledger_id();
+    const auto report = kanhe::ledger::verify_bundle(provider(), evidence.body, options);
+    REQUIRE(report);
+    REQUIRE(report->sources.size() == 1);
+    CHECK(report->sources[0].at_record == kanhe::protocol::SourceStatus::live);
+    CHECK(report->sources[0].at_checkpoint == kanhe::protocol::SourceStatus::revoked);
+    REQUIRE(report->scripts.size() == 1);
+    CHECK(report->scripts[0].script.name == "monthly-report");
+    CHECK(report->scripts[0].withdrawn_at.has_value());
+}
+
+TEST_CASE("a source on another ledger: named by its ids, its proof checked and kept",
+          "[console][sources]") {
+    FirstRunWorld fa;
+    Served alice(fa);
+    FirstRunWorld fb;
+    Served bob(fb);
+    const std::string a = fa.made["session"].get<std::string>();
+    const std::string b = fb.made["session"].get<std::string>();
+    // Bob's ledger's photo, and its evidence as his console gives it.
+    const std::string theirs = kanhe::to_hex(register_photo(fb, b, "bob's photo").bytes());
+    const std::string their_ledger = kanhe::to_hex(bob.session.state().ledger_id().bytes());
+    const auto evidence = proof(fb.w, b, {{"record", theirs}});
+    REQUIRE(evidence.status == 200);
+    const std::string evidence_bytes(evidence.body.begin(), evidence.body.end());
+
+    REQUIRE(fa.w.post_as("/console/api/kinds", photo_kind, a).status == 200);
+    auto prepare = [&](const nlohmann::json& more) {
+        const auto file = nlohmann::json::parse(body(upload(fa.w, a, "photo.jpg", "derived")));
+        nlohmann::json intent{{"action", "record.register"},
+                              {"kind", "example.org.photo/1"},
+                              {"fields", {{"place", "Kowloon Bay"}}},
+                              {"files", nlohmann::json::array({file["upload"]})}};
+        intent.update(more);
+        return fa.w.post_as("/console/api/prepare", intent, a);
+    };
+    auto uploaded = [&](const std::string& content) {
+        return nlohmann::json::parse(body(upload(fa.w, a, "proof.cbor", content)))["upload"];
+    };
+    const nlohmann::json remote{{"ledger", their_ledger}, {"record", theirs}};
+    const nlohmann::json named{{"sources", nlohmann::json::array({remote})}};
+    // A proof of a source not named, or a file that is no proof, is refused.
+    CHECK(prepare({{"source_proofs", nlohmann::json::array({uploaded(evidence_bytes)})}}).status ==
+          400);
+    CHECK(prepare({{"sources", nlohmann::json::array({remote})},
+                   {"source_proofs", nlohmann::json::array({uploaded("not a proof")})}})
+              .status == 400);
+    CHECK(prepare({{"sources", nlohmann::json::array({remote})},
+                   {"source_proofs", nlohmann::json::array({"no-such-upload"})}})
+              .status == 400);
+
+    // Named with its proof: checked now, kept once the record is registered.
+    const auto with_proof =
+        prepare({{"sources", nlohmann::json::array({remote})},
+                 {"source_proofs", nlohmann::json::array({uploaded(evidence_bytes)})}});
+    REQUIRE(with_proof.status == 200);
+    const auto prepared = nlohmann::json::parse(body(with_proof));
+    REQUIRE(prepared["summary"]["sources"].size() == 1);
+    CHECK(prepared["summary"]["sources"][0]["local"] == false);
+    CHECK(prepared["summary"]["sources"][0]["ledger"] == their_ledger);
+    const auto approved = approve(fa.w, a, prepared, fa.alice);
+    REQUIRE(approved.status == 201);
+    const std::string derived =
+        nlohmann::json::parse(body(approved))["statement_id"].get<std::string>();
+    const auto derived_id = *kanhe::protocol::to_id(*kanhe::from_hex(derived));
+    CHECK(alice.session.state().record(derived_id) != nullptr);
+    CHECK(kanhe::node::kept_source_proofs(fa.w.dir.path, derived_id).size() == 1);
+    auto source_of = [&](const std::string& record) {
+        return nlohmann::json::parse(
+            body(fa.w.get("/console/api/records/" + record, a)))["made_from"]["sources"][0];
+    };
+    auto shown = source_of(derived);
+    CHECK(shown["local"] == false);
+    CHECK(shown["proof_kept"] == true);
+    CHECK(shown["organization"] == bob.session.state().organization());
+    CHECK(shown["type"] == "example.org.photo/1");
+    CHECK(shown["at_record"] == "live");
+    CHECK(shown["now"] == "live");
+    CHECK(shown["as_of"].is_number());
+
+    // Named without one: shown without its standing, until a proof is kept
+    // from its page (by those who may act on it).
+    const auto bare = prepare(named);
+    REQUIRE(bare.status == 200);
+    const auto registered = approve(fa.w, a, nlohmann::json::parse(body(bare)), fa.alice);
+    REQUIRE(registered.status == 201);
+    const std::string second =
+        nlohmann::json::parse(body(registered))["statement_id"].get<std::string>();
+    shown = source_of(second);
+    CHECK(shown["proof_kept"] == false);
+    CHECK(shown["type"].is_null());
+    const std::string keep = "/console/api/records/" + second + "/source-proofs";
+    const nlohmann::json later{{"upload", uploaded(evidence_bytes)}};
+    CHECK(fa.w.post_as(keep, later, fa.w.session_for("Vera", console::Role::viewer)).status == 403);
+    CHECK(fa.w.get(keep, a).status == 405);
+    CHECK(fa.w.post_as(keep, {{"upload", uploaded("not a proof")}}, a).status == 422);
+    CHECK(fa.w.post_as(keep, {{"upload", "no-such-upload"}}, a).status == 404);
+    CHECK(fa.w.post_as("/console/api/records/" + std::string(64, '0') + "/source-proofs", later, a)
+              .status == 404);
+    const auto kept = fa.w.post_as(keep, later, a);
+    REQUIRE(kept.status == 200);
+    CHECK(nlohmann::json::parse(body(kept))["kept"]["record"] == theirs);
+    shown = source_of(second);
+    CHECK(shown["proof_kept"] == true);
+    CHECK(shown["now"] == "live");
 }
 
 TEST_CASE("the console's tasks are all waited for, those they start too", "[console]") {
