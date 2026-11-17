@@ -149,9 +149,15 @@ std::string completion_script(std::string_view shell) {
     local cur prefix words opts i w
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prefix=""
+    # The command's words: each one that may follow those before it; the
+    # first argument or option ends them.
     for ((i = 1; i < COMP_CWORD; i++)); do
         w="${{COMP_WORDS[i]}}"
         [[ "$w" == -* ]] && break
+        words=""
+        case "$prefix" in
+{2}        esac
+        [[ " $words " == *" $w "* ]] || break
         prefix="${{prefix:+$prefix }}$w"
     done
     words=""

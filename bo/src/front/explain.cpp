@@ -230,9 +230,11 @@ Phrase plain(std::string text) {
 
 class Writer {
 public:
-    explicit Writer(const Pack* language)
+    /// `offset_ms`: the contract's offset from UTC, which its dates are
+    /// shown in.
+    explicit Writer(const Pack* language, std::int64_t offset_ms = default_offset_ms)
         : pack_(language != nullptr ? language : &english_pack()),
-          spaced_(pack_->reading.separation == Separation::spaces) {}
+          spaced_(pack_->reading.separation == Separation::spaces), offset_ms_(offset_ms) {}
 
     [[nodiscard]] const Pack& pack() const noexcept { return *pack_; }
 
@@ -421,19 +423,20 @@ public:
             // Years 1 to 9999 at most, as compiled code keeps them; anything
             // far outside is shown as it is.
             if (n && *n > -max_date_ms && *n < max_date_ms) {
-                const std::int64_t local = *n + default_offset_ms;
+                const std::int64_t local = *n + offset_ms_;
                 const auto day = static_cast<std::int64_t>(day_ms);
                 const std::int64_t days = (local >= 0 ? local : local - day + 1) / day;
                 std::string out = date(civil_from_days(days));
                 if (const std::int64_t in_day = local - days * day; in_day != 0) {
                     const std::int64_t minutes = in_day / 60'000;
-                    out += " " + std::string(minutes / 60 < 10 ? "0" : "") +
-                           std::to_string(minutes / 60) + ":" +
-                           std::string(minutes % 60 < 10 ? "0" : "") + std::to_string(minutes % 60);
-                    if (in_day % 60'000 != 0) {
-                        out += ":" + scaled(in_day % 60'000, 1000, 0);
+                    out += std::format(" {:02}:{:02}", minutes / 60, minutes % 60);
+                    if (const std::int64_t ms = in_day % 60'000; ms != 0) {
+                        out += ":" + std::string(ms < 10'000 ? "0" : "") + scaled(ms, 1000, 0);
                     }
-                    out += " (UTC+08:00)";
+                    const std::int64_t offset = offset_ms_ / 60'000;
+                    const std::int64_t whole = offset < 0 ? -offset : offset;
+                    out += std::format(" (UTC{}{:02}:{:02})", offset < 0 ? '-' : '+', whole / 60,
+                                       whole % 60);
                 }
                 return out;
             }
@@ -506,6 +509,7 @@ public:
 private:
     const Pack* pack_;
     bool spaced_;
+    std::int64_t offset_ms_;
 
     [[nodiscard]] std::string amount_of(std::string amount, bool one, const Concept* unit) const {
         return say(one ? "value-unit-one" : "value-unit",
@@ -570,7 +574,8 @@ int level_of(const m::Expr& e) noexcept {
 
 class Explainer {
 public:
-    Explainer(const m::Model& model, const Pack* language) : model_(model), w_(language) {}
+    Explainer(const m::Model& model, const Pack* language)
+        : model_(model), w_(language, model.utc_offset_ms) {}
 
     /// A concept by id: the edition's, or one of the users' vocabulary
     /// packs the model uses.
@@ -1865,7 +1870,7 @@ Explained explain(const model::Model& model, const Pack* language) {
 
 ExplainedState explain_state(const model::Model& model, const cbor::Value& state,
                              const Pack* language, const LedgerLabel& ledger) {
-    const Writer w(language);
+    const Writer w(language, model.utc_offset_ms);
     ExplainedState out;
     if (const cbor::Value* name = state.find("state"); name != nullptr && name->as_text()) {
         for (const model::State& s : model.states) {

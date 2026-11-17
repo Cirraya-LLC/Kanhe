@@ -982,7 +982,8 @@ std::vector<CommandSpec> chain_commands() {
          with({ledger_option}),
          cmd_checkpoint_list},
         {{"checkpoint", "show"},
-         "Show a checkpoint (default: the latest)",
+         "Show a checkpoint (default: the latest): its witnesses, time stamps, and state "
+         "commitment",
          "Checkpoints and proofs",
          "[SIZE]",
          0,

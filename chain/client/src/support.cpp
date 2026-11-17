@@ -79,25 +79,62 @@ std::string short_id(const protocol::Id& id) {
 }
 
 protocol::Timestamp parse_time(std::string_view text) {
+    const std::string str(text);
+    const std::string usage = "time must be YYYY-MM-DD, or YYYY-MM-DDTHH:MM:SS followed by Z or "
+                              "an offset such as +08:00: " +
+                              str;
     int y = 0;
     unsigned mo = 0;
     unsigned d = 0;
     unsigned h = 0;
     unsigned mi = 0;
     unsigned s = 0;
-    const std::string str(text);
-    const int fields = std::sscanf(str.c_str(), "%d-%u-%uT%u:%u:%u", &y, &mo, &d, &h, &mi, &s);
-    if (fields != 3 && fields != 6) {
-        throw UsageError{"time must be YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ"};
+    int used = 0;
+    if (str.empty() || std::isdigit(static_cast<unsigned char>(str.front())) == 0 ||
+        std::sscanf(str.c_str(), "%d-%u-%u%n", &y, &mo, &d, &used) != 3) {
+        throw UsageError{usage};
+    }
+    std::string_view rest = std::string_view(str).substr(static_cast<std::size_t>(used));
+    // An offset from UTC in minutes: the time given is UTC plus it.
+    int offset = 0;
+    if (!rest.empty()) {
+        int more = 0;
+        const std::string clock(rest);
+        if (rest.size() < 9 || rest.front() != 'T' ||
+            std::isdigit(static_cast<unsigned char>(rest[1])) == 0 ||
+            std::sscanf(clock.c_str(), "T%u:%u:%u%n", &h, &mi, &s, &more) != 3) {
+            throw UsageError{usage};
+        }
+        rest = rest.substr(static_cast<std::size_t>(more));
+        auto digits = [&](std::size_t at) {
+            return std::isdigit(static_cast<unsigned char>(rest[at])) != 0 &&
+                   std::isdigit(static_cast<unsigned char>(rest[at + 1])) != 0;
+        };
+        if (rest == "Z" || rest.empty()) {
+            // UTC
+        } else if (rest.size() == 6 && (rest[0] == '+' || rest[0] == '-') && rest[3] == ':' &&
+                   digits(1) && digits(4)) {
+            const int oh = (rest[1] - '0') * 10 + (rest[2] - '0');
+            const int om = (rest[4] - '0') * 10 + (rest[5] - '0');
+            if (oh > 23 || om > 59) {
+                throw UsageError{usage};
+            }
+            offset = (rest[0] == '+' ? 1 : -1) * (oh * 60 + om);
+        } else {
+            throw UsageError{usage};
+        }
     }
     using namespace std::chrono;
     const year_month_day date{year{y}, month{mo}, day{d}};
     if (!date.ok() || h > 23 || mi > 59 || s > 59) {
         throw UsageError{"invalid date " + str};
     }
-    const auto time = sys_days{date} + hours{h} + minutes{mi} + seconds{s};
-    return static_cast<protocol::Timestamp>(
-        duration_cast<milliseconds>(time.time_since_epoch()).count());
+    const auto time = sys_days{date} + hours{h} + minutes{mi} + seconds{s} - minutes{offset};
+    const auto ms = duration_cast<milliseconds>(time.time_since_epoch()).count();
+    if (ms < 0) {
+        throw UsageError{"a time before 1970: " + str};
+    }
+    return static_cast<protocol::Timestamp>(ms);
 }
 
 crypto::openssl::KeyPair load_key(const std::filesystem::path& path,

@@ -411,6 +411,21 @@ TEST_CASE("an instance's state, in the text's words", "[bo][explain]") {
           std::vector<std::string>{"正常", "label: 「a」", "approved: 是", "total: 港元 -123.45",
                                    "ends: 2030年1月1日 13:30 (UTC+08:00)", "size: 1.5 GB",
                                    "count: 1,234,567", "持有人: ledger 32 bytes"});
+    // At the contract's own offset, seconds in two digits.
+    const std::string west = "use commerce\ncontract Values\nparties we, customer\nthing Sheet\n"
+                             "  ends date\n  UTC offset \"-05:00\"\n"
+                             "can close by we\n  active -> closed\n";
+    const Lexed west_lexed = lex(west, official());
+    const Parsed west_parsed = parse(west, west_lexed);
+    const Checked west_checked = check(west, west_parsed.file);
+    REQUIRE(!has_errors(west_checked.diagnostics));
+    // 2030-01-01T05:30:05Z, 00:30:05 at -05:00.
+    const auto at_west =
+        kanhe::cbor::parse_diagnostic(R"({"state": "active", "fields": {"ends": 1893475805000}})");
+    REQUIRE(at_west);
+    const ExplainedState shown = explain_state(west_checked.model, *at_west, nullptr, label);
+    REQUIRE(shown.fields.size() == 1);
+    CHECK(shown.fields[0].value == "1 January 2030 00:30:05 (UTC-05:00)");
     // A value not of its field's type is shown as it is.
     const auto odd =
         kanhe::cbor::parse_diagnostic(R"({"state": "gone", "fields": {"total": "x"}})");

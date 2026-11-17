@@ -851,6 +851,10 @@ int cmd_bo_check(const Args& args) {
         throw UsageError{
             "--stage must be lex (the tokens), parse (the tree), or model (the checked model)"};
     }
+    if (file.ends_with(".boc")) {
+        throw UsageError{file + " is a built contract, built from a source that checked: bo "
+                                "explain and bo calls read it"};
+    }
     const bo::PackSet set = pack_set(args);
     const bo::Pack* language = set_language(args, set);
     const Bytes bytes = read_file(file);

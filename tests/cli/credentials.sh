@@ -87,6 +87,7 @@ start_server server.json --ledger local --log-key log.key --checkpoint-interval 
 [ "$(fetch "$URL/.well-known/did.json" did.json)" = 200 ] || fail "GET the DID document"
 contains -i "^access-control-allow-origin: \*" headers.txt || fail "any wallet may read it"
 contains -i "^content-type: application/did+json" headers.txt || fail "a DID document's type"
+[ "$(grep -ci '^cache-control:' headers.txt)" = 1 ] || fail "one Cache-Control header"
 [ "$(json 'd["id"]' < did.json)" = "did:web:127.0.0.1%3A$PORT" ] || fail "its id"
 [ "$(json 'd["verificationMethod"][0]["id"]' < did.json)" = "did:web:127.0.0.1%3A$PORT#$THUMBPRINT" ] ||
     fail "the server's credential key, by its thumbprint"
@@ -154,6 +155,7 @@ contains -- "--allow-http" out.txt
 expect_exit 2 credential verify diploma.jwt --allow-http --ledger-id "$(printf '%064d' 0)"
 # Offline, from files.
 fetch "$URL/c/$TOKEN" evidence.cbor > /dev/null
+[ "$(grep -ci '^cache-control:' headers.txt)" = 1 ] || fail "one Cache-Control header on /c/"
 fetch "$URL/status/1" list.jwt > /dev/null
 contains -i "^content-type: application/vc+jwt" headers.txt || fail "a status list's type"
 # Kept while nothing changes: the same signature (ES256 signs differently each time).

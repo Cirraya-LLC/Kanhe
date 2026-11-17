@@ -52,10 +52,15 @@ inline const std::vector<OptionSpec> client_options{
 /// Commands that work on a ledger directory only: they administer the
 /// server's files and keys, or peers' exchanges with it.
 inline const std::set<std::string_view> local_only{"init",  "serve", "token",  "replica", "backup",
-                                                   "vault", "peer",  "access", "cluster"};
-/// Single commands of other groups that need the directory (its peers).
+                                                   "vault", "peer",  "access", "cluster", "relay"};
+/// Commands of other groups that need the directory (its peers, the trust
+/// nodes it belongs to): $KANHE_SERVER does not send them to a mirror.
 inline const std::set<std::pair<std::string_view, std::string_view>> local_only_commands{
-    {"contract", "send"}, {"contract", "fetch"}, {"keeper", "due"}, {"record", "source"}};
+    {"contract", "send"},
+    {"contract", "fetch"},
+    {"keeper", "due"},
+    {"record", "source"},
+    {"trust", "node"}};
 /// The cluster commands that talk to a member's API.
 inline std::vector<OptionSpec> cluster_api(std::vector<OptionSpec> extra) {
     std::vector<OptionSpec> options{

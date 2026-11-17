@@ -97,6 +97,9 @@ run trust node fetch --ledger school | contains "Kowloon Example School is activ
 [ "$(run trust node list --ledger school --json | json 'd[0]["proof"]["state"]')" = active ] ||
     fail "the proof kept"
 [ -f "school/trust/proofs/$NODE.cbor" ] || fail "kept beside the ledger"
+# Beside the ledger: $KANHE_SERVER does not send it to a mirror.
+[ "$(KANHE_SERVER="$URL" KANHE_LEDGER=school "$KANHE" trust node list --json | json 'd[0]["name"]')" = \
+    hktrust ] || fail "trust node list with KANHE_SERVER set"
 
 # --- The school's evidence carries it -------------------------------------------------------
 CERT="$(run record issue --ledger school --as s-root.key --type example.org.diploma/1 \

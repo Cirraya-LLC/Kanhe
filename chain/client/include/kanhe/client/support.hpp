@@ -49,7 +49,9 @@ void write_file(const std::filesystem::path& path, ByteView data, bool private_f
 
 [[nodiscard]] std::string hex_id(const protocol::Id& id);
 [[nodiscard]] std::string short_id(const protocol::Id& id);
-/// Parses "YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SSZ" (UTC).
+/// Parses "YYYY-MM-DD" (midnight UTC) or "YYYY-MM-DDTHH:MM:SS" followed by
+/// "Z", nothing (both UTC), or an offset such as "+08:00"; refuses anything
+/// else after it, and a time before 1970.
 [[nodiscard]] protocol::Timestamp parse_time(std::string_view text);
 
 /// The provider every key and token in this process uses.

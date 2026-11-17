@@ -13,6 +13,8 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <kanhe/client/claims.hpp>
+#include <kanhe/client/errors.hpp>
+#include <kanhe/client/support.hpp>
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 
@@ -238,4 +240,25 @@ TEST_CASE("a claim's evidence carries its source, and says when it was revoked",
     std::erase_if(exported->state_proofs,
                   [&](const protocol::StateProof& p) { return p.leaf.id == source; });
     CHECK_FALSE(protocol::verify_bundle(provider(), *protocol::encode_bundle(*exported), options));
+}
+
+TEST_CASE("what a person types: a time with its offset, an amount too large", "[claims][cli]") {
+    using kanhe::client::parse_time;
+    using kanhe::client::UsageError;
+    const kanhe::protocol::Timestamp noon = 1'777'636'800'000; // 2026-05-01T12:00:00Z
+    CHECK(parse_time("2026-05-01T12:00:00Z") == noon);
+    CHECK(parse_time("2026-05-01T12:00:00") == noon);
+    CHECK(parse_time("2026-05-01T20:00:00+08:00") == noon);
+    CHECK(parse_time("2026-05-01T06:30:00-05:30") == noon);
+    CHECK(parse_time("2026-05-01") == noon - 12 * 3'600'000);
+    for (const char* wrong :
+         {"2026-05-01T12:00:00+8", "2026-05-01T12:00:00 UTC", "2026-05-01T12:00:00.000Z",
+          "2026-05-01T12:00:00+24:00", "2026-05-01x", " 2026-05-01", "+2026-05-01", "2026-05-01T",
+          "1969-12-31", "2026-02-30"}) {
+        INFO(wrong);
+        CHECK_THROWS_AS(parse_time(wrong), UsageError);
+    }
+    CHECK_THROWS_AS(kanhe::client::parse_claim_term("salary > HKD 99999999999999999999"),
+                    UsageError);
+    CHECK_NOTHROW(kanhe::client::parse_claim_term("salary > HKD 922337203685477.5807"));
 }

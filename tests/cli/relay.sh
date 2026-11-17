@@ -96,6 +96,9 @@ f checkpoint create --log-key f-log.key > /dev/null
 b checkpoint create --log-key b-log.key > /dev/null
 run relay key init --out f-relay.key > /dev/null
 f relay show | contains "reached directly" || fail "no relay at first"
+# The ledger's own settings: $KANHE_SERVER does not send it to a mirror.
+KANHE_SERVER=http://127.0.0.1:9 KANHE_LEDGER="$F" "$KANHE" relay show | contains "reached directly" ||
+    fail "relay show with KANHE_SERVER set"
 # Not registered with the relay's witness, and no key given: refused.
 expect_exit 1 relay use "$R" --relay-key f-relay.key --ledger "$F"
 f relay use "$R" --relay-key f-relay.key --witness-key witness.pub | contains "reached through" ||

@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <charconv>
 #include <condition_variable>
 #include <deque>
@@ -1168,8 +1169,20 @@ struct LedgerApi::State {
         if (status < responses.size()) {
             responses[status].fetch_add(1, std::memory_order_relaxed);
         }
-        response.headers.emplace_back("Cache-Control", "no-store");
-        response.headers.emplace_back("X-Content-Type-Options", "nosniff");
+        // Once each, whatever case an answer gave them in.
+        auto add = [&](std::string_view name, std::string_view value) {
+            const bool has = std::ranges::any_of(response.headers, [&](const auto& header) {
+                return std::ranges::equal(header.first, name, [](char a, char b) {
+                    return std::tolower(static_cast<unsigned char>(a)) ==
+                           std::tolower(static_cast<unsigned char>(b));
+                });
+            });
+            if (!has) {
+                response.headers.emplace_back(std::string(name), std::string(value));
+            }
+        };
+        add("Cache-Control", "no-store");
+        add("X-Content-Type-Options", "nosniff");
         response.principal = principal;
         done(std::move(response));
     }

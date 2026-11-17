@@ -12,6 +12,7 @@
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/merkle.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/witness.hpp>
 
@@ -300,10 +301,34 @@ int cmd_checkpoint_show(const Args& args) {
                                   {"accuracy_ms", read.accuracy}});
         }
     }
+    // The open network's witnesses (v0.13), by the names they sign with.
+    Json network = Json::array();
+    for (const ledger::StoredNetworkCosignature& c :
+         unwrap(session.ledger().network_cosignatures(), "reading network cosignatures")) {
+        if (c.checkpoint.checkpoint == chosen->checkpoint) {
+            network.push_back({{"name", c.witness.name}, {"key_id", to_hex(c.witness.id)}});
+        }
+    }
+    // The state commitment the checkpoint ends with, if it does: what makes
+    // evidence under it complete.
+    Json commitment;
+    if (const auto last = session.ledger().entry(chosen->checkpoint.tree_size - 1)) {
+        if (const auto entry = protocol::decode_log_entry(*last);
+            entry && entry->is_state_commitment()) {
+            if (const auto signed_commitment =
+                    protocol::parse_state_commitment(session.provider(), entry->state_commitment)) {
+                commitment = {
+                    {"index", signed_commitment->commitment.tree_size},
+                    {"state_root", to_hex(signed_commitment->commitment.state_root.bytes())}};
+            }
+        }
+    }
     if (args.json()) {
         Json out = checkpoint_json(chosen->checkpoint);
         out["kid"] = id_json(chosen->kid);
         out["witnesses"] = witnesses;
+        out["network_witnesses"] = network;
+        out["state_commitment"] = commitment;
         out["timestamps"] = timestamps;
         out["timestamp_imprint"] = to_hex(imprint.bytes());
         out["signed_checkpoint"] = to_hex(chosen->encoded);
@@ -315,9 +340,21 @@ int cmd_checkpoint_show(const Args& args) {
         std::println("witness:    {} key {}", w["key"]["algorithm"].get<std::string>(),
                      w["key"]["key"].get<std::string>());
     }
+    for (const auto& n : network) {
+        std::println("network:    {} (key id {})", n["name"].get<std::string>(),
+                     n["key_id"].get<std::string>());
+    }
     for (const auto& t : timestamps) {
         std::println("stamped:    by {} at {}", t["authority"].get<std::string>(),
                      t["time"].get<std::string>());
+    }
+    if (commitment.is_null()) {
+        std::println("state:      no state commitment at its end (evidence under it is not "
+                     "complete)");
+    } else {
+        std::println("state:      committed at entry {}, root {}",
+                     commitment["index"].get<std::uint64_t>(),
+                     commitment["state_root"].get<std::string>());
     }
     std::println("imprint:    {} (what a time-stamp authority stamps)", to_hex(imprint.bytes()));
     if (const auto out = args.get("out")) {

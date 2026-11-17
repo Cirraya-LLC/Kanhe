@@ -229,6 +229,9 @@ UNTRUSTED="$(run verify evidence.cbor --json)"
 expect_exit 3 verify evidence.cbor --min-witnesses 1
 expect_exit 1 verify evidence.cbor --witness-vkey "$LOG_VKEY"
 run audit --json | json 'd["network_cosignatures"]' | contains -E '^[1-9]'
+[ "$(run checkpoint show --json | json 'd["network_witnesses"][0]["name"]')" = witness.example/test ] ||
+    fail "checkpoint show: the network witness"
+run checkpoint show | contains "network:    witness.example/test" || fail "checkpoint show: in words"
 
 # --- A server asks by itself; a replica and a backup keep them ---------------------
 run token create replica --scope read --out replica.token > /dev/null

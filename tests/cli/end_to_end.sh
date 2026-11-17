@@ -50,6 +50,15 @@ run record show --help | contains 'Usage: kanhe record show RECORD'
 run help --json | json 'len(d) > 40' | contains -x True
 run completion bash > completion.bash && bash -n completion.bash
 contains 'rotate-key' completion.bash
+# Completed as typed: a command's words, then its options, after an argument too.
+complete_line() {
+    bash -c 'source ./completion.bash; COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); _kanhe
+             printf "%s\n" "${COMPREPLY[@]}"' completion "$@"
+}
+complete_line kanhe record sh | contains -x "show" || fail "completion: a command's word"
+complete_line kanhe record show abc --led | contains -x -- "--ledger" ||
+    fail "completion: an option after an argument"
+complete_line kanhe record show --led | contains -x -- "--ledger" || fail "completion: an option"
 run completion zsh | contains bashcompinit
 expect_exit 1 frobnicate
 # Spec v0.9 removed native assets (contracts govern such things): no asset
@@ -246,6 +255,9 @@ run checkpoint create --log-key log.key > /dev/null
 SIZE="$(run status --json | json 'd["entries"]')"
 run checkpoint list | contains "size $SIZE"
 run checkpoint show --out checkpoint.cbor | contains "size:       $SIZE"
+[ "$(run checkpoint show --json | json 'd["state_commitment"]["index"]')" = "$((SIZE - 1))" ] ||
+    fail "checkpoint show: the state commitment it ends with"
+run checkpoint show | contains "state:      committed at entry $((SIZE - 1))"
 run inspect checkpoint.cbor --json | json 'd["checkpoint"]["tree_size"]' | contains -x "$SIZE"
 run proof inclusion 3 --json | json 'd["tree_size"]' | contains -x "$SIZE"
 run proof inclusion "${RECORD:0:12}" --size 7 | contains 'tree size:  7'

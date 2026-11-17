@@ -58,6 +58,8 @@ NO="$(run claim issue "$PAYSLIP" --as root.key --if 'monthly_salary > HKD 40000'
 [ "$(echo "$NO" | json 'd["holds"]')" = False ] || fail "a claim that it does not hold, on purpose"
 expect_exit 1 claim issue "$PAYSLIP" --as root.key --if 'name > "A"'
 expect_exit 1 claim issue "$PAYSLIP" --as root.key --if 'age between 65 and 18'
+expect_exit 1 claim issue "$PAYSLIP" --as root.key --if 'monthly_salary > HKD 99999999999999999999'
+contains "usage error: money's amount is too large" out.txt || fail "an amount too large, named"
 # A claim is no source; a claim's source is a record of this ledger.
 expect_exit 2 claim issue "$CLAIM" --as root.key --if 'basis.status exists'
 [ "$(run claim list --json | json 'len(d)')" = 3 ] || fail "three claims"

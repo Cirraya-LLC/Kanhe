@@ -237,6 +237,12 @@ expect_exit 2 bo check "$TICKETS"
 contains -F "note: use events names no vocabulary pack read here" out.txt || fail "check without --vocab: the note"
 run bo explain "$TICKETS" --vocab "$EVENTS" --language zh-Hant-HK > out.txt
 contains -F "活動詞彙包（第 1 版）" out.txt || fail "explain: the pack's name in the reader's language"
+# The built contract carries its source and its packs: explained once it rebuilds.
+run bo explain tickets.boc --language zh-Hant-HK > boc.txt
+contains -F "rebuild:   rebuilds" boc.txt || fail "explain: a .boc rebuilt"
+contains -F "活動詞彙包（第 1 版）" boc.txt || fail "explain: a .boc in the reader's language"
+expect_exit 1 bo check tickets.boc
+contains -F "is a built contract" out.txt || fail "check: a .boc refused, saying why"
 run bo fmt "$TICKETS" --vocab "$EVENTS" --language zh-Hant-HK > tickets-zh.bo
 contains -Fx "可入場登記" tickets-zh.bo || fail "fmt: the pack's words in Chinese"
 run bo test tickets-zh.bo --vocab "$EVENTS" > out.txt

@@ -2,6 +2,8 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <charconv>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -80,7 +82,12 @@ std::pair<std::string, V> literal(std::string_view text) {
             throw UsageError{"money has at most 4 decimals: " + t};
         }
         const std::string units = amount.substr(0, dot) + fraction;
-        return {"money", V::array({V::integer(std::stoll(units)), V::text(currency),
+        std::int64_t value = 0;
+        const auto [end, error] = std::from_chars(units.data(), units.data() + units.size(), value);
+        if (error != std::errc{} || end != units.data() + units.size()) {
+            throw UsageError{"money's amount is too large: " + t};
+        }
+        return {"money", V::array({V::integer(value), V::text(currency),
                                    V::unsigned_integer(fraction.size())})};
     }
     if (date_like(t)) {
