@@ -3,6 +3,13 @@
 Profile 1 (draft), for protocol revision v0.17 and later. It changes nothing in the protocol: no
 statement, ledger rule, or evidence format is new.
 
+**Changes in this draft (2026-11-17).** Section 7 states how a verifier reads what it is given:
+every JSON text as strict I-JSON (RFC 7493), nested at most 64 deep; a compact JWS of at most
+1 MiB, with only the line ends after it taken off; a DID document of at most 256 KiB, whose
+verification methods, and whose services, have distinct ids; the first `KanheLedger` service that
+names a ledger. A status list number N is below 2^64 - 1 (sections 2, 4, 5). Before, these were
+left to each verifier, and two verifiers could read the same input differently.
+
 **Changes in this draft (2026-11-15).** A status list may be signed by any key the issuer's DID
 document lists (section 7, step 7): before, only by the device that endorsed the credential, so a
 second credential key, or a server key moved to a new device, made valid credentials fail. A list
@@ -22,7 +29,8 @@ This profile uses, without changing them:
 - [Bitstring Status List v1.0](https://www.w3.org/TR/vc-bitstring-status-list/) for revocation;
 - [did:web](https://w3c-ccg.github.io/did-method-web/) to name the issuer, with a verification
   method of type `JsonWebKey` ([Controlled Identifiers v1.0](https://www.w3.org/TR/cid-1.0/));
-- JSON Canonicalization (RFC 8785, JCS), JWK thumbprints (RFC 7638), GZIP (RFC 1952).
+- JSON Canonicalization (RFC 8785, JCS), I-JSON (RFC 7493), JWK thumbprints (RFC 7638), GZIP
+  (RFC 1952).
 
 The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119. Section numbers without a
 document name are the protocol's ([README.md](README.md)).
@@ -53,14 +61,15 @@ credential key may rotate its key like any actor.
 
 The first time it issues a credential for a record, the credential key **endorses that record in
 the role `credential/N/I`**, where N and I are the credential's status list and index (section 5),
-in decimal without leading zeros. That statement is the ledger's witnessed account of the issue:
-the record's evidence then holds it, and with it the credential key's registration, its key
-rotations, and its delegation chain (section 11), so a verifier learns which key the issuer used,
-since when, under whose authority, and which status entry is the record's, from the ledger and not
-from the issuer's word. A credential key endorses a record so at most once: issued again, the
-credential keeps that entry. A revoked record takes no endorsement,
-so no credential is issued for it. A mechanism type takes none either (section 6): claims,
-memberships, and the other `kanhe.` types are not issued as credentials.
+in decimal without leading zeros; a role whose N or I is out of range (section 5) names no entry.
+That statement is the ledger's witnessed account of the issue: the record's evidence then holds
+it, and with it the credential key's registration, its key rotations, and its delegation chain
+(section 11), so a verifier learns which key the issuer used, since when, under whose authority,
+and which status entry is the record's, from the ledger and not from the issuer's word. A
+credential key endorses a record so at most once: issued again, the credential keeps that entry. A
+revoked record takes no endorsement, so no credential is issued for it. A mechanism type takes
+none either (section 6): claims, memberships, and the other `kanhe.` types are not issued as
+credentials.
 
 **The key as a JWK** is `{"kty":"EC","crv":"P-256","x":X,"y":Y}`, X and Y the point's
 coordinates (32 bytes each, from the SEC 1 key of section 3) in unpadded base64url. Its
@@ -142,7 +151,7 @@ Its JSON, before signing:
   named `id` or `type`, or whose name begins with `@`. A metadata entry is the same, by its key.
   Two members never share a name, so a field and a metadata entry of the same name cannot both go
   in.
-- `credentialStatus`: list `N` (1 or more, in decimal) and index `I` (section 5), with `id`
+- `credentialStatus`: list `N` (in decimal) and index `I` (section 5), with `id`
   `BASE/status/N#I`.
 - `evidence` names the record: `id` its published address, `ledger` and `record` their ids in
   lowercase hex.
@@ -167,10 +176,10 @@ endorsement), and is signed with the credential key's current key.
 
 ## 5. The status list
 
-Each credential has an entry in a status list: list `N` (1 or more), index `I` in [0, 131072),
-named by its endorsement (section 2). An issuer SHOULD choose `I` at random among the indices of its
-current list that no endorsement names (so that indices say nothing of the order of issue), and
-start list `N + 1` when one is full.
+Each credential has an entry in a status list: list `N` (1 or more, and below 2^64 - 1, so at
+most 20 digits), index `I` in [0, 131072), named by its endorsement (section 2). An issuer SHOULD
+choose `I` at random among the indices of its current list that no endorsement names (so that
+indices say nothing of the order of issue), and start list `N + 1` when one is full.
 
 **A list is a function of the ledger.** Its bit `I` is 1 if a record endorsed in the role
 `credential/N/I` by a credential key (section 2) is **revoked or replaced** (section 6 of the
@@ -237,7 +246,27 @@ the status list entry.
 
 A **Kanhe verifier** checks, in addition, the record behind it. Given the credential, the
 record's evidence bundle (from `evidence[0].id`, or provided), and, when it has them, the issuer's
-DID document and status list credential, it:
+DID document and status list credential, it reads each as follows, the same in every Kanhe
+verifier, and refuses what does not read so.
+
+- **JSON.** Every JSON text (a JWS's header and payload, a DID document) is strict I-JSON (RFC
+  7493): UTF-8, and no byte order mark; no surrogate code point in a string or a member name (so
+  no half of a surrogate pair escaped alone) and no noncharacter (U+FDD0 to U+FDEF, and the last
+  two code points of every plane), escaped or not; no number of a magnitude an IEEE 754 double
+  cannot hold (such as `1e400`, or an integer of 310 digits; one too small for a double reads as
+  0); no member name twice in one object. And no value is nested more than 64 deep: the outermost
+  value is at depth 0, the values of its members or items at depth 1, and so on.
+- **A compact JWS** (the credential, the status list credential): the line ends (CR and LF) at
+  its end are a file's and are taken off; nothing else is, no other whitespace, before or after.
+  What remains is at most 1 MiB (1,048,576 bytes).
+- **The DID document** is at most 256 KiB (262,144 bytes), a JSON object, and no two of its
+  `verificationMethod` entries, nor two of its `service` entries, have the same `id` (DID Core
+  requires them unique); one that is not so is refused as a whole.
+- **A status list number** N (in `statusListCredential` and in a role) is below 2^64 - 1, so it
+  has at most 20 digits; a credential that names another is refused.
+
+These bounds are far above anything this profile makes. They bound the work hostile input costs,
+and they make every Kanhe verifier refuse the same input. Then it:
 
 1. parses the JWS: three base64url parts, a header whose JCS is itself with `alg` `ES256`, `typ`
    `vc+jwt` and `cty` `vc` if present, and `kid` the issuer's DID, `#`, and a thumbprint; a
@@ -256,9 +285,10 @@ DID document and status list credential, it:
 5. states the record's status from the bundle: **live**, **revoked** (when), or **replaced** (by
    which record, when), and whether the bundle is complete (section 11, step 7). A credential of a
    revoked or replaced record is reported as such, not as failing;
-6. with a DID document: requires its `id` to be the issuer's DID, a verification method under
-   `kid` whose JWK is A's key (the one the JWS verified with), and the Kanhe service's `ledger`
-   to be the bundle's ledger;
+6. with a DID document: requires its `id` to be the issuer's DID, the verification method under
+   `kid` (there is at most one) to give a JWK that is A's key (the one the JWS verified with),
+   and the first service of type `KanheLedger` that has a `ledger` (a string) to name the
+   bundle's ledger;
 7. with the status list credential: requires it to verify with a key the issuer has, its `kid`
    the issuer's DID, `#`, and that key's thumbprint: when step 6 held for a DID document, any key
    a verification method gives that its `assertionMethod` names (as a standard verifier reads the
@@ -315,12 +345,14 @@ issuing is an endorsement, submitted as any statement is (section 16 of the prot
 
 [`../testvectors/credentials-v1.json`](../testvectors/credentials-v1.json), made with Python from
 this text, apart from both verifiers (`tools/testvectors/credential_vectors.py`): JCS
-serializations, and JSON that is not canonical; JWK thumbprints; base URLs and their did:web, and
-URLs refused; endorsement roles naming status entries, and roles that do not; credentials built
-from their content, payload and header byte for byte, each with a JWS that verifies (ECDSA
-signatures are randomized, so an implementation reproduces the payload and header and checks the
-signature); DID documents byte for byte; status lists compressed by another encoder, with the bits
-they set, and encodedLists refused.
+serializations, and JSON that is not canonical, not strict I-JSON, or nested too deeply; JWK
+thumbprints; base URLs and their did:web, and URLs refused; endorsement roles naming status
+entries, and roles that do not; credentials built from their content, payload and header byte for
+byte, each with a JWS that verifies (ECDSA signatures are randomized, so an implementation
+reproduces the payload and header and checks the signature); credentials read with line ends after
+them, and credentials refused as section 7 reads them; DID documents byte for byte, and DID
+documents read and refused as section 7 reads them; status lists compressed by another encoder,
+with the bits they set, and encodedLists refused.
 
 The verification of section 7 needs evidence, which ledgers make: the reference implementation's
 tests make ledgers that issue, revoke, and forge credentials, and the independent Python verifier

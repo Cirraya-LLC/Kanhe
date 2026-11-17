@@ -15,11 +15,15 @@
 //   report.verified  // true or false; report.error explains a failure
 //
 // A W3C Verifiable Credential issued from a Kanhe record (spec/credentials.md):
-//   const where = verifier.credentialAddresses(jwsText); // {evidence, did_document, status_list, ledger}
-//   const report = verifier.verifyCredential(jwsText, evidenceBytes, {
-//     didDocument: didJsonText, statusList: statusListJwsText, // when fetched
-//     ledgerId, witnesses, timestampRoots, trustNodes,         // as for verify
+//   const where = verifier.credentialAddresses(jwsBytes); // {evidence, did_document, status_list, ledger}
+//   const report = verifier.verifyCredential(jwsBytes, evidenceBytes, {
+//     didDocument: didJsonBytes, statusList: statusListJwsBytes, // when fetched
+//     ledgerId, witnesses, timestampRoots, trustNodes,           // as for verify
 //   });
+// The credential, the DID document, and the status list are best given as the
+// bytes read or fetched (a Uint8Array), which are checked as `kanhe credential
+// verify` checks its files: line ends after a JWS are not part of it, and
+// nothing else is taken off or replaced. Text is taken as its UTF-8.
 
 async function createKanheVerifier(factory) {
   const module = await (factory || KanheVerifier)();
@@ -32,6 +36,11 @@ async function createKanheVerifier(factory) {
     } finally {
       module._free(pointer);
     }
+  }
+
+  // Bytes as given, text as its UTF-8.
+  function bytesOf(input) {
+    return typeof input === "string" ? new TextEncoder().encode(input) : input;
   }
 
   function withString(text, use) {
@@ -98,17 +107,17 @@ async function createKanheVerifier(factory) {
   }
 
   function credentialAddresses(credential) {
-    return read(withString(credential.trim(), (p) => module._kanhe_credential_addresses(p)));
+    return read(withBytes(bytesOf(credential), (p, n) => module._kanhe_credential_addresses(p, n)));
   }
 
   function verifyCredential(credential, evidence, options = {}) {
     const problem = configure(options);
     if (problem) return problem;
-    const optional = (text, use) => (text == null ? use(0) : withString(text, use));
-    return read(withString(credential.trim(), (c) =>
+    const optional = (input, use) => (input == null ? use(0, 0) : withBytes(bytesOf(input), use));
+    return read(withBytes(bytesOf(credential), (c, cn) =>
       withBytes(evidence, (b, n) =>
-        optional(options.didDocument, (d) =>
-          optional(options.statusList, (l) => module._kanhe_verify_credential(c, b, n, d, l))))));
+        optional(options.didDocument, (d, dn) =>
+          optional(options.statusList, (l, ln) => module._kanhe_verify_credential(c, cn, b, n, d, dn, l, ln))))));
   }
 
   return { version: module.UTF8ToString(module._kanhe_version()), verify, credentialAddresses, verifyCredential };

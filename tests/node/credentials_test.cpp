@@ -167,6 +167,166 @@ TEST_CASE("JCS: members by UTF-16 code units, shortest escapes, integers only", 
     CHECK_FALSE(verifier::parse_jcs("{\"a\":1e2}"));
 }
 
+namespace {
+
+/// `arrays` arrays, one in the other, around `inner`.
+std::string nested(std::size_t arrays, std::string_view inner = "") {
+    return std::string(arrays, '[') + std::string(inner) + std::string(arrays, ']');
+}
+
+} // namespace
+
+TEST_CASE("JSON from outside is read as strict I-JSON, within bounds", "[credentials]") {
+    // JCS: strict I-JSON, no value deeper than 64 (the top at 0).
+    CHECK(verifier::parse_jcs(nested(65)));
+    CHECK_FALSE(verifier::parse_jcs(nested(66)));
+    CHECK(verifier::parse_jcs(nested(64, "0")));
+    CHECK_FALSE(verifier::parse_jcs(nested(65, "0")));
+    CHECK_FALSE(verifier::parse_jcs(nested(100'000)));
+    const auto why = [](std::string_view text) {
+        const auto parsed = verifier::parse_i_json(text);
+        return parsed ? std::string("read") : std::string(parsed.error().detail);
+    };
+    CHECK(why(nested(66)) == "JSON nested too deeply");
+    CHECK(why("\xEF\xBB\xBF{}") == "JSON text that begins with a byte order mark");
+    CHECK(why(R"({"a":1,"a":2})") == "a JSON object names a member twice");
+    CHECK(why("[\"\xEF\xBF\xBF\"]") == "JSON text with a noncharacter, which I-JSON excludes");
+    CHECK(why("[1e400]") == "not JSON");
+    CHECK(why(std::string_view("{}\0x", 4)) == "not JSON"); // a NUL, then more
+    CHECK(why("[\"\\ud800\"]") == "not JSON");
+    CHECK(why(R"({"a":"\ud800","a":1})") == "not JSON"); // before the name given twice
+    CHECK(why("[\"\\ufffd\"]") == "read");               // U+FFFD is no noncharacter
+    CHECK_FALSE(verifier::parse_jcs("{\"a\":\"\xEF\xBF\xBF\"}"));
+    // The writer makes only I-JSON.
+    CHECK_FALSE(verifier::jcs(verifier_json("\xEF\xB7\x90")));
+    CHECK_FALSE(verifier::jcs(verifier_json{{"\xF4\x8F\xBF\xBE", 1}}));
+
+    // A compact JWS: at most 1 MiB once the line ends after it are off; no
+    // other text around it.
+    const std::string header =
+        kanhe::to_base64url(kanhe::as_bytes(std::string_view(R"({"alg":"ES256","kid":"k"})")));
+    const std::string signature = kanhe::to_base64url(Bytes(64, 1));
+    auto jws_of = [&](std::size_t fill) {
+        const std::string payload = R"({"x":")" + std::string(fill, 'a') + R"("})";
+        return header + "." + kanhe::to_base64url(kanhe::as_bytes(std::string_view(payload))) +
+               "." + signature;
+    };
+    std::size_t fill = (verifier::max_compact_size - header.size() - 88) * 3 / 4 - 8;
+    while (jws_of(fill + 1).size() <= verifier::max_compact_size) {
+        ++fill;
+    }
+    while (jws_of(fill).size() > verifier::max_compact_size) {
+        --fill;
+    }
+    const std::string most = jws_of(fill);
+    CHECK(verifier::parse_jws(most));
+    CHECK(verifier::parse_jws(most + "\r\n\n"));
+    const auto past = verifier::parse_jws(jws_of(fill + 1));
+    REQUIRE_FALSE(past);
+    CHECK(past.error().detail == "a credential larger than 1 MiB");
+    const std::string small = jws_of(1);
+    CHECK(verifier::parse_jws(small + "\n"));
+    for (const std::string& around : {" " + small, "\n" + small, small + " ", small + "\t",
+                                      small + " \n", "\xEF\xBB\xBF" + small}) {
+        CHECK_FALSE(verifier::parse_jws(around));
+    }
+
+    // A DID document: at most 256 KiB of strict I-JSON, an object, its
+    // verification methods' ids distinct, and its services'.
+    const std::string head = R"({"id":"did:web:ledger.example.com","x":)";
+    auto doc = [&](std::string_view x) {
+        return head + std::string(x) + "}";
+    };
+    auto read_doc = [](std::string_view text) {
+        const auto parsed = verifier::parse_did_document(text);
+        return parsed ? std::string("read") : parsed.error();
+    };
+    CHECK(read_doc(doc("1")) == "read");
+    CHECK(read_doc(doc(nested(64))) == "read");
+    CHECK(read_doc(doc(nested(65))) == "the DID document cannot be read (JSON nested too deeply)");
+    CHECK(read_doc(doc(nested(120'000))) ==
+          "the DID document cannot be read (JSON nested too deeply)");
+    const std::string filler =
+        "\"" + std::string(verifier::max_did_document_size - doc("\"\"").size(), 'a') + "\"";
+    REQUIRE(doc(filler).size() == verifier::max_did_document_size);
+    CHECK(read_doc(doc(filler)) == "read");
+    CHECK(read_doc(doc(filler) + " ") == "the DID document is larger than 256 KiB");
+    // Not JSON: NaN and Infinity, text that is not UTF-8, half a surrogate pair
+    // escaped alone, a number a double cannot hold, other number forms.
+    for (const std::string_view refused :
+         {"NaN", "Infinity", "-Infinity", "\"\xff\"", "\"\xc0\xaf\"", "\"\\ud800\"", "\"\\udc00\"",
+          "\"\\ud800\\u0041\"", "1e400", "-1e400", "01", "1.", "+1", "'a'"}) {
+        INFO(refused);
+        CHECK(read_doc(doc(refused)) == "the DID document cannot be read (not JSON)");
+    }
+    CHECK(read_doc(doc("1" + std::string(309, '0'))) ==
+          "the DID document cannot be read (not JSON)");
+    CHECK(read_doc("\xEF\xBB\xBF" + doc("1")) ==
+          "the DID document cannot be read (JSON text that begins with a byte order mark)");
+    CHECK(read_doc(doc(R"(1,"x":2)")) ==
+          "the DID document cannot be read (a JSON object names a member twice)");
+    for (const std::string_view noncharacter :
+         {"\"\xEF\xBF\xBF\"", "\"\\ufdd0\"", "\"\\uFFFE\"", "\"\\udbff\\udfff\""}) {
+        INFO(noncharacter);
+        CHECK(read_doc(doc(noncharacter)) == "the DID document cannot be read (JSON text with a "
+                                             "noncharacter, which I-JSON excludes)");
+    }
+    for (const std::string_view accepted :
+         {"1e300", "-0", "1.5", "1e-400", "18446744073709551616", "\"\\ud83d\\ude00\"",
+          "\"\\\\ud800\"", "\"\\u0000\"", "\"\xEF\xBF\xBD\""}) {
+        INFO(accepted);
+        CHECK(read_doc(doc(accepted)) == "read");
+    }
+    CHECK(read_doc("[" + doc("1") + "]") == "the DID document is not a JSON object");
+    CHECK(read_doc(doc("1") + "x") == "the DID document cannot be read (not JSON)");
+    CHECK(read_doc(doc("1") + std::string(1, '\0') + "x") ==
+          "the DID document cannot be read (not JSON)");
+    CHECK(read_doc(R"({"verificationMethod":[{"id":"#a"},{"id":"#a"}]})") ==
+          "the DID document gives two of its verification methods the same id");
+    CHECK(read_doc(R"({"service":[{"id":"#s","type":"KanheLedger"},{"id":"#s"}]})") ==
+          "the DID document gives two of its services the same id");
+    CHECK(
+        read_doc(
+            R"({"verificationMethod":[{"id":"#a"},{"id":"#b"},{"id":1},{"id":1},2,2],"service":3})") ==
+        "read");
+}
+
+TEST_CASE("a DID document nested too deeply is refused, not copied", "[credentials]") {
+    College c;
+    const verifier::StatusEntry entry{.list = 1, .index = 9};
+    c.endorse(entry, c.device);
+    const Bytes bundle = c.evidence();
+    const std::string credential = c.sign(c.payload(bundle, entry), c.device);
+    // The issuer's document, with one more method its assertionMethod names,
+    // whose JWK is arrays in arrays: read for the status list's keys.
+    verifier_json d = *verifier::did_document(
+        provider(), c.base, std::vector<crypto::PublicKey>{c.device.public_key()}, c.w.org_id());
+    d["verificationMethod"].push_back(verifier_json{
+        {"id", c.base.did + "#deep"}, {"type", "JsonWebKey"}, {"publicKeyJwk", "DEEP"}});
+    d["assertionMethod"].push_back(c.base.did + "#deep");
+    const std::string text = d.dump();
+    auto with_jwk = [&](std::size_t arrays) {
+        std::string out = text;
+        out.replace(out.find("\"DEEP\""), 6, nested(arrays));
+        return out;
+    };
+    verifier::CredentialOptions options;
+    options.status_list = c.status_list(c.device);
+    // The JWK at depth 3: 62 arrays reach 64.
+    options.did_document = with_jwk(62);
+    CHECK(c.check(credential, bundle, options).verified());
+    options.did_document = with_jwk(63);
+    const auto r = c.check(credential, bundle, options);
+    CHECK_FALSE(r.verified());
+    CHECK(r.did_document_problems ==
+          std::vector<std::string>{"the DID document cannot be read (JSON nested too deeply)"});
+    CHECK(r.status_list_problems.empty()); // the endorsing device's key signed it
+    options.did_document = with_jwk(120'000);
+    REQUIRE(options.did_document->size() <= verifier::max_did_document_size);
+    CHECK(c.check(credential, bundle, options).did_document_problems ==
+          std::vector<std::string>{"the DID document cannot be read (JSON nested too deeply)"});
+}
+
 TEST_CASE("GZIP: ours round-trips small, others' decompress, damage fails", "[credentials]") {
     Bytes bits(verifier::status_list_bytes, 0);
     verifier::set_status_bit(bits, 0);
@@ -813,5 +973,27 @@ TEST_CASE("the credential test vectors, made apart from this code", "[credential
     for (const auto& s : v["status_lists_refused"]) {
         INFO(s["why"].get<std::string>());
         CHECK_FALSE(verifier::decode_status_list(s["encoded"].get<std::string>()));
+    }
+    // Section 7: what a verifier reads, and what it refuses.
+    for (const char* kind : {"credentials_read", "credentials_refused", "did_documents_read",
+                             "did_documents_refused"}) {
+        REQUIRE(v.contains(kind));
+    }
+    for (const auto& c : v["credentials_read"]) {
+        INFO(c["why"].get<std::string>());
+        CHECK(verifier::credential_addresses(c["jws"].get<std::string>()));
+    }
+    for (const auto& c : v["credentials_refused"]) {
+        INFO(c["why"].get<std::string>());
+        CHECK_FALSE(verifier::credential_addresses(c["jws"].get<std::string>()));
+    }
+    for (const auto& d : v["did_documents_read"]) {
+        INFO(d["why"].get<std::string>());
+        const auto doc = verifier::parse_did_document(d["document"].get<std::string>());
+        CHECK(doc);
+    }
+    for (const auto& d : v["did_documents_refused"]) {
+        INFO(d["why"].get<std::string>());
+        CHECK_FALSE(verifier::parse_did_document(d["document"].get<std::string>()));
     }
 }

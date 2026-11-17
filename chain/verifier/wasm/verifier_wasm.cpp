@@ -50,6 +50,12 @@ Json failure(std::string_view message) {
     return {{"verified", false}, {"error", message}};
 }
 
+/// Input as given, byte for byte, as `kanhe credential verify` reads a file:
+/// not UTF-8 checked or replaced here, and not cut at a NUL.
+std::string text_of(const std::uint8_t* bytes, std::size_t size) {
+    return size == 0 ? std::string() : std::string(reinterpret_cast<const char*>(bytes), size);
+}
+
 char* verify_contract(ByteView input) {
     const auto report = protocol::verify_contract_evidence(provider(), input, options);
     if (!report) {
@@ -172,11 +178,12 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_verify(const std::uint8_t* bundle, std::size_t 
     }
 }
 
-/// The addresses a credential (a compact JWS) names: its record's evidence,
-/// the issuer's DID document, and its status list, and the ledger: JSON
-/// {evidence, did_document, status_list, ledger}, or {error}.
-EMSCRIPTEN_KEEPALIVE char* kanhe_credential_addresses(const char* credential) {
-    const auto addresses = verifier::credential_addresses(credential);
+/// The addresses a credential (a compact JWS, `size` bytes) names: its
+/// record's evidence, the issuer's DID document, and its status list, and the
+/// ledger: JSON {evidence, did_document, status_list, ledger}, or {error}.
+EMSCRIPTEN_KEEPALIVE char* kanhe_credential_addresses(const std::uint8_t* credential,
+                                                      std::size_t size) {
+    const auto addresses = verifier::credential_addresses(text_of(credential, size));
     if (!addresses) {
         return to_c_string(failure(addresses.error().detail));
     }
@@ -188,22 +195,25 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_credential_addresses(const char* credential) {
 
 /// Verifies a credential against its record's evidence (spec/credentials.md,
 /// section 7), with the issuer's DID document and status list if given
-/// (null for none), and the options set since the last reset.
-EMSCRIPTEN_KEEPALIVE char* kanhe_verify_credential(const char* credential,
-                                                   const std::uint8_t* bundle, std::size_t size,
-                                                   const char* did_document,
-                                                   const char* status_list) {
+/// (null for none), and the options set since the last reset. Each is bytes
+/// and their count, read as the command line reads its files.
+EMSCRIPTEN_KEEPALIVE char*
+kanhe_verify_credential(const std::uint8_t* credential, std::size_t credential_size,
+                        const std::uint8_t* bundle, std::size_t size,
+                        const std::uint8_t* did_document, std::size_t did_size,
+                        const std::uint8_t* status_list, std::size_t list_size) {
     try {
         verifier::CredentialOptions credential_options;
         credential_options.verify = options;
         if (did_document != nullptr) {
-            credential_options.did_document = did_document;
+            credential_options.did_document = text_of(did_document, did_size);
         }
         if (status_list != nullptr) {
-            credential_options.status_list = status_list;
+            credential_options.status_list = text_of(status_list, list_size);
         }
-        const auto report = verifier::verify_credential(provider(), credential,
-                                                        ByteView(bundle, size), credential_options);
+        const auto report =
+            verifier::verify_credential(provider(), text_of(credential, credential_size),
+                                        ByteView(bundle, size), credential_options);
         if (!report) {
             Json out = failure(report.error().detail);
             out["kind"] = "credential";

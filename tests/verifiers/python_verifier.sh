@@ -1038,6 +1038,149 @@ run credential status --as vc-server.key --url "$VC_URL" --out vc-list-server.jw
 [ "$(vc_compare vc.jwt vc-evidence.cbor vc-list-server.jwt)" = False ] ||
     fail "a list by a key the DID document does not list fails in both"
 COMPARED=$((COMPARED + 2))
+# What comes from outside, read alike (spec/credentials.md, section 7): DID documents
+# that are not strict I-JSON (a byte order mark, NaN, Infinity, bytes that are not UTF-8,
+# half a surrogate pair escaped alone, a noncharacter, a number a double cannot hold, a
+# member name twice), nested past 64, larger than 256 KiB, with two verification methods
+# or two services of one id, or with members of other shapes than section 3's, which
+# both refuse or both read; then status lists and credentials with text around them,
+# nested past 64, past 1 MiB, or with an index of thousands of digits.
+"$PYTHON" - vc-did.json << 'PY'
+import json, sys
+doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
+def write(name, data):
+    with open(name, "wb") as f:
+        f.write(data if isinstance(data, bytes) else data.encode())
+def member(value):  # the document with one more member, written as given
+    return json.dumps(dict(doc, x="MARK")).replace('"MARK"', value)
+B = chr(92)  # a backslash, for JSON's escapes
+write("vc-did-nan.json", member("NaN"))
+write("vc-did-infinity.json", member("-Infinity"))
+write("vc-did-utf8.json", member('"MARK2"').encode().replace(b"MARK2", b"\xff"))
+write("vc-did-bom.json", b"\xef\xbb\xbf" + json.dumps(doc).encode())
+write("vc-did-nul.json", json.dumps(doc).encode() + b"\x00x")
+write("vc-did-surrogate.json", member('"' + B + 'ud800"'))
+write("vc-did-pair.json", member('"' + B + "ud83d" + B + 'ude00"'))
+write("vc-did-nonchar.json", member('"MARK3"').encode().replace(b"MARK3", b"\xef\xbf\xbf"))
+write("vc-did-nonchar2.json", member('"' + B + 'ufdd0"'))
+write("vc-did-overflow.json", member("1e400"))
+write("vc-did-digits.json", member("1" + "0" * 309))
+write("vc-did-big.json", member("18446744073709551616"))
+write("vc-did-tiny.json", member("1e-400"))
+write("vc-did-twice.json", member('1, "id": ' + json.dumps(doc["id"])))
+write("vc-did-64.json", member("[" * 64 + "]" * 64))
+write("vc-did-65.json", member("[" * 65 + "]" * 65))
+write("vc-did-large.json", member('"' + "a" * (256 << 10) + '"'))
+# One more method, which assertionMethod names, whose JWK is arrays in arrays: read
+# for the status list's keys.
+methods, named = doc["verificationMethod"], doc["assertionMethod"]
+deep = dict(doc, verificationMethod=methods + [{"id": doc["id"] + "#deep", "publicKeyJwk": "MARK"}],
+            assertionMethod=named + [doc["id"] + "#deep"])
+write("vc-did-deep.json", json.dumps(deep).replace('"MARK"', "[" * 120000 + "]" * 120000))
+write("vc-did-methods.json", json.dumps(dict(doc, verificationMethod=1)))
+# Ids are distinct (DID Core); the first Kanhe service that names a ledger is read.
+write("vc-did-twokeys.json", json.dumps(dict(doc, verificationMethod=[{"id": methods[0]["id"]}] + methods)))
+write("vc-did-twoservices.json", json.dumps(dict(doc, service=doc["service"] * 2)))
+write("vc-did-noledger.json", json.dumps(dict(doc, service=[{"type": "KanheLedger"}] + doc["service"])))
+PY
+for f in nan infinity utf8 bom nul surrogate nonchar nonchar2 overflow digits twice 65 large deep \
+    methods twokeys twoservices; do
+    [ "$(vc_compare vc.jwt vc-evidence.cbor vc-list.jwt "vc-did-$f.json")" = False ] ||
+        fail "a DID document ($f) is refused by both"
+done
+for f in pair big tiny 64 noledger; do
+    [ "$(vc_compare vc.jwt vc-evidence.cbor vc-list.jwt "vc-did-$f.json")" = True ] ||
+        fail "a DID document ($f) is read by both"
+done
+COMPARED=$((COMPARED + 22))
+# Status lists signed by a credential key whose private key the test holds, which the
+# DID document lists: one as made, one nested 64 deep, one 65, one with a noncharacter;
+# one of 1 MiB (the most read), one a byte or two past it, and one padded past it with
+# line ends, which are not counted.
+run key generate --alg esp256 --no-passphrase --out vc-plain.key > /dev/null
+run credential key add Plain --key vc-plain.key --as vc-root.key > /dev/null
+run credential did-document --url "$VC_URL" --key vc-plain.key --out vc-did3.json > /dev/null
+"$PYTHON" - vc-list.jwt vc-plain.key << 'PY'
+import base64, hashlib, json, sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+b = lambda x: base64.urlsafe_b64encode(x).rstrip(b"=").decode()
+unb = lambda t: json.loads(base64.urlsafe_b64decode(t + "=" * (-len(t) % 4)))
+jcs = lambda v: json.dumps(v, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+key = serialization.load_der_private_key(open(sys.argv[2], "rb").read(), None)
+point = key.public_key().public_numbers()
+x, y = b(point.x.to_bytes(32, "big")), b(point.y.to_bytes(32, "big"))
+thumbprint = b(hashlib.sha256(('{"crv":"P-256","kty":"EC","x":"%s","y":"%s"}' % (x, y)).encode()).digest())
+h, p, _ = open(sys.argv[1]).read().strip().split(".")
+header, payload = unb(h), unb(p)
+header["kid"] = header["kid"].split("#")[0] + "#" + thumbprint
+n = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
+def sign(extra):
+    signing_input = b(jcs(header)) + "." + b(jcs(dict(payload, **extra)))
+    r, s = decode_dss_signature(key.sign(signing_input.encode(), ec.ECDSA(hashes.SHA256())))
+    return signing_input + "." + b(r.to_bytes(32, "big") + min(s, n - s).to_bytes(32, "big"))
+def arrays(k):  # k arrays, one in the other
+    v = []
+    for _ in range(k - 1):
+        v = [v]
+    return v
+def size(fill):  # the length of the list padded with a member of `fill` bytes
+    return len(b(jcs(header))) + 1 + len(b(jcs(dict(payload, x="a" * fill)))) + 1 + 86
+low, high = 0, 1 << 20  # the most fill whose list is at most 1 MiB
+while low < high:
+    mid = (low + high + 1) // 2
+    low, high = (mid, high) if size(mid) <= 1 << 20 else (low, mid - 1)
+fill = low
+made = sign({})
+lists = {"plain": made, "64": sign({"x": arrays(64)}), "65": sign({"x": arrays(65)}),
+         "nonchar": sign({"x": chr(0xFFFF)}), "1mib": sign({"x": "a" * fill}),
+         "past": sign({"x": "a" * (fill + 1)}), "lineends": made + "\n" * (1 << 20)}
+assert len(lists["1mib"]) <= 1 << 20 < len(lists["past"])
+for name, text in lists.items():
+    with open("vc-list-" + name + ".jwt", "w", encoding="utf-8") as f:
+        f.write(text if name == "lineends" else text + "\n")
+PY
+for f in plain 64 1mib lineends; do
+    [ "$(vc_compare vc.jwt vc-evidence.cbor "vc-list-$f.jwt" vc-did3.json)" = True ] ||
+        fail "a status list ($f) is read by both"
+done
+for f in 65 nonchar past; do
+    [ "$(vc_compare vc.jwt vc-evidence.cbor "vc-list-$f.jwt" vc-did3.json)" = False ] ||
+        fail "a status list ($f) is refused by both"
+done
+COMPARED=$((COMPARED + 7))
+# Credentials: line ends after one are a file's; any other text around it, or an index
+# of 5,000 digits, and both refuse to read it.
+vc_refused() { # CREDENTIAL
+    local ours=0 theirs=0
+    run credential verify "$1" --offline --evidence vc-evidence.cbor --ledger-id "$VC_ID" --json \
+        > /dev/null 2>&1 || ours=$?
+    pyverify credential "$1" --evidence vc-evidence.cbor --ledger-id "$VC_ID" --json > vc-py.json \
+        2> /dev/null || theirs=$?
+    [ "$ours" = 2 ] && [ "$theirs" = 3 ] && [ "$(json 'd["verified"]' < vc-py.json)" = False ]
+}
+VC_TEXT="$(cat vc.jwt)"
+printf '%s\r\n\n' "$VC_TEXT" > vc-crlf.jwt
+printf ' %s\n' "$VC_TEXT" > vc-lead.jwt
+printf '%s \n' "$VC_TEXT" > vc-trail.jwt
+printf '%s\t' "$VC_TEXT" > vc-tab.jwt
+"$PYTHON" - vc.jwt << 'PY'
+import base64, json, sys
+h, p, s = open(sys.argv[1]).read().strip().split(".")
+d = json.loads(base64.urlsafe_b64decode(p + "=" * (-len(p) % 4)))
+status = d["credentialStatus"]
+status["statusListIndex"] = "1" * 5000
+status["id"] = status["statusListCredential"] + "#" + status["statusListIndex"]
+p = base64.urlsafe_b64encode(json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode())
+with open("vc-index.jwt", "w") as f:
+    f.write(h + "." + p.rstrip(b"=").decode() + "." + s + "\n")
+PY
+[ "$(vc_compare vc-crlf.jwt vc-evidence.cbor vc-list.jwt)" = True ] || fail "a file's line ends are read past by both"
+for f in lead trail tab index; do
+    vc_refused "vc-$f.jwt" || fail "a credential ($f) is refused by both"
+done
+COMPARED=$((COMPARED + 5))
 run record revoke "$VC_CERT" --as vc-root.key --reason "issued in error" > /dev/null
 run checkpoint create --log-key vc-log.key > /dev/null
 run export "$VC_CERT" --disclose name,programme --log-key vc-log.key --out vc-revoked.cbor > /dev/null

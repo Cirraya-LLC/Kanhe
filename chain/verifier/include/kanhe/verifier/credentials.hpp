@@ -115,13 +115,31 @@ credential_content(const protocol::EvidenceReport& report, const BaseUrl& base, 
                                         std::span<const crypto::PublicKey> keys,
                                         const protocol::Id& ledger);
 
+/// The largest DID document a verifier reads. Section 3's documents are far
+/// smaller (one verification method per key); whoever controls the issuer's
+/// domain controls the document, so this bounds the work a hostile one costs.
+inline constexpr std::size_t max_did_document_size = std::size_t{256} << 10;
+
+/// An issuer's DID document as a verifier reads it (section 7): at most
+/// `max_did_document_size` bytes of strict I-JSON (`parse_i_json`, jcs.hpp),
+/// an object, whose verification methods have distinct ids and so do its
+/// services (DID Core); otherwise why not.
+[[nodiscard]] Explained<Json> parse_did_document(std::string_view text);
+
 /// A compact JWS of `payload` (its JCS), signed with `key` (ES256), with
 /// header {"alg":"ES256","cty":"vc","kid":DID#THUMBPRINT,"typ":"vc+jwt"}.
 [[nodiscard]] Result<std::string> sign_credential(const crypto::Signer& key,
                                                   const crypto::Provider& provider,
                                                   std::string_view did, const Json& payload);
 
+/// The largest compact JWS (a credential or a status list) a verifier reads,
+/// line ends at its end not counted. No credential this profile makes comes
+/// near it; it bounds the work a hostile one costs.
+inline constexpr std::size_t max_compact_size = std::size_t{1} << 20;
+
 /// A compact JWS, parsed: header and payload each the JCS of a JSON object.
+/// Line ends (CR, LF) at the end of `compact` are not part of it; nothing
+/// else is taken off.
 struct Jws {
     Json header;
     Json payload;

@@ -231,6 +231,30 @@ const text = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
   assert.equal(lie.verified, false);
   assert.ok(lie.problems.some((x) => /result = fail/.test(x)), JSON.stringify(lie.problems));
   assert.match(verifier.credentialAddresses("not a credential").error, /JWS/);
+  // Bytes, read as `kanhe credential verify` reads its files (spec/credentials.md,
+  // section 7): the line ends after a credential are not part of it; nothing else is
+  // taken off, nothing replaced, nothing cut at a NUL.
+  const evidence = read("credential-evidence.cbor");
+  const asRead = verifier.verifyCredential(read("credential.jwt"), evidence,
+    { didDocument: read("credential-did.json"), statusList: read("credential-list.jwt") });
+  delete asRead.text;
+  assert.deepEqual(asRead, JSON.parse(text("native-credential-report.json")));
+  assert.equal(verifier.credentialAddresses(credential + "\r\n\n").evidence, where.evidence);
+  for (const around of [" " + credential, "\n" + credential, credential + " ", credential + "\t", "\ufeff" + credential]) {
+    assert.ok(verifier.credentialAddresses(around).error, JSON.stringify(around.slice(0, 3)));
+    assert.ok(verifier.credentialAddresses(new TextEncoder().encode(around)).error);
+  }
+  const did = read("credential-did.json");
+  const withNul = new Uint8Array([...did, 0, 0x78]); // a NUL, then more
+  const afterNul = verifier.verifyCredential(credential, evidence, { didDocument: withNul });
+  assert.deepEqual(afterNul.did_document.problems, ["the DID document cannot be read (not JSON)"]);
+  const notUtf8 = new TextEncoder().encode(text("credential-did.json").slice(0, -1) + ',"x":"?"}');
+  notUtf8[notUtf8.length - 3] = 0xff; // the ? becomes a byte no UTF-8 text holds
+  const badBytes = verifier.verifyCredential(credential, evidence, { didDocument: notUtf8 });
+  assert.deepEqual(badBytes.did_document.problems, ["the DID document cannot be read (not JSON)"]);
+  const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...did]);
+  assert.deepEqual(verifier.verifyCredential(credential, evidence, { didDocument: bom }).did_document.problems,
+    ["the DID document cannot be read (JSON text that begins with a byte order mark)"]);
   console.log("wasm verifier (node): ok, version " + verifier.version);
 })().catch((e) => {
   console.error(e);

@@ -113,9 +113,11 @@ def _credential_main(argv: list[str]) -> int:
         print(f"usage error: {e}", file=sys.stderr)
         return EXIT_USAGE
     try:
-        compact = _read(args.credential).decode("utf-8", "replace")
+        # A file's line ends are not part of the credential (`kanhe credential verify` too).
+        compact = _read(args.credential).decode("utf-8", "replace").rstrip("\r\n")
         bundle = _read(args.evidence)
-        did = _read(args.did_document).decode("utf-8", "replace") if args.did_document else None
+        # As read: its bytes are part of what is checked (UTF-8, size).
+        did = _read(args.did_document) if args.did_document else None
         lst = _read(args.status_list).decode("utf-8", "replace") if args.status_list else None
         witnesses = [_witness_key(path) for path in args.witness]
     except UsageError as e:

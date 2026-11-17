@@ -944,11 +944,11 @@ SOFTWARE.</pre>
     }
   }
 
-  // A compact JWS: three base64url parts.
+  // A compact JWS: three base64url parts. Its bytes are verified as read.
   function credentialText(bytes) {
     if (bytes.length > 1 << 20) return null;
     const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes).trim();
-    return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text) ? text : null;
+    return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text) ? bytes : null;
   }
 
   async function loadCredential(text, name) {
@@ -977,7 +977,7 @@ SOFTWARE.</pre>
     const optional = async (url) => {
       try {
         const response = await get(url);
-        return response.ok ? await response.text() : null;
+        return response.ok ? new Uint8Array(await response.arrayBuffer()) : null;
       } catch (e) {
         return null;
       }

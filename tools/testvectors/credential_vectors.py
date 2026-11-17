@@ -4,15 +4,18 @@
 specification with Python's standard library and `cryptography`, apart from
 both verifiers. Writes testvectors/credentials-v1.json:
 
-- JCS serializations (RFC 8785), and JSON that is not canonical;
+- JCS serializations (RFC 8785), and JSON that is not canonical or not
+  strict I-JSON (RFC 7493), or nested too deeply (section 7);
 - JWK thumbprints (RFC 7638) of P-256 keys;
 - base URLs and their did:web, and URLs refused;
 - endorsement roles naming status entries, and roles that do not;
 - credentials: the content (section 4), its payload and header byte for
   byte, and a JWS that verifies with the key (ECDSA is randomized: an
   implementation reproduces the payload and header, and checks the
-  signature);
-- DID documents (section 3), byte for byte;
+  signature); the same with line ends after it, which are a file's; and
+  credentials refused before anything is checked against evidence;
+- DID documents (section 3), byte for byte; and DID documents a verifier
+  reads (section 7), and ones it refuses;
 - status lists GZIP-compressed by Python (any encoder's output must
   decode), with the bits they set, and encodedLists refused.
 
@@ -136,20 +139,79 @@ def credential(content: dict) -> dict:
 
 
 def did_document(base: str, keys: list[bytes], ledger: str) -> str:
+    return jcs(did_document_value(base, keys, ledger))
+
+
+def did_document_value(base: str, keys: list[bytes], ledger: str) -> dict:
     did, _ = did_of(base)
     methods = sorted((thumbprint(k), k) for k in keys)
     unique = []
     for t, k in methods:
         if not unique or unique[-1][0] != t:
             unique.append((t, k))
-    return jcs({
+    return {
         "@context": ["https://www.w3.org/ns/did/v1", "https://www.w3.org/ns/cid/v1"],
         "id": did,
         "verificationMethod": [{"id": did + "#" + t, "type": "JsonWebKey", "controller": did,
                                 "publicKeyJwk": {**jwk(k), "alg": "ES256"}} for t, k in unique],
         "assertionMethod": [did + "#" + t for t, _ in unique],
         "service": [{"id": did + "#kanhe", "type": "KanheLedger", "serviceEndpoint": base, "ledger": ledger}],
-    })
+    }
+
+
+def nested(arrays: int):
+    """`arrays` arrays, one in the other: the innermost at depth arrays - 1."""
+    value = []
+    for _ in range(arrays - 1):
+        value = [value]
+    return value
+
+
+def did_documents_read_and_refused(base: str, key: bytes, ledger: str) -> tuple[list, list]:
+    """Section 7: a DID document is at most 256 KiB of strict I-JSON (RFC
+    7493), nested at most 64 deep, an object whose verification methods have
+    distinct ids, and so do its services. Each case is the document of
+    section 3 with one thing changed. (A document past 256 KiB is left to the
+    verifiers' own tests, to keep this file small.)"""
+    value = did_document_value(base, [key], ledger)
+    text = jcs(value)
+
+    def member(x: str) -> str:  # one more member, "x", written as given
+        return text[:-1] + ',"x":' + x + "}"
+
+    read = [
+        {"why": "a member nested 64 deep", "document": member(json.dumps(nested(64)))},
+        {"why": "an escaped surrogate pair", "document": member('"\\ud83d\\ude00"')},
+        {"why": "an integer past 64 bits, which a double holds", "document": member("18446744073709551616")},
+        {"why": "a number near the largest a double holds", "document": member("1.7976931348623157e308")},
+        {"why": "a number too small for a double, which rounds to 0", "document": member("1e-400")},
+        {"why": "whitespace, and members in another order", "document": json.dumps(value, indent=2)},
+        {"why": "a KanheLedger service without a ledger first",
+         "document": jcs({**value, "service": [{"id": value["id"] + "#first", "type": "KanheLedger"}]
+                          + value["service"]})},
+    ]
+    refused = [
+        {"why": "a byte order mark", "document": "\ufeff" + text},
+        {"why": "half of a surrogate pair escaped alone", "document": member('"\\ud800"')},
+        {"why": "the other half alone", "document": member('"\\udc00x"')},
+        {"why": "a high half followed by another character", "document": member('"\\ud800\\u0041"')},
+        {"why": "a noncharacter", "document": member('"\uffff"')},
+        {"why": "a noncharacter, escaped", "document": member('"\\ufdd0"')},
+        {"why": "a noncharacter in a member name", "document": text[:-1] + ',"\U0010fffe":1}'},
+        {"why": "a number a double cannot hold", "document": member("1e400")},
+        {"why": "an integer of 310 digits", "document": member("1" + "0" * 309)},
+        {"why": "NaN", "document": member("NaN")},
+        {"why": "Infinity", "document": member("-Infinity")},
+        {"why": "a member name twice", "document": text[:-1] + ',"id":' + jcs(value["id"]) + "}"},
+        {"why": "a member nested 65 deep", "document": member(json.dumps(nested(65)))},
+        {"why": "two verification methods with the same id",
+         "document": jcs({**value, "verificationMethod": value["verificationMethod"] * 2})},
+        {"why": "two services with the same id", "document": jcs({**value, "service": value["service"] * 2})},
+        {"why": "not an object", "document": "[" + text + "]"},
+        {"why": "more after the object", "document": text + "x"},
+        {"why": "a NUL after the object, then more", "document": text + "\x00x"},
+    ]
+    return read, refused
 
 
 def bits_with(indices: list[int]) -> bytes:
@@ -185,6 +247,21 @@ def generate() -> None:
         header, payload, token = sign(college, did, credential(c))
         credentials.append({"description": item["description"], "content": c, "key": point(college).hex(),
                             "header": header, "payload": payload, "jws": token})
+    # Section 7: a compact JWS is read without the line ends after it (a
+    # file's), and nothing else is taken off; a list number N is below 2^64 - 1.
+    first = credentials[0]["jws"]
+    did, _ = did_of(contents[0]["content"]["base"])
+    credentials_read = [{"why": why, "jws": first + end}
+                        for why, end in (("LF after it", "\n"), ("CR LF after it", "\r\n"), ("LF, CR LF", "\n\r\n"))]
+    credentials_refused = [
+        {"why": why, "jws": jws} for why, jws in (
+            ("a space before it", " " + first), ("LF before it", "\n" + first), ("a space after it", first + " "),
+            ("a tab after it", first + "\t"), ("a space before its line end", first + " \n"),
+            ("a byte order mark before it", "\ufeff" + first),
+            ("a list number of 2^64 - 1",
+             sign(college, did, credential({**contents[0]["content"], "list": 2**64 - 1}))[2]),
+            ("a list number of 21 digits",
+             sign(college, did, credential({**contents[0]["content"], "list": 10**20}))[2]))]
 
     status = []
     for description, indices, level in [
@@ -211,6 +288,7 @@ def generate() -> None:
         {"value": {"～": 1, "\U0001F600": 2, "€": 3, "z": 4}},
         {"value": "\b\f\n\r\t\u0000\u001f\u007f\"\\/é"},
         {"value": {"credentialSubject": {"姓名": "陳小明"}, "@context": []}},
+        {"value": nested(65)},  # the innermost array at depth 64, the deepest read (section 7)
     ]
     for case in jcs_cases:
         case["jcs"] = jcs(case["value"])
@@ -221,7 +299,10 @@ def generate() -> None:
                        "SEC 1 uncompressed points in hex.",
         "jcs": jcs_cases,
         "jcs_refused": ['{"b":1,"a":2}', '{"a":1,"a":1}', '{"a": 1}', '{"a":"\\u0041"}', '{"a":1e2}', '{"a":1.5}',
-                        '{"a":"\\u001F"}', '[9007199254740992]', ' {}'],
+                        '{"a":"\\u001F"}', '[9007199254740992]', ' {}',
+                        # Not strict I-JSON (RFC 7493), or nested past 64 (section 7):
+                        "\ufeff{}", '{"a":"\\ud800"}', '{"a":"\uffff"}', '{"\ufdd0":1}', "[1e400]",
+                        "[1" + "0" * 309 + "]", jcs(nested(66))],
         "thumbprints": [{"key": point(k).hex(), "jwk": jwk(point(k)), "thumbprint": thumbprint(point(k))}
                         for k in (college, rotated, other)],
         "base_urls": [{"url": u, "base": u.rstrip("/"), "did": did_of(u.rstrip("/"))[0],
@@ -238,8 +319,11 @@ def generate() -> None:
                    "index": 131071}],
         "roles_refused": ["credential/0/1", "credential/01/1", "credential/1/01", "credential/1/131072",
                           "credential/1/", "credential/1", "credential/1/2/3", "credentials/1/2", "credential//1",
-                          "reviewer", "credential/-1/2"],
+                          "reviewer", "credential/-1/2", "credential/18446744073709551615/1",
+                          "credential/100000000000000000000/1"],
         "credentials": credentials,
+        "credentials_read": credentials_read,
+        "credentials_refused": credentials_refused,
         "did_documents": [
             {"description": "one key", "base": "https://ledger.example.com", "keys": [point(college).hex()],
              "ledger": ledger},
@@ -253,6 +337,8 @@ def generate() -> None:
     }
     for d in vectors["did_documents"]:
         d["document"] = did_document(d["base"], [bytes.fromhex(k) for k in d["keys"]], d["ledger"])
+    vectors["did_documents_read"], vectors["did_documents_refused"] = did_documents_read_and_refused(
+        "https://ledger.example.com", point(college), ledger)
     OUT.write_text(json.dumps(vectors, indent=2, ensure_ascii=False) + "\n")
     print(f"wrote {OUT.relative_to(ROOT)}")
 

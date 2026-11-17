@@ -26,9 +26,6 @@ namespace {
 
 constexpr std::string_view status_list_type = "BitstringStatusListCredential";
 constexpr std::string_view evidence_type = "KanheEvidence";
-/// No credential this profile makes comes near this; it bounds the work a
-/// hostile one costs.
-constexpr std::size_t max_compact_size = 1 << 20;
 /// A status list's GZIP may decompress to no more than this before it is
 /// refused for its size.
 constexpr std::size_t max_status_list_output = std::size_t{1} << 22;
@@ -352,6 +349,22 @@ keys_from(const std::vector<std::pair<std::uint64_t, crypto::PublicKey>>& keys,
 std::string json_text(const Json& value) {
     return value.is_string() ? value.get<std::string>()
                              : value.dump(-1, ' ', false, Json::error_handler_t::replace);
+}
+
+/// Whether two of the objects in `list` (if it is an array) have the same
+/// string `id`.
+bool repeated_ids(const Json* list) {
+    if (list == nullptr || !list->is_array()) {
+        return false;
+    }
+    std::set<std::string> ids;
+    for (const Json& item : *list) {
+        if (const std::string* id = text_member(item, "id");
+            id != nullptr && !ids.insert(*id).second) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -688,6 +701,29 @@ Result<Json> did_document(const crypto::Provider& provider, const BaseUrl& base,
     return out;
 }
 
+Explained<Json> parse_did_document(std::string_view text) {
+    if (text.size() > max_did_document_size) {
+        return std::unexpected("the DID document is larger than 256 KiB");
+    }
+    auto doc = parse_i_json(text);
+    if (!doc) {
+        return std::unexpected(
+            std::format("the DID document cannot be read ({})", doc.error().detail));
+    }
+    if (!doc->is_object()) {
+        return std::unexpected("the DID document is not a JSON object");
+    }
+    // DID Core: the ids of its verification methods, and of its services, are unique.
+    if (repeated_ids(member(*doc, "verificationMethod"))) {
+        return std::unexpected(
+            "the DID document gives two of its verification methods the same id");
+    }
+    if (repeated_ids(member(*doc, "service"))) {
+        return std::unexpected("the DID document gives two of its services the same id");
+    }
+    return std::move(*doc);
+}
+
 // ---- JWS ----------------------------------------------------------------
 
 Result<std::string> sign_credential(const crypto::Signer& key, const crypto::Provider& provider,
@@ -714,11 +750,12 @@ Result<std::string> sign_credential(const crypto::Signer& key, const crypto::Pro
 }
 
 Result<Jws> parse_jws(std::string_view compact) {
-    if (compact.size() > max_compact_size) {
-        return fail(Errc::limit_exceeded, "a credential larger than 1 MiB");
-    }
+    // Line ends at its end are a file's, not the JWS's; nothing else is taken off.
     while (!compact.empty() && (compact.back() == '\n' || compact.back() == '\r')) {
         compact.remove_suffix(1);
+    }
+    if (compact.size() > max_compact_size) {
+        return fail(Errc::limit_exceeded, "a credential larger than 1 MiB");
     }
     const std::size_t first = compact.find('.');
     const std::size_t second =
@@ -940,13 +977,14 @@ Result<CredentialReport> verify_credential(const crypto::Provider& provider,
     }
 
     // Step 6: the DID document.
+    Json doc;
     if (options.did_document) {
         r.did_document_checked = true;
-        const Json doc = Json::parse(*options.did_document, nullptr, false);
         auto& problems = r.did_document_problems;
-        if (doc.is_discarded() || !doc.is_object()) {
-            problems.push_back("the DID document is not a JSON object");
+        if (auto parsed_doc = parse_did_document(*options.did_document); !parsed_doc) {
+            problems.push_back(std::move(parsed_doc.error()));
         } else {
+            doc = std::move(*parsed_doc);
             const std::string* id = text_member(doc, "id");
             if (id == nullptr || *id != r.issuer) {
                 problems.push_back(std::format("the DID document is not {}'s", r.issuer));
@@ -1005,7 +1043,6 @@ Result<CredentialReport> verify_credential(const crypto::Provider& provider,
             // compared with the ledger below.
             std::vector<crypto::PublicKey> keys;
             if (r.did_document_checked && r.did_document_problems.empty()) {
-                const Json doc = Json::parse(*options.did_document, nullptr, false);
                 for (const Json& method : did_assertion_keys(doc)) {
                     if (const auto key = jwk_key(method)) {
                         keys.push_back(*key);
