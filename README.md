@@ -91,8 +91,9 @@ vectors (`testvectors/`), the [examples](examples/), the tests, and the tools. B
 ## Who it is for
 
 - **One person, on one computer.** A ledger is a directory; keys are encrypted files, with a
-  passkey or a USB key for proof of presence; evidence is a file you hand over. Today you use
-  it from the command line, or from a local web console (in progress); installers are planned.
+  passkey or a USB key for proof of presence; evidence is a file you hand over. You use it
+  from the command line or from a local web console (`kanhe-console`); each release has
+  packages for Linux (deb, rpm, tar) and macOS (pkg, tar).
 - **An organization.** Staff, AI agents, and devices act with rights the organization's root
   key delegates, which can only narrow. `kanhe serve` runs a ledger over HTTP with API
   tokens; replicas, backups, and Raft clusters keep it available; a Docker image runs it.

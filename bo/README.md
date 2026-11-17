@@ -118,8 +118,8 @@ The transfer takes the standard library's terms (R19), so the holder starts it; 
 the counterparty, who consents (R21); the holder starts as the owner and may change (R2);
 `over 50_000` takes the unit of the action's one amount (R6); in person asks the starter's
 presence (R13); an AI agent may act within its delegation unless the action says it only
-proposes (R14). Clauses that ask the outside world to act (notify, say) are accepted with a
-warning: executors come in a later step.
+proposes (R14). What the outside world must do (`notify PARTY`, `request KIND ...`) is a
+request to an executor, answered later ([Requests](#requests)).
 
 Packs are files in CBOR diagnostic notation; `bo/packs/` holds the official language packs and
 `bo/vocab/` the official vocabulary packs (their words, spelled in each language, and the
@@ -166,8 +166,9 @@ language. The same contract in English, Traditional Chinese, Simplified Chinese,
 compiles to the same bytes; `tests/bo/golden/build/` holds a two-party contract in each, and the
 fuel of each of its calls. The vocabulary's built-in actions compile
 with the standard library's terms, `when` rules compile to functions a keeper calls, and lists
-and charges compute bills (all below). What later steps bring (executors, and the built-in
-actions whose terms come later) is refused with a message for now. `testvectors/bo-v1.json`
+and charges compute bills (all below). A built-in action whose terms the standard library does
+not have yet, and one an executor does (written as a request instead), are refused with a
+message that says so. `testvectors/bo-v1.json`
 (`tools/testvectors/bo_vectors.py`) pins sources, bo-source bundles, interfaces, code, fuel
 bounds, and outcomes, checked on both interpreters, and the errors of sources that must not
 build.

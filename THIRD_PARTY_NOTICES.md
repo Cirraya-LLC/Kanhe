@@ -9,8 +9,9 @@ package managers.
 
 Where each component ends up:
 
-- **`kanhe`**: the command-line tool and ledger server (one binary), and the Docker image
-  that carries it.
+- **The programs**: `kanhe` (the command line and ledger server), `bo` (the contract
+  compiler), `kanhe-console` (the web console), and `kanhe-index` (the search index), in each
+  release's packages; the Docker image carries `kanhe` and `kanhe-index`.
 - **Browser verifier**: `kanhe-verify.html`, the self-contained page that
   `tools/wasm/build.sh` builds (and its module, `kanhe-verifier.js`). The page lists these
   components, their notices, and the full MIT and Apache 2.0 license texts itself, under
@@ -22,15 +23,15 @@ Where each component ends up:
 
 | Component | Version | License | Source | Ships in |
 | --- | --- | --- | --- | --- |
-| OpenSSL (libcrypto, libssl) | 3.5 or later, from the system (the Docker image: Debian trixie's `libssl3t64`) | Apache-2.0 | <https://github.com/openssl/openssl> | `kanhe` (linked dynamically) |
+| OpenSSL (libcrypto, libssl) | 3.5 or later, from the system (the Docker image: Debian trixie's `libssl3t64`) | Apache-2.0 | <https://github.com/openssl/openssl> | the programs (linked dynamically) |
 | OpenSSL (libcrypto only) | 3.5.9 | Apache-2.0 | <https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz> | Browser verifier (compiled in) |
-| JSON for Modern C++ (nlohmann/json) | 3.12.0 | MIT | <https://github.com/nlohmann/json> | `kanhe`, browser verifier (header-only, compiled in) |
-| Asio (standalone) | 1.38.2 | BSL-1.0 | <https://github.com/chriskohlhoff/asio> | `kanhe` (header-only, compiled in) |
-| NuRaft | 3.0.0 | Apache-2.0 | <https://github.com/eBay/NuRaft> | `kanhe` (linked statically) |
-| SQLite (amalgamation) | 3.54.1 | Public domain (notice below) | <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> | `kanhe` (linked statically): the search index |
-| QR Code generator library (C++) | 1.8.0 | MIT | <https://github.com/nayuki/QR-Code-generator> | `kanhe` (linked statically) |
-| p11-kit's PKCS #11 header (`pkcs11.h`) | from the system's p11-kit, at build time | Permissive (notice below) | <https://github.com/p11-glue/p11-kit> | `kanhe`, when built with PKCS #11 support (the Docker image is); the header's types and constants only |
-| GCC runtime (libstdc++, libgcc) | GCC 16 | GPL-3.0-or-later WITH GCC-exception-3.1 | <https://gcc.gnu.org/> | `kanhe` in the Docker image (linked statically); other builds link the system's C++ runtime dynamically |
+| JSON for Modern C++ (nlohmann/json) | 3.12.0 | MIT | <https://github.com/nlohmann/json> | the programs, browser verifier (header-only, compiled in) |
+| Asio (standalone) | 1.38.2 | BSL-1.0 | <https://github.com/chriskohlhoff/asio> | `kanhe`, `kanhe-console`, `kanhe-index` (header-only, compiled in) |
+| NuRaft | 3.0.0 | Apache-2.0 | <https://github.com/eBay/NuRaft> | `kanhe`, `kanhe-console`, `kanhe-index` (linked statically) |
+| SQLite (amalgamation) | 3.54.1 | Public domain (notice below) | <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> | `kanhe-index`, `kanhe-console` (linked statically): the search index |
+| QR Code generator library (C++) | 1.8.0 | MIT | <https://github.com/nayuki/QR-Code-generator> | `kanhe`, `kanhe-console` (linked statically): printed certificates' QR codes |
+| p11-kit's PKCS #11 header (`pkcs11.h`) | from the system's p11-kit, at build time | Permissive (notice below) | <https://github.com/p11-glue/p11-kit> | `kanhe`, `kanhe-console`, `kanhe-index`, when built with PKCS #11 support (the Docker image is); the header's types and constants only |
+| GCC runtime (libstdc++, libgcc) | GCC 16 | GPL-3.0-or-later WITH GCC-exception-3.1 | <https://gcc.gnu.org/> | the programs in the Docker image (linked statically); other builds link the system's C++ runtime dynamically |
 | Emscripten runtime and system libraries | 6.0.10 | MIT (or NCSA); musl libc: MIT; LLVM libc++, libc++abi, libunwind, compiler-rt: Apache-2.0 WITH LLVM-exception; dlmalloc: CC0-1.0 | <https://github.com/emscripten-core/emscripten> | Browser verifier (compiled in) |
 | Debian trixie (slim) base image and its packages (`ca-certificates`, `libssl3t64`) | trixie | Various, per package (`/usr/share/doc/*/copyright` in the image) | <https://www.debian.org/> | The Docker image only |
 
@@ -176,7 +177,7 @@ PURPOSE.
 
 ### GCC runtime library exception
 
-The Docker image's `kanhe` links GCC's C++ runtime (libstdc++ and libgcc) statically. They
+The Docker image's programs link GCC's C++ runtime (libstdc++ and libgcc) statically. They
 are licensed under the GNU General Public License version 3 or later with the GCC Runtime
 Library Exception 3.1, which permits distributing the compiled program under terms of the
 distributor's choice (<https://www.gnu.org/licenses/gcc-exception-3.1.html>).
