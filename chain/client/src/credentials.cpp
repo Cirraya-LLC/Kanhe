@@ -27,36 +27,7 @@ IssuedCredential issue_credential(Session& session, const crypto::Signer& key,
     const protocol::Id actor_id = actor.id.id();
 
     // The record's evidence as its address gives it, verified here.
-    Bytes bundle;
-    if (session.remote()) {
-        if (log_key.given) {
-            throw UsageError{"with --server the server signs: drop --log-key"};
-        }
-        bundle = session.request("GET", "/c/" + request.token);
-    } else {
-        const auto published = node::load_published(session.directory(), request.token);
-        if (!published) {
-            throw ActionError{"nothing is published at " + request.token + " (record published)"};
-        }
-        // A checkpoint first if the latest does not cover the record's
-        // latest change, as a server does before it serves /c/TOKEN.
-        if (const protocol::RecordState* r = session.state().record(published->record)) {
-            std::uint64_t last = r->registered_at_index;
-            for (const std::uint64_t index : r->history) {
-                last = std::max(last, index);
-            }
-            if (r->superseded_by) {
-                last = std::max(last, r->superseded_at_index);
-            }
-            const auto latest = session.ledger().latest_checkpoint();
-            if (!latest || latest->checkpoint.tree_size <= last) {
-                (void)session.checkpoint(log_key);
-            }
-        }
-        auto evidence = session.evidence(log_key, published->record);
-        evidence.disclosures = published->disclosures;
-        bundle = unwrap(protocol::encode_bundle(evidence), "encoding the evidence");
-    }
+    const Bytes bundle = session.published_evidence(log_key, request.token);
     protocol::VerifyOptions verify;
     verify.expected_ledger = session.state().ledger_id();
     const auto report = unwrap(protocol::verify_bundle(session.provider(), bundle, verify),

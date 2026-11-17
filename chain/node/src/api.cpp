@@ -1015,6 +1015,14 @@ struct LedgerApi::State {
         return response;
     }
 
+    /// not_leader for a route anyone's page reads (/c/, /m/): a browser
+    /// follows the redirect only if it may read it.
+    http::Response public_not_leader(std::string_view target) const {
+        auto response = not_leader(target);
+        response.headers.emplace_back("Access-Control-Allow-Origin", "*");
+        return response;
+    }
+
     /// Keeps a record's sealed private data, once: the same data again is
     /// fine (a retry), other data is refused, so nobody can swap it.
     http::Response store_vault(const protocol::Id& record, const Bytes& sealed,
@@ -1694,7 +1702,7 @@ struct LedgerApi::State {
         }
         // A cluster's leader checkpoints, as for a record's evidence.
         if (cluster && !cluster->leads()) {
-            finish(done, principal, not_leader(r.target));
+            finish(done, principal, public_not_leader(r.target));
             return;
         }
         queue_locked([this, text, newest, principal = std::move(principal),
@@ -1793,19 +1801,12 @@ struct LedgerApi::State {
         return response;
     }
 
-    /// The last log index about `record` (its supersession too), if any.
+    /// The last log index about `record` (its supersession too, and its
+    /// endorsers' key changes), if any.
     std::optional<std::uint64_t> last_about(const protocol::Id& record) const {
         std::optional<std::uint64_t> last;
-        ledger->read_state([&](const protocol::LedgerState& s) {
-            if (const protocol::RecordState* found = s.record(record)) {
-                for (const std::uint64_t index : found->history) {
-                    last = std::max(last.value_or(0), index);
-                }
-                if (found->superseded_by) {
-                    last = std::max(last.value_or(0), found->superseded_at_index);
-                }
-            }
-        });
+        ledger->read_state(
+            [&](const protocol::LedgerState& s) { last = last_index_about(s, record); });
         return last;
     }
 
@@ -1828,10 +1829,14 @@ struct LedgerApi::State {
     void published_request(const http::Request& r, const Routed& routed, std::string principal,
                            Done& done) {
         const std::string token(std::string_view(r.path).substr(routed.rest));
-        const bool can_write =
-            !options.read_only && !replica && !cluster && !options.log_keys.empty();
+        const bool can_write = !options.read_only && !replica && !options.log_keys.empty();
         if ((published_covered(token) && !ledger->outdated()) || !can_write) {
             finish(done, principal, answer_safely(r, routed, principal, 0));
+            return;
+        }
+        // A cluster's leader checkpoints, as for a record's evidence.
+        if (cluster && !cluster->leads()) {
+            finish(done, principal, public_not_leader(r.target));
             return;
         }
         queue_locked([this, token, principal = std::move(principal),
@@ -1842,7 +1847,9 @@ struct LedgerApi::State {
             }
             // Caught up with the files: checkpoint unless that covers it now.
             if (!published_covered(token)) {
-                if (auto made = ledger->checkpoint(log_keys()); !made) {
+                if (auto made =
+                        cluster ? cluster->checkpoint(log_keys()) : ledger->checkpoint(log_keys());
+                    !made) {
                     finish(done, principal, error_response(made.error()));
                     return;
                 }

@@ -158,4 +158,28 @@ Status unpublish(const std::filesystem::path& ledger, std::string_view token) {
     return {};
 }
 
+std::optional<std::uint64_t> last_index_about(const protocol::LedgerState& state,
+                                              const protocol::Id& record) {
+    const protocol::RecordState* found = state.record(record);
+    if (found == nullptr) {
+        return std::nullopt;
+    }
+    std::uint64_t last = found->registered_at_index;
+    for (const std::uint64_t index : found->history) {
+        last = std::max(last, index);
+    }
+    if (found->superseded_by) {
+        last = std::max(last, found->superseded_at_index);
+    }
+    for (const protocol::Endorsement& e : found->endorsements) {
+        if (const protocol::ActorState* a = state.actor(protocol::Id(e.actor))) {
+            for (const std::uint64_t index : a->rotations) {
+                last = std::max(last, index);
+            }
+            last = std::max(last, a->revoked_at_index.value_or(0));
+        }
+    }
+    return last;
+}
+
 } // namespace kanhe::node

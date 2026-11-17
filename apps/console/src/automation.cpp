@@ -437,7 +437,18 @@ Console::machine_step(const Signed& who, const nlohmann::json& intent) const {
         if (!actor) {
             std::shared_ptr<const crypto::openssl::KeyPair> made;
             auto key = credential_public_key();
-            if (!key) {
+            // A key kept from a credential key since revoked is not used
+            // again: a new one replaces it.
+            bool revoked = false;
+            if (key) {
+                served->read_state([&](const protocol::LedgerState& state) {
+                    for (const auto& [id, a] : state.actors()) {
+                        revoked = revoked || (a.revoked && a.key == *key);
+                    }
+                });
+            }
+            const auto kept = key;
+            if (!key || revoked) {
                 auto generated = crypto::openssl::KeyPair::generate(crypto::SigAlg::esp256);
                 if (!generated) {
                     return error(500, "internal", "the credential key could not be made");
@@ -452,6 +463,7 @@ Console::machine_step(const Signed& who, const nlohmann::json& intent) const {
             step.as_organization = true;
             if (made) {
                 step.seal_as = std::string(credential_key_name);
+                step.seal_over = kept;
             }
             return step;
         }

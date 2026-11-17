@@ -16,6 +16,7 @@
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/node/credentials.hpp>
+#include <kanhe/node/published.hpp>
 #include <kanhe/verifier/credentials.hpp>
 #include <kanhe/verifier/gzip.hpp>
 #include <kanhe/verifier/jcs.hpp>
@@ -441,6 +442,40 @@ TEST_CASE("a credential key that rotates keeps its credentials verifying", "[cre
     const auto& methods = (*doc)["verificationMethod"];
     REQUIRE(methods.size() == 2);
     CHECK(methods[0]["id"].get<std::string>() < methods[1]["id"].get<std::string>());
+}
+
+TEST_CASE("a credential is issued from complete evidence that shows its key as it is now",
+          "[credentials]") {
+    College c;
+    const verifier::StatusEntry entry{.list = 1, .index = 5};
+    c.endorse(entry, c.device);
+    const Bytes bundle = c.evidence();
+    // Evidence that does not prove the complete history could leave out a
+    // revocation: no credential from it.
+    auto partial = c.report(bundle);
+    REQUIRE(partial.complete);
+    partial.complete = false;
+    const auto refused =
+        verifier::credential_content(partial, c.base, c.token, entry, {}, std::nullopt);
+    REQUIRE_FALSE(refused);
+    CHECK(refused.error().find("complete history") != std::string::npos);
+
+    // The credential key rotates after the checkpoint that covers its
+    // endorsement: the record's evidence must now reach the rotation, which
+    // shows the key the next credential is signed with.
+    const auto latest = c.w.ledger().latest_checkpoint();
+    REQUIRE(latest);
+    const KeyPair rotated = std::move(*KeyPair::generate(crypto::SigAlg::esp256));
+    c.w.ok(c.device,
+           c.w.statement(c.device_id, std::nullopt,
+                         protocol::ActorRotateKeyBody{c.device_id, rotated.public_key()}));
+    const auto last = node::last_index_about(c.w.ledger().state(), c.record);
+    REQUIRE(last);
+    CHECK(*last == c.w.ledger().size() - 1);
+    CHECK(latest->checkpoint.tree_size <= *last);
+    const Bytes fresh = c.evidence();
+    CHECK(c.check(c.sign(c.payload(fresh, entry), rotated), fresh).verified());
+    CHECK_FALSE(node::last_index_about(c.w.ledger().state(), c.device_id));
 }
 
 TEST_CASE("a status list signed by another of the issuer's credential keys", "[credentials]") {

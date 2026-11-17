@@ -217,6 +217,10 @@ struct Prepared {
     /// The console's own key for a machine of its own (the credential key):
     /// `new_key` sealed under this name once signed, kept, linked to nobody.
     std::optional<std::string> seal_as;
+    /// The key sealed under `seal_as` when this was prepared (none, or a
+    /// revoked actor's being replaced): sealing refuses if it changed since,
+    /// so that two approvals never overwrite each other's key.
+    std::optional<crypto::PublicKey> seal_over;
 };
 
 inline constexpr protocol::Timestamp approval_lifetime = 2 * 60'000;
@@ -487,8 +491,9 @@ private:
         std::optional<std::string> model;
         std::optional<std::string> model_version;
         bool as_organization = false;
-        /// See Prepared::seal_as.
+        /// See Prepared::seal_as and seal_over.
         std::optional<std::string> seal_as;
+        std::optional<crypto::PublicKey> seal_over;
     };
     [[nodiscard]] std::variant<PersonStep, http::Response>
     person_step(const Signed& who, const nlohmann::json& intent) const;
@@ -802,6 +807,9 @@ private:
     mutable std::jthread certifier_;
     /// One backup at a time.
     mutable std::mutex backup_mutex_;
+    /// One credential issued at a time, so that two never take one status
+    /// list entry; and the credential key sealed under it.
+    mutable std::mutex credential_mutex_;
     mutable std::mutex poll_mutex_;
     mutable std::condition_variable_any poll_wake_;
     mutable bool poll_asked_ = false;

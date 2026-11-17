@@ -13,6 +13,7 @@
 #include <kanhe/core/error.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/core/protocol/state.hpp>
 #include <kanhe/ledger/environment.hpp>
 
 /// Records published at a private address: `GET /c/TOKEN` gives anyone who
@@ -63,5 +64,12 @@ inline constexpr std::size_t max_published_fields = 64;
 /// Takes the address down (the record stays on the ledger); Errc::not_found
 /// if nothing is published under `token`.
 [[nodiscard]] Status unpublish(const std::filesystem::path& ledger, std::string_view token);
+
+/// The last log index a record's evidence must cover to show it as it is
+/// now: its statements, its supersession, and its endorsers' key rotations
+/// and revocations (a credential is signed with its endorser's current key,
+/// which the evidence must show). None if the ledger has no such record.
+[[nodiscard]] std::optional<std::uint64_t> last_index_about(const protocol::LedgerState& state,
+                                                            const protocol::Id& record);
 
 } // namespace kanhe::node

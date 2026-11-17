@@ -181,6 +181,12 @@ public:
     [[nodiscard]] protocol::SignedCheckpoint checkpoint(const LogKey& log_key);
     [[nodiscard]] protocol::EvidenceBundle evidence(const LogKey& log_key,
                                                     const protocol::Id& record);
+    /// A published record's evidence as its address gives it, its fields
+    /// disclosed: built here (after a checkpoint, if the latest does not
+    /// cover the record as it is now), or the server's `/c/TOKEN`, verified
+    /// against the mirror and refused if it leaves out anything the mirror
+    /// holds about the record.
+    [[nodiscard]] Bytes published_evidence(const LogKey& log_key, std::string_view token);
     /// An instance's contract evidence with the consents its calls cite,
     /// without private data: built here with the log key (after a
     /// checkpoint, if the latest does not cover the instance's last call), or

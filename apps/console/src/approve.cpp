@@ -246,6 +246,7 @@ http::Response Console::prepare_route(const http::Request& request) const {
         std::optional<std::string> model_version;
         bool as_organization = false;
         std::optional<std::string> seal_as;
+        std::optional<crypto::PublicKey> seal_over;
     } machine;
     std::variant<protocol::Body, std::string> body = std::string();
     if (action == "contract.deploy") {
@@ -295,9 +296,13 @@ http::Response Console::prepare_route(const http::Request& request) const {
         person_key = std::move(p.new_key);
         person = std::move(p.person);
         activity = std::move(p.activity);
-        machine = {p.hand_out,         p.agent,
-                   std::move(p.model), std::move(p.model_version),
-                   p.as_organization,  std::move(p.seal_as)};
+        machine = {p.hand_out,
+                   p.agent,
+                   std::move(p.model),
+                   std::move(p.model_version),
+                   p.as_organization,
+                   std::move(p.seal_as),
+                   std::move(p.seal_over)};
     } else if (action.starts_with("access.") && action != "access.answer") {
         // A request to a party, a grant of a request received, or a receipt
         // for a delivery: a record of this ledger's, its note private.
@@ -519,6 +524,7 @@ http::Response Console::prepare_route(const http::Request& request) const {
     prepared.model = std::move(machine.model);
     prepared.model_version = std::move(machine.model_version);
     prepared.seal_as = std::move(machine.seal_as);
+    prepared.seal_over = std::move(machine.seal_over);
     summary["consents"] = prepared.bundles.size();
     prepared.user = signer.user;
     prepared.key = machine.as_organization ? std::string(root_key_name) : user->key;
@@ -680,7 +686,20 @@ Console::sign_approval(const http::Request& request) const {
                        services_.clock->now() + 10 * 60'000};
         } else if (prepared->new_key && prepared->seal_as) {
             // The console's own machine key (its credential key): kept under
-            // its name, linked to no person.
+            // its name, linked to no person; never over a key another
+            // approval sealed since this one was prepared.
+            const std::lock_guard lock(credential_mutex_);
+            std::optional<crypto::PublicKey> sealed;
+            for (const SealedKeyInfo& k : services_.keys->keys()) {
+                if (k.name == *prepared->seal_as) {
+                    sealed = k.public_key;
+                }
+            }
+            if (sealed != prepared->seal_over) {
+                return error(409, "conflict",
+                             "another approval made the console's credential key meanwhile: "
+                             "turn credentials on again");
+            }
             services_.keys->seal(*prepared->seal_as, *prepared->new_key);
         } else if (prepared->new_key) {
             key_name = "person-" + to_hex(signed_statement->id.bytes()).substr(0, 16);

@@ -411,6 +411,9 @@ http::Response Console::issue_credential(const Signed& signer, const Certificate
                      "one: " +
                          base.error());
     }
+    // One at a time: an entry is chosen among those no endorsement names
+    // yet, so two at once could choose the same.
+    const std::lock_guard lock(credential_mutex_);
     const auto public_key = credential_public_key();
     std::optional<protocol::Id> actor;
     std::optional<node::CredentialEntry> existing;

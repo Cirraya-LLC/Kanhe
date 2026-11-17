@@ -544,6 +544,11 @@ Explained<CredentialContent> credential_content(const protocol::EvidenceReport& 
             std::format("{} is one of the protocol's own types: it is not issued as a credential",
                         report.record_type));
     }
+    if (!report.complete) {
+        // Without it, nothing shows that no revocation was left out.
+        return std::unexpected("the evidence does not prove the record's complete history (its "
+                               "checkpoint has no state commitment): checkpoint, then issue");
+    }
     if (report.revoked) {
         return std::unexpected("the record is revoked: no credential is issued for it");
     }

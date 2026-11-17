@@ -94,8 +94,9 @@ struct CredentialContent {
 
 /// A published record's credential content, from its verified evidence:
 /// every disclosed field, and the public metadata entries `metadata` names.
-/// Refuses a record that is a mechanism type, revoked, or replaced, and a
-/// field or entry that cannot be a claim (each named).
+/// Refuses evidence that is not complete (it could leave out a revocation),
+/// a record that is a mechanism type, revoked, or replaced, and a field or
+/// entry that cannot be a claim (each named).
 [[nodiscard]] Explained<CredentialContent>
 credential_content(const protocol::EvidenceReport& report, const BaseUrl& base, std::string token,
                    const StatusEntry& entry, std::span<const std::string> metadata,

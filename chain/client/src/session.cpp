@@ -20,6 +20,7 @@
 #include <kanhe/node/client.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
+#include <kanhe/node/published.hpp>
 #include <kanhe/node/replica.hpp>
 #include <kanhe/node/sources.hpp>
 #include <kanhe/node/trust.hpp>
@@ -643,6 +644,50 @@ protocol::EvidenceBundle Session::evidence(const LogKey& log_key, const protocol
                           "verified"};
     }
     return bundle;
+}
+
+Bytes Session::published_evidence(const LogKey& log_key, std::string_view token) {
+    if (!remote_) {
+        const auto published = node::load_published(directory_, token);
+        if (!published) {
+            throw ActionError{"nothing is published at " + std::string(token) +
+                              " (record published)"};
+        }
+        // A checkpoint first if the latest does not cover the record as it
+        // is now, as a server does before it serves /c/TOKEN.
+        if (const auto last = node::last_index_about(state(), published->record)) {
+            const auto& latest = ledger_->latest_checkpoint();
+            if (!latest || latest->checkpoint.tree_size <= *last) {
+                static_cast<void>(checkpoint(log_key));
+            }
+        }
+        auto bundle = evidence(log_key, published->record);
+        bundle.disclosures = published->disclosures;
+        return unwrap(protocol::encode_bundle(bundle), "encoding the evidence");
+    }
+    if (log_key.given) {
+        throw UsageError{"with --server the server signs: drop --log-key"};
+    }
+    Bytes encoded = call("GET", "/c/" + std::string(token));
+    protocol::VerifyOptions options;
+    options.expected_ledger = state().ledger_id();
+    const auto report = ledger::verify_bundle(provider_, encoded, options, on_all_cores());
+    if (!report) {
+        throw ActionError{"the server sent evidence that does not verify"};
+    }
+    const auto bundle = unwrap(protocol::decode_bundle(encoded), "reading the evidence");
+    if (!sync_until([&] { return has_checkpoint(bundle.checkpoint); })) {
+        throw ActionError{"the server's evidence is anchored to a checkpoint this client has not "
+                          "verified"};
+    }
+    // Nothing this client holds about the record left out (a revocation, a
+    // newer version, its endorser's new key).
+    if (const auto last = node::last_index_about(state(), report->record);
+        last && report->checkpoint.tree_size <= *last) {
+        throw ActionError{"the server's evidence is older than what this client holds of the "
+                          "record: try again"};
+    }
+    return encoded;
 }
 
 Bytes Session::contract_evidence(const LogKey& log_key, const protocol::Id& instance) {

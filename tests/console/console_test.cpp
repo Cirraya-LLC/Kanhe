@@ -3263,6 +3263,47 @@ TEST_CASE("people: invited, approved with three taps, and acting in person withi
     CHECK(f.w.get("/console/api/people", viewer).status == 200);
 }
 
+TEST_CASE("two approvals turning credentials on at once never overwrite the credential key",
+          "[console][automation]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    auto prepare = [&] {
+        const auto prepared =
+            f.w.post_as("/console/api/prepare", {{"action", "machine.credentials"}}, owner);
+        INFO(body(prepared));
+        REQUIRE(prepared.status == 200);
+        return answer_of(prepared);
+    };
+    // Two tabs prepare the credential device, each with a key of its own.
+    const auto first = prepare();
+    const auto second = prepare();
+    REQUIRE(approve(f.w, owner, first, f.alice).status == 201);
+    const auto late = approve(f.w, owner, second, f.alice);
+    CHECK(late.status == 409);
+    CHECK(body(late).contains("turn credentials on again"));
+    // One device, with the key the console keeps.
+    std::vector<kanhe::crypto::PublicKey> devices;
+    served.session.ledger().read_state([&](const kanhe::protocol::LedgerState& state) {
+        for (const auto& [id, actor] : state.actors()) {
+            if (actor.kind == kanhe::protocol::ActorKind::device &&
+                actor.display_name == "Credentials") {
+                devices.push_back(actor.key);
+            }
+        }
+    });
+    REQUIRE(devices.size() == 1);
+    const auto sealed = f.w.keys.keys();
+    const auto kept =
+        std::ranges::find(sealed, std::string("credentials"), &console::SealedKeyInfo::name);
+    REQUIRE(kept != sealed.end());
+    CHECK(kept->public_key == devices.front());
+    // The next step lets it endorse; then credentials are on.
+    REQUIRE(approve(f.w, owner, prepare(), f.alice).status == 201);
+    CHECK(f.w.post_as("/console/api/prepare", {{"action", "machine.credentials"}}, owner).status ==
+          409);
+}
+
 TEST_CASE("automation: an executor and an AI agent added with two taps, keys handed out once",
           "[console][automation]") {
     FirstRunWorld f;
