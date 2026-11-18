@@ -31,6 +31,8 @@ struct Included {
     /// Set for a state commitment entry, which carries no statement.
     std::optional<SignedStateCommitment> commitment;
     Receipt receipt;
+    /// The statement's approvals (v0.20), in its log entry's order.
+    std::vector<SignedApproval> approvals = {};
 };
 
 std::unexpected<Error> verification_failure(std::string_view detail) {
@@ -85,6 +87,29 @@ std::string event_detail(const Statement& statement) {
     return {};
 }
 
+/// The rules a statement met and the approvals it carried (v0.20), as a
+/// report states them.
+void report_approvals(const LedgerState& state, const ApprovalTally& tally,
+                      std::vector<ApprovalRuleReport>& rules,
+                      std::vector<ApprovalReport>& approvals) {
+    for (const RuleTally& r : tally.rules) {
+        ApprovalRuleReport rule;
+        rule.source = r.applied.source;
+        rule.delegation = r.applied.delegation;
+        rule.rule = r.applied.rule;
+        for (const Id& approver : r.applied.rule.approvers) {
+            rule.approvers.push_back(summarize(state, approver));
+        }
+        rule.counted = r.counted;
+        rule.signer_counted = r.signer_counts;
+        rules.push_back(std::move(rule));
+    }
+    for (const ApprovalCheck& a : tally.approvals) {
+        approvals.push_back(
+            ApprovalReport{summarize(state, a.approver), a.approved_at, a.presence});
+    }
+}
+
 /// A request (v0.8) as the replayed state has it, as of a checkpoint signed
 /// at `checkpoint_time`.
 RequestReport request_report(const RequestState& r, Timestamp checkpoint_time) {
@@ -130,6 +155,22 @@ std::vector<std::size_t> InstanceReport::overdue_requests() const {
 
 std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
                                  std::span<const Statement> events, std::span<const Id> related) {
+    return involved_objects(state, record, events, related, {});
+}
+
+std::vector<Id> approvers_of(const LogEntry& entry) {
+    std::vector<Id> out;
+    for (const Bytes& encoded : entry.approvals) {
+        if (auto approval = parse_approval(encoded)) {
+            out.push_back(approval->approval.approver);
+        }
+    }
+    return out;
+}
+
+std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
+                                 std::span<const Statement> events, std::span<const Id> related,
+                                 std::span<const Id> approvers) {
     std::vector<Id> out;
     auto add = [&](const Id& id) {
         if (!std::ranges::contains(out, id)) {
@@ -162,6 +203,9 @@ std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
             add(delegation->grantor);
             next = delegation->parent;
         }
+    }
+    for (const Id& id : approvers) {
+        add(id);
     }
     return out;
 }
@@ -951,6 +995,9 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     if (genesis.id != genesis_entry.statement_id) {
         return verification_failure("the genesis entry has the wrong statement id");
     }
+    if (!genesis_entry.approvals.empty()) {
+        return verification_failure("the genesis entry carries no approvals");
+    }
     auto state = LedgerState::from_genesis(provider, genesis, genesis_entry.registered_at);
     if (!state) {
         // from_genesis's details are literals: kept as they are.
@@ -1015,6 +1062,14 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
             if (item.statement.id != log_entry.statement_id) {
                 return verification_failure("an entry has the wrong statement id");
             }
+            // Its approvals (v0.20), in the entry's order: replay checks it.
+            for (const Bytes& approval_bytes : log_entry.approvals) {
+                auto approval = parse_approval(approval_bytes);
+                if (!approval) {
+                    return verification_failure("an approval in the bundle is malformed");
+                }
+                item.approvals.push_back(std::move(*approval));
+            }
         } else if (log_entry != genesis_entry) {
             return verification_failure("the genesis entry is inconsistent");
         }
@@ -1029,6 +1084,8 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     // on its ancestors).
     std::map<std::uint64_t, PresenceCheck> presence;
     std::map<std::uint64_t, ContractAccept> outcomes;
+    // What each statement's approvals counted for (v0.20).
+    std::map<std::uint64_t, ApprovalTally> tallies;
     for (const Included& item : included) {
         if (item.index == 0 || item.commitment) {
             continue;
@@ -1045,7 +1102,7 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
         // apply takes it.
         Validation validation;
         if (!state->validate(provider, item.statement, item.log_entry.registered_at, nullptr,
-                             &validation)) {
+                             &validation, item.approvals)) {
             return verification_failure(
                 "an included statement fails the ledger rules or depends on a missing statement");
         }
@@ -1053,6 +1110,9 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
             if (const ContractAccept* accept = run->accepted()) {
                 outcomes.emplace(item.index, *accept);
             }
+        }
+        if (const ApprovalTally* tally = validation.approvals()) {
+            tallies.emplace(item.index, *tally);
         }
         KANHE_CHECK(state->apply(provider, item.statement, item.index, item.log_entry.registered_at,
                                  &validation));
@@ -1249,7 +1309,36 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
             .answered = std::move(answered),
             .new_version = new_version,
             .existed_by = std::nullopt,
+            .approval_rules = {},
+            .approvals = {},
         });
+        if (const auto tally = tallies.find(index); tally != tallies.end()) {
+            report_approvals(*state, tally->second, report.events.back().approval_rules,
+                             report.events.back().approvals);
+        }
+    }
+
+    // Guardian settings (v0.20): each one the bundle holds, in log order,
+    // and the one in effect at the checkpoint.
+    for (const GuardianSetting& setting : state->guardian_settings()) {
+        const auto it = included_at(setting.index);
+        GuardianReport g;
+        g.index = setting.index;
+        g.registered_at = it->log_entry.registered_at;
+        g.rule = setting.guardians;
+        if (setting.guardians) {
+            for (const Id& guardian : setting.guardians->approvers) {
+                g.guardians.push_back(summarize(*state, guardian));
+            }
+        }
+        g.guarded = setting.guarded;
+        if (const auto tally = tallies.find(setting.index); tally != tallies.end()) {
+            report_approvals(*state, tally->second, g.approval_rules, g.approvals);
+        }
+        report.guardian_settings.push_back(std::move(g));
+    }
+    if (state->guardians() != nullptr) {
+        report.guardians = report.guardian_settings.size() - 1;
     }
 
     // A claim (v0.14): its terms, and its source as the bundle shows it.
@@ -1422,7 +1511,22 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
                     "a state proof does not match the ledger's state commitment");
             }
         }
-        for (const Id& id : involved_objects(*state, bundle.record, events, related)) {
+        // From v0.20 also the organization, every actor a guardian setting
+        // names, and the approver of every approval an included entry
+        // carries: their histories, and so the approvals in them, whole.
+        std::vector<Id> approvers{state->ledger_id()};
+        for (const GuardianSetting& setting : state->guardian_settings()) {
+            if (setting.guardians) {
+                approvers.insert(approvers.end(), setting.guardians->approvers.begin(),
+                                 setting.guardians->approvers.end());
+            }
+        }
+        for (const Included& item : included) {
+            for (const SignedApproval& approval : item.approvals) {
+                approvers.push_back(approval.approval.approver);
+            }
+        }
+        for (const Id& id : involved_objects(*state, bundle.record, events, related, approvers)) {
             const auto proof = proven.find(key_of(id));
             if (proof == proven.end()) {
                 return verification_failure(

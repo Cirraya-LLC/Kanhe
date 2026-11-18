@@ -64,6 +64,7 @@ CLAIM = g.CLAIM
 EMPLOYMENT = "example.org.employment/1"
 INTERFACE = {"propose": 1, "result": 2, "update": 2}
 MODEL = "example-model-7"
+APPROVAL_TYPE = "application/kanhe-approval+cbor"  # v0.20
 
 
 class Env:
@@ -192,6 +193,27 @@ def hardware_proof(credential: Key, credential_id: bytes, wrong: bool = False):
     return make
 
 
+def approval_passkey(credential: Key, credential_id: bytes, flags: int = 0x05):
+    """A passkey's assertion over an approval's challenge (v0.20)."""
+    def make(forge, c):
+        auth = hashlib.sha256(b"localhost").digest() + bytes([flags]) + (9).to_bytes(4, "big")
+        client = ('{"type":"webauthn.get","challenge":"' + g.b64url(c) +
+                  '","origin":"http://localhost:4000","crossOrigin":false}').encode()
+        data = auth + hashlib.sha256(client).digest()
+        signature = credential.sign_der(data) if credential.alg == ESP256 else credential.sign(data)
+        return {1: credential_id, 2: auth, 3: client, 4: signature}
+    make.method = 1
+    return make
+
+
+def approval_hardware(credential: Key, credential_id: bytes):
+    """A hardware key's signature over an approval's challenge itself."""
+    def make(forge, c):
+        return {1: credential_id, 4: credential.sign(c)}
+    make.method = 2
+    return make
+
+
 # ---------------------------------------------------------------------------
 # A ledger written by hand
 # ---------------------------------------------------------------------------
@@ -217,6 +239,7 @@ class Forge:
         self.instances: dict[bytes, dict] = {}
         self.requests: dict[bytes, dict] = {}
         self.claims: dict[bytes, bytes] = {}  # claim -> its source (v0.14)
+        self.guardians: list[bytes] = []  # every actor a guardian setting named (v0.20)
         self.time = t0
         self.nonce = 0
         self.root = root or Key(f"{name} root")
@@ -254,8 +277,19 @@ class Forge:
 
     # Statements ---------------------------------------------------------------
 
+    def approval(self, approver: bytes, statement: bytes, issued_at: int, presence=None,
+                 approved_at: int | None = None) -> bytes:
+        """An approval of `statement` (v0.20, section 5.1), signed by the
+        approver's current key; `presence` makes its proof over the approval's
+        challenge."""
+        key = self.key_of(approver)
+        payload = {1: self.id, 2: approver, 3: statement, 4: issued_at + 200 if approved_at is None else approved_at}
+        if presence is not None:
+            payload[5] = presence(self, self.h(b"Kanhe approval v1" + self.kid(key) + g.dcbor(payload)))
+        return self.sign(key, APPROVAL_TYPE, g.dcbor(payload))[0]
+
     def add(self, kind: int, key: Key, actor, body, delegation=None, *, creates=None, touches=(), refs=(),
-            presence=None, provenance=None, issued_at=None, at=None, encode=None) -> bytes:
+            presence=None, provenance=None, issued_at=None, at=None, encode=None, approvals=()) -> bytes:
         at = self.time if at is None else at
         self.nonce += 1
         p = {0: 1, 1: kind, 5: at - SECOND if issued_at is None else issued_at,
@@ -270,11 +304,19 @@ class Forge:
             p[8] = presence(self, key, p)
         signed, sid = self.sign(key, g.STATEMENT_TYPE, (encode or g.dcbor)(p))
         index = len(self.entries)
-        self.entries.append(g.dcbor({1: sid, 2: at, 3: signed}))
+        # Approvals (v0.20): (approver, presence or None[, the statement id
+        # it names, for a forgery]), kept in the entry by approver.
+        made = sorted(((a[0], self.approval(a[0], a[2] if len(a) > 2 else sid, p[5], a[1])) for a in approvals),
+                      key=lambda x: x[0])
+        entry = {1: sid, 2: at, 3: signed}
+        if made:
+            entry[5] = [x[1] for x in made]
+        self.entries.append(g.dcbor(entry))
         self.times.append(at)
         self.info.append({"type": kind, "signer": actor, "delegation": delegation, "payload": p, "id": sid,
                           "presence": getattr(presence, "method", None) if presence is not None else None,
-                          "refs": [r for r in (actor, delegation, *refs) if r is not None]})
+                          "refs": [r for r in (actor, delegation, *refs) if r is not None],
+                          "approvers": [x[0] for x in made]})
         self.index[sid] = index
         if creates is not None:
             self.leaves[sid] = [creates, sid, [index]]
@@ -296,20 +338,23 @@ class Forge:
         self.actors[actor] = {"kind": kind, "name": name, "key": key, "responsible": responsible, "revoked": False}
         return actor
 
-    def grant(self, grantee: bytes, scope: dict, *, by=None, under=None, presence=None) -> bytes:
+    def grant(self, grantee: bytes, scope: dict, *, by=None, under=None, presence=None, approvals=()) -> bytes:
         by = by or self.org
         # The CDDL's scope: statement and record types strictly ascending.
         assert scope[1] == sorted(set(scope[1])), scope[1]
         assert 2 not in scope or scope[2] == sorted(set(scope[2]), key=str.encode), scope[2]
-        d = self.add(5, self.key_of(by), by, {1: grantee, 2: scope}, under, creates=2, refs=[grantee],
-                     presence=presence)
+        # The actors a rule names are registered in every bundle that holds
+        # the grant (v0.20): replay checks them at the grant.
+        named = list(scope[10][2]) if 10 in scope else []
+        d = self.add(5, self.key_of(by), by, {1: grantee, 2: scope}, under, creates=2, refs=[grantee, *named],
+                     presence=presence, approvals=approvals)
         self.delegations[d] = {"grantor": by, "parent": under, "grantee": grantee}
         return d
 
-    def rotate_key(self, actor: bytes, new: Key, *, by=None, delegation=None, presence=None) -> bytes:
+    def rotate_key(self, actor: bytes, new: Key, *, by=None, delegation=None, presence=None, approvals=()) -> bytes:
         by = by or actor
         sid = self.add(3, self.key_of(by), by, {1: actor, 2: new.public}, delegation, touches=[actor], refs=[actor],
-                       presence=presence)
+                       presence=presence, approvals=approvals)
         if actor == self.org:
             self.root = new
         else:
@@ -321,9 +366,10 @@ class Forge:
         self.log_keys.append((self.index[sid], new))
         return sid
 
-    def revoke_actor(self, actor: bytes, *, by=None, delegation=None) -> bytes:
+    def revoke_actor(self, actor: bytes, *, by=None, delegation=None, approvals=()) -> bytes:
         by = by or self.org
-        sid = self.add(4, self.key_of(by), by, {1: actor, 2: "left"}, delegation, touches=[actor], refs=[actor])
+        sid = self.add(4, self.key_of(by), by, {1: actor, 2: "left"}, delegation, touches=[actor], refs=[actor],
+                       approvals=approvals)
         self.actors[actor]["revoked"] = True
         return sid
 
@@ -331,12 +377,24 @@ class Forge:
         by = by or self.org
         return self.add(6, self.key_of(by), by, {1: d, 2: "project over"}, delegation, touches=[d], refs=[d])
 
-    def set_presence(self, person: bytes, credentials: list) -> bytes:
-        return self.add(7, self.root, self.org, {1: person, 2: credentials}, touches=[person], refs=[person])
+    def set_presence(self, person: bytes, credentials: list, approvals=()) -> bytes:
+        return self.add(7, self.root, self.org, {1: person, 2: credentials}, touches=[person], refs=[person],
+                        approvals=approvals)
+
+    def set_guardians(self, rule: dict | None, types=None, approvals=()) -> bytes:
+        """A ledger-set-guardians statement (v0.20, section 5.2): in the
+        organization's leaf only."""
+        body = {1: rule}
+        if types is not None:
+            body[2] = types
+        if rule is not None:
+            self.guardians += [a for a in rule[2] if a not in self.guardians]
+        return self.add(9, self.root, self.org, body, touches=[self.org], refs=list(rule[2]) if rule else (),
+                        approvals=approvals)
 
     def record(self, by: bytes, kind: str = "example.org.report/1", *, delegation=None, fields=None, attachments=(),
                metadata=None, supersedes=None, presence=None, provenance=None, issued_at=None,
-               encode=None) -> bytes:
+               encode=None, approvals=()) -> bytes:
         fields = {"note": "evidence suite"} if fields is None else fields
         ordered = sorted(fields.items(), key=lambda f: f[0].encode())
         tag = f"{self.name} {self.nonce}"
@@ -356,7 +414,7 @@ class Forge:
             body[6] = supersedes
         rid = self.add(16, self.key_of(by), by, body, delegation, creates=3,
                        touches=[supersedes] if supersedes is not None else (), presence=presence,
-                       provenance=provenance, issued_at=issued_at, encode=encode)
+                       provenance=provenance, issued_at=issued_at, encode=encode, approvals=approvals)
         self.records[rid] = {"names": [n for n, _ in ordered], "leaves": leaves, "attachments": opened}
         if kind == CLAIM and isinstance(metadata, dict) and "source" in metadata:
             self.claims[rid] = metadata["source"]
@@ -424,6 +482,16 @@ class Forge:
         return sorted(events)
 
     def involved(self, subject: bytes, size: int) -> list[bytes]:
+        """Section 11, step 7, with v0.20's additions: the organization,
+        every actor a guardian setting named, and the approver of every
+        approval an entry the bundle holds carries."""
+        out = self._involved(subject, size)
+        extra = [self.org, *self.guardians]
+        for i in self.needed(subject, size):
+            extra += self.info[i].get("approvers", [])
+        return list(dict.fromkeys(out + extra))
+
+    def _involved(self, subject: bytes, size: int) -> list[bytes]:
         """Section 11, step 7: the record (or the instance and its contract),
         each event's signer, an agent signer's responsible person, and every
         delegation in the chain with its grantor. A claim's source (v0.14) is
@@ -454,13 +522,16 @@ class Forge:
         def below(obj):
             return {i for i in self.leaves[obj][2] if i < size}
         needed = {0} | set(self.events(subject, size)) | below(self.org)
-        for obj in self.involved(subject, size):
+        for obj in self._involved(subject, size) + self.guardians:
             if obj in self.instances and obj != subject:
                 continue
             needed |= below(obj)
+        # v0.20: every approver of an entry held is involved, so its whole
+        # history is held too, and the approvers of the approvals in it.
         work = sorted(needed)
         while work:
-            for obj in self.info[work.pop()]["refs"]:
+            info = self.info[work.pop()]
+            for obj in info["refs"] + info.get("approvers", []):
                 for i in below(obj) - needed:
                     needed.add(i)
                     work.append(i)
@@ -1765,6 +1836,129 @@ def contract_cases(suite: Suite) -> None:
               False, rule="15 ledger rules (the head is its head)", ledger_id=f.id)
 
 
+def approval_cases(suite: Suite) -> None:
+    """Approvals and guardians (v0.20, sections 5.1, 5.2, and 11): approvals
+    replayed as the ledger checked them, every approver an involved object,
+    and the guardians in effect reported."""
+    WEEK = 7 * DAY
+
+    def org_with_directors(name: str) -> dict:
+        f = Forge(name)
+        s = {"f": f}
+        s["chan"] = f.actor(PERSON, "Chan Tai Man", Key(f"{name} chan"))
+        s["lee"] = f.actor(PERSON, "Lee Ka Yan", Key(f"{name} lee"))
+        s["ho"] = f.actor(PERSON, "Ho Wing", Key(f"{name} ho"))
+        s["wong"] = f.actor(PERSON, "Wong Siu Ming", Key(f"{name} wong"))
+        s["chan_pk"] = Key(f"{name} chan passkey", ESP256)
+        s["lee_uk"] = Key(f"{name} lee ukey")
+        s["ho_pk"] = Key(f"{name} ho passkey", ESP256)
+        f.set_presence(s["chan"], [passkey_credential(s["chan_pk"], b"chan-passkey", "Phone")])
+        f.set_presence(s["lee"], [hardware_credential(s["lee_uk"], b"lee-ukey", "UKey")])
+        s["set_ho"] = f.set_presence(s["ho"], [passkey_credential(s["ho_pk"], b"ho-passkey", "Phone")])
+        s["by"] = {"chan": (s["chan"], approval_passkey(s["chan_pk"], b"chan-passkey")),
+                   "lee": (s["lee"], approval_hardware(s["lee_uk"], b"lee-ukey")),
+                   "ho": (s["ho"], approval_passkey(s["ho_pk"], b"ho-passkey"))}
+        s["directors"] = sorted([s["chan"], s["lee"], s["ho"]])
+        return s
+
+    def by(s: dict, *names) -> list:
+        return [s["by"][n] for n in names]
+
+    def rule_fact(f: Forge, source: str, rule: dict, delegation=None, signer_counted=False, count=None) -> dict:
+        return {"source": source, "delegation": delegation.hex() if delegation else None, "k": rule[1],
+                "approvers": [f.actor_fact(a) for a in rule[2]], "within_ms": rule[3],
+                "without_presence": rule.get(4) is True, "signer_counted": signer_counted,
+                "count": rule[1] if count is None else count}
+
+    def approvals_fact(f: Forge, index: int, counted_for: list) -> list:
+        """An entry's approvals as a report states them, in its order."""
+        p = f.info[index]["payload"]
+        methods = {1: {"method": "webauthn", "user_verified": True}, 2: {"method": "hardware-key",
+                                                                         "user_verified": True}}
+        out = []
+        entry = cbor2.loads(f.entries[index])
+        for encoded, counted in zip(entry.get(5, []), counted_for):
+            payload = cbor2.loads(cbor2.loads(encoded).value[2])
+            proof = payload.get(5)
+            method = None if proof is None else (2 if 2 not in proof else 1)
+            out.append({"approver": f.actor_fact(payload[2]), "approved_at": iso(p[5] + 200),
+                        "presence": methods.get(method), "counted_for": counted})
+        return out
+
+    # --- Verified: a purchase order approved by 2 of 3, under guardians ---------------------
+    s = org_with_directors("Approvals Org")
+    f = s["f"]
+    guardians = {1: 2, 2: s["directors"], 3: WEEK}
+    g_set = f.set_guardians(guardians, approvals=by(s, "chan", "lee"))
+    po_rule = {1: 2, 2: s["directors"], 3: WEEK}
+    d_po = f.grant(s["wong"], {1: [16], 2: ["example.org.po/1"], 10: po_rule}, approvals=by(s, "chan", "ho"))
+    po = f.record(s["wong"], "example.org.po/1", delegation=d_po, fields={"order": "PO-2026-118"},
+                  approvals=by(s, "chan", "lee"))
+    f.commit()
+    i_set, i_po = f.index[g_set], f.index[po]
+    setting = {"index": i_set, "registered_at": iso(f.times[i_set]), "removed": False, "k": 2, "within_ms": WEEK,
+               "guardians": [f.actor_fact(a) for a in s["directors"]], "guards": None,
+               "rules": [rule_fact(f, "new_guardians", guardians)],
+               "approvals": approvals_fact(f, i_set, [[0], [0]])}
+    suite.add("approvals-guardians-verify",
+              "A clerk's purchase order under a delegation that needs 2 of 3 named directors within 7 days, "
+              "approved by one with a passkey and one with a hardware key; the organization's guardians (the "
+              "same three, 2 of 3, guarding every statement) set by the new guardians' approvals and approving "
+              "the delegation's grant. Every approver is an involved object.", "record", enc(f.bundle(po)), True,
+              ledger_id=f.id, facts={
+                  "record": {"id": po.hex(), "type": "example.org.po/1", "state": "registered", "revoked": False},
+                  "events": [f.event_fact(i_po, rules=[rule_fact(f, "delegation", po_rule, d_po)],
+                                          approvals=approvals_fact(f, i_po, [[0], [0]]))],
+                  "guardians": {"in_effect": {"k": 2, "within_ms": WEEK,
+                                              "guardians": [f.actor_fact(a) for a in s["directors"]],
+                                              "guards": None, "since": iso(f.times[i_set]), "index": i_set},
+                                "settings": [setting]},
+                  "complete": True})
+
+    # --- Failure: an approver's revocation left out -------------------------------------------
+    s = org_with_directors("Approvals Lab")
+    f = s["f"]
+    po_rule = {1: 2, 2: s["directors"], 3: WEEK}
+    d_po = f.grant(s["wong"], {1: [16], 2: ["example.org.po/1"], 10: po_rule})
+    po = f.record(s["wong"], "example.org.po/1", delegation=d_po, fields={"order": "PO-7"},
+                  approvals=by(s, "chan", "lee"))
+    revoke = f.revoke_actor(s["lee"])
+    f.commit()
+    suite.add("approver-revocation-left-out",
+              "A purchase order approved by 2 of 3; one approver revoked later, and the bundle leaves the "
+              "revocation out: the approver is an involved object, whose history differs from the state "
+              "commitment.", "record", enc(f.bundle(po, drop=[f.index[revoke]])), False, rule="11 step 7",
+              ledger_id=f.id)
+
+    # --- Failure: an approval of another statement ---------------------------------------------
+    s = org_with_directors("Approvals Forgery")
+    f = s["f"]
+    po_rule = {1: 2, 2: s["directors"], 3: WEEK}
+    d_po = f.grant(s["wong"], {1: [16], 2: ["example.org.po/1"], 10: po_rule})
+    chan, chan_proof = s["by"]["chan"]
+    lee, lee_proof = s["by"]["lee"]
+    po = f.record(s["wong"], "example.org.po/1", delegation=d_po, fields={"order": "PO-9"},
+                  approvals=[(chan, chan_proof), (lee, lee_proof, d_po)])
+    f.commit()
+    suite.add("approval-of-another-statement",
+              "A log entry whose purchase order carries an approval that names another statement (the "
+              "delegation's grant): the ledger would refuse it, and replay does.", "record", enc(f.bundle(po)),
+              False, rule="5.1, 11 step 3", ledger_id=f.id)
+
+    # --- Failure: a guarded root key rotation without its approvals -------------------------------
+    s = org_with_directors("Guarded Org")
+    f = s["f"]
+    d_wong = f.grant(s["wong"], {1: [16]})
+    f.set_guardians({1: 2, 2: s["directors"], 3: WEEK}, approvals=by(s, "chan", "lee"))
+    f.rotate_key(f.org, Key("guarded org root 2"))
+    r = f.record(s["wong"], delegation=d_wong, fields={"note": "after the rotation"})
+    f.commit()
+    suite.add("guarded-root-rotation-without-approvals",
+              "Guardians guard the organization's statements; its root key is rotated without their approvals, "
+              "and a record's bundle carries the rotation (the organization's history): replay refuses it.",
+              "record", enc(f.bundle(r)), False, rule="5.2, 11 step 3", ledger_id=f.id)
+
+
 DESCRIPTION = (
     "A conformance suite of Kanhe evidence (spec sections 11 and 15): each case is one evidence bundle "
     "(kind \"record\", verified as `kanhe verify` does) or one instance's contract evidence (kind \"contract\", "
@@ -1798,6 +1992,7 @@ def generate(openssl: str = "openssl") -> None:
         record_cases(suite, one, two)
         claim_cases(suite)
         contract_cases(suite)
+        approval_cases(suite)
     document = {"format": 1, "description": DESCRIPTION, "cases": suite.cases}
     OUT.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     counts = {}

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <limits>
 #include <utility>
 #include <variant>
 
@@ -417,11 +418,27 @@ Result<vm::Module> LedgerState::load_module(ByteView code) const {
 
 Status LedgerState::validate(const crypto::Provider& provider,
                              const SignedStatement& signed_statement, Timestamp now,
-                             const SignatureCheck* checked, Validation* validation) const {
+                             const SignatureCheck* checked, Validation* validation,
+                             std::span<const SignedApproval> approvals) const {
+    return validate_statement(provider, signed_statement, now, checked, validation, approvals,
+                              true);
+}
+
+Status LedgerState::validate_held(const crypto::Provider& provider,
+                                  const SignedStatement& signed_statement, Timestamp now) const {
+    return validate_statement(provider, signed_statement, now, nullptr, nullptr, {}, false);
+}
+
+Status LedgerState::validate_statement(const crypto::Provider& provider,
+                                       const SignedStatement& signed_statement, Timestamp now,
+                                       const SignatureCheck* checked, Validation* validation,
+                                       std::span<const SignedApproval> approvals,
+                                       bool approvals_too) const {
     // The offered run is this call's to take, or dropped.
     std::optional<ContractRun> offered;
     if (validation != nullptr) {
         validation->run_.reset();
+        validation->approvals_.reset();
         validation->took_offer_ = false;
         offered = std::move(validation->offered_);
         validation->offered_.reset();
@@ -525,6 +542,29 @@ Status LedgerState::validate(const crypto::Provider& provider,
     if (auto s = check_rules(provider, statement, *signer, now); !s) {
         return s;
     }
+    // Approvals (v0.20): every rule that applies met at `now`, with every
+    // approval valid. Before a call runs: a run costs more.
+    std::optional<ApprovalTally> counted;
+    if (approvals_too) {
+        auto tally = tally_approvals(provider, signed_statement, approvals, now, *signer,
+                                     statement.presence.has_value() && user_verified);
+        if (!tally) {
+            return std::unexpected(tally.error());
+        }
+        for (const RuleTally& rule : tally->rules) {
+            if (now > rule.lapses_at) {
+                return fail(Errc::rejected,
+                            "the statement's approvals came too late: an approval rule's window "
+                            "from its issue time has ended");
+            }
+            if (rule.missing() > 0) {
+                return fail(Errc::rejected, "the statement lacks approvals an approval rule needs");
+            }
+        }
+        if (!tally->none()) {
+            counted = std::move(*tally);
+        }
+    }
     // A call is registered only if its contract accepts it (spec section 15).
     if (std::holds_alternative<ContractCallBody>(statement.body)) {
         auto run = accepted_run(provider, signed_statement, now, &offered,
@@ -538,6 +578,9 @@ Status LedgerState::validate(const crypto::Provider& provider,
             validation->stamp_ = stamp_.value();
             validation->run_ = std::move(*run);
         }
+    }
+    if (validation != nullptr) {
+        validation->approvals_ = std::move(counted);
     }
     return {};
 }
@@ -675,6 +718,244 @@ LedgerKeys LedgerState::keys() const {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// Approvals and guardians (spec v0.20)
+// ---------------------------------------------------------------------------
+
+const GuardianSetting* LedgerState::guardians() const noexcept {
+    return !guardians_.empty() && guardians_.back().guardians ? &guardians_.back() : nullptr;
+}
+
+bool LedgerState::guarded(const Statement& statement) const {
+    const GuardianSetting* g = guardians();
+    if (g == nullptr || statement.actor_id != ledger_id_) {
+        return false;
+    }
+    const auto guardian = [&](const Id& actor) {
+        return std::ranges::contains(g->guardians->approvers, actor);
+    };
+    // Always: the keys, the guardians, and every statement about a guardian,
+    // so a stolen root key alone neither takes the ledger over nor gives a
+    // guardian a key of its own.
+    const bool always = std::visit(
+        Overloaded{
+            [&](const ActorRotateKeyBody& b) { return b.actor == ledger_id_ || guardian(b.actor); },
+            [&](const ActorSetPresenceBody& b) { return guardian(b.actor); },
+            [&](const ActorRevokeBody& b) { return guardian(b.actor); },
+            [](const LedgerRotateLogKeyBody&) { return true; },
+            [](const LedgerSetGuardiansBody&) { return true; },
+            [](const auto&) { return false; },
+        },
+        statement.body);
+    return always || !g->guarded || std::ranges::contains(*g->guarded, statement.type());
+}
+
+bool LedgerState::protected_approver(const Id& actor) const {
+    if (named_approvers_.contains(key_of(actor))) {
+        return true;
+    }
+    const GuardianSetting* g = guardians();
+    return g != nullptr && std::ranges::contains(g->guardians->approvers, actor);
+}
+
+std::vector<AppliedRule> LedgerState::approval_rules(const Statement& statement) const {
+    std::vector<AppliedRule> out;
+    if (!statement.actor_id) {
+        return out;
+    }
+    if (*statement.actor_id == ledger_id_) {
+        // The organization: its guardians, and a setting's new ones too.
+        const GuardianSetting* g = guardians();
+        if (const auto* set = std::get_if<LedgerSetGuardiansBody>(&statement.body)) {
+            if (g != nullptr) {
+                out.push_back({RuleSource::guardians, std::nullopt, g->index, *g->guardians});
+            }
+            if (set->guardians) {
+                out.push_back(
+                    {RuleSource::new_guardians, std::nullopt, std::nullopt, *set->guardians});
+            }
+        } else if (g != nullptr && guarded(statement)) {
+            out.push_back({RuleSource::guardians, std::nullopt, g->index, *g->guardians});
+        }
+        return out;
+    }
+    // Every delegation in the chain, nearest first: nobody sheds a rule by
+    // delegating further. A chain longer than a grant allows is no state's.
+    std::size_t links = 0;
+    for (const DelegationState* link =
+             statement.delegation_id ? delegation(*statement.delegation_id) : nullptr;
+         link != nullptr && links < max_delegation_depth;
+         link = link->parent ? delegation(*link->parent) : nullptr, ++links) {
+        if (link->scope.approvals) {
+            out.push_back(
+                {RuleSource::delegation, Id(link->id), std::nullopt, *link->scope.approvals});
+        }
+    }
+    return out;
+}
+
+Status LedgerState::check_approvers(const ApprovalRule& rule, bool people) const {
+    for (const Id& id : rule.approvers) {
+        const ActorState* approver = actor(id);
+        if (approver == nullptr) {
+            return fail(Errc::not_found, "an approver is not an actor of this ledger");
+        }
+        if (approver->is_organization()) {
+            return fail(Errc::rejected, "the organization never approves: it signs");
+        }
+        if (approver->revoked) {
+            return fail(Errc::rejected, "an approver has been revoked");
+        }
+        if (people && approver->kind != ActorKind::person) {
+            return fail(Errc::rejected,
+                        "approvers are people, unless the rule allows approvals without "
+                        "presence (guardians always are)");
+        }
+    }
+    return {};
+}
+
+Result<ApprovalTally> LedgerState::tally_approvals(const crypto::Provider& provider,
+                                                   const SignedStatement& signed_statement,
+                                                   std::span<const SignedApproval> approvals,
+                                                   Timestamp now, const ActorState& signer,
+                                                   bool signer_verified) const {
+    const Statement& statement = signed_statement.statement;
+    ApprovalTally tally;
+    for (AppliedRule& applied : approval_rules(statement)) {
+        const Timestamp within = applied.rule.within;
+        RuleTally rule;
+        rule.applied = std::move(applied);
+        // Written so that no sum wraps, whatever the times.
+        rule.lapses_at = statement.issued_at > std::numeric_limits<Timestamp>::max() - within
+                             ? std::numeric_limits<Timestamp>::max()
+                             : statement.issued_at + within;
+        tally.rules.push_back(std::move(rule));
+    }
+    if (tally.rules.empty()) {
+        if (!approvals.empty()) {
+            return fail(Errc::rejected,
+                        "the statement carries approvals no approval rule asks for");
+        }
+        return tally;
+    }
+    if (approvals.size() > max_approvals) {
+        return fail(Errc::limit_exceeded, "a statement travels with at most 32 approvals");
+    }
+    const auto names = [](const RuleTally& r, const Id& actor) {
+        return std::ranges::contains(r.applied.rule.approvers, actor);
+    };
+    for (std::size_t i = 0; i < approvals.size(); ++i) {
+        const SignedApproval& signed_approval = approvals[i];
+        const Approval& a = signed_approval.approval;
+        if (i > 0 && !std::ranges::lexicographical_compare(
+                         approvals[i - 1].approval.approver.bytes(), a.approver.bytes())) {
+            return fail(Errc::rejected,
+                        "approvals ascend by approver, each approver approving once");
+        }
+        if (a.approver == signer.id) {
+            return fail(Errc::rejected,
+                        "the signer does not approve its own statement: it counts through it");
+        }
+        if (a.ledger != ledger_id_) {
+            return fail(Errc::rejected, "an approval is for another ledger");
+        }
+        if (a.statement != signed_statement.id) {
+            return fail(Errc::rejected, "an approval is for another statement");
+        }
+        if (std::ranges::none_of(tally.rules,
+                                 [&](const RuleTally& r) { return names(r, a.approver); })) {
+            return fail(Errc::rejected,
+                        "an approval is by an actor that no approval rule of the statement names");
+        }
+        const ActorState* approver = actor(a.approver);
+        if (approver == nullptr) {
+            return fail(Errc::not_found, "an approver is not an actor of this ledger");
+        }
+        if (approver->revoked) {
+            return fail(Errc::rejected, "an approver has been revoked");
+        }
+        if (signed_approval.kid != approver->kid) {
+            return fail(Errc::rejected,
+                        "an approval is not signed with its approver's current key");
+        }
+        if (!verify_approval(provider, hash_, signed_approval, approver->key)) {
+            return fail(Errc::verification_failed, "an approval's signature does not verify");
+        }
+        // Approved-at is the approver's claim: bounded, with the skew the
+        // protocol allows, by the statement's issue and its registration.
+        if (a.approved_at < statement.issued_at &&
+            statement.issued_at - a.approved_at > max_clock_skew_ms) {
+            return fail(Errc::rejected,
+                        "an approval claims a time before its statement was issued");
+        }
+        if (a.approved_at > now && a.approved_at - now > max_clock_skew_ms) {
+            return fail(Errc::rejected, "an approval claims to be given in the future");
+        }
+        ApprovalCheck check{a.approver, a.approved_at, std::nullopt};
+        if (a.presence) {
+            if (approver->kind != ActorKind::person) {
+                return fail(Errc::rejected, "only people prove presence");
+            }
+            KANHE_TRY(check.presence, verify_approval_presence(provider, hash_, signed_approval,
+                                                               approver->presence));
+        }
+        // It counts where it is named: in person and user-verified, or at all
+        // where the rule allows approvals without presence. One that counts
+        // nowhere rides in no log.
+        const bool verified = check.presence && check.presence->user_verified;
+        bool counts = false;
+        for (RuleTally& r : tally.rules) {
+            if (names(r, a.approver) && (verified || r.applied.rule.without_presence)) {
+                r.counted.push_back(a.approver);
+                counts = true;
+            }
+        }
+        if (!counts) {
+            return fail(Errc::rejected,
+                        "an approval counts for no approval rule: it needs a user-verified proof "
+                        "of presence (a passkey with PIN or biometric, or a hardware key)");
+        }
+        tally.approvals.push_back(std::move(check));
+    }
+    // The signer counts once where it is named: in person and verified, or
+    // by its signature alone where approvals without presence count.
+    for (RuleTally& r : tally.rules) {
+        if (names(r, signer.id) && (signer_verified || r.applied.rule.without_presence)) {
+            r.signer_counts = true;
+            r.counted.push_back(signer.id);
+            std::ranges::sort(r.counted, [](const Id& x, const Id& y) {
+                return std::ranges::lexicographical_compare(x.bytes(), y.bytes());
+            });
+        }
+    }
+    return tally;
+}
+
+Result<ApprovalTally> LedgerState::check_approvals(const crypto::Provider& provider,
+                                                   const SignedStatement& signed_statement,
+                                                   std::span<const SignedApproval> approvals,
+                                                   Timestamp now) const {
+    const Statement& statement = signed_statement.statement;
+    const ActorState* signer = statement.actor_id ? actor(*statement.actor_id) : nullptr;
+    if (signer == nullptr) {
+        return fail(Errc::not_found, "the signing actor is not registered");
+    }
+    // In the log entry's order, as the ledger keeps them.
+    std::vector<SignedApproval> sorted(approvals.begin(), approvals.end());
+    std::ranges::sort(sorted, [](const SignedApproval& a, const SignedApproval& b) {
+        return std::ranges::lexicographical_compare(a.approval.approver.bytes(),
+                                                    b.approval.approver.bytes());
+    });
+    bool signer_verified = false;
+    if (statement.presence && signer->kind == ActorKind::person) {
+        auto check =
+            verify_presence(provider, hash_, statement, signed_statement.kid, signer->presence);
+        signer_verified = check && check->user_verified;
+    }
+    return tally_approvals(provider, signed_statement, sorted, now, *signer, signer_verified);
+}
+
 Status LedgerState::check_rules(const crypto::Provider& provider, const Statement& statement,
                                 const ActorState& signer, Timestamp now) const {
     auto active_record = [this](const Id& id) -> Result<const RecordState*> {
@@ -728,6 +1009,14 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                     return fail(Errc::rejected,
                                 "only the organization rotates its root key, with that key");
                 }
+                // An approver's key (v0.20): only the approver or the
+                // organization, so nobody else approves in its name.
+                if (b.actor != signer.id && !signer.is_organization() &&
+                    protected_approver(b.actor)) {
+                    return fail(Errc::rejected,
+                                "an approver's key is changed only by the approver or the "
+                                "organization");
+                }
                 // A presence key is a second factor: it never becomes the
                 // signing key.
                 const bool presence_key =
@@ -747,6 +1036,27 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                 if ((*target)->is_organization()) {
                     return fail(Errc::rejected, "the organization actor cannot be revoked");
                 }
+                // A guardian (v0.20): only by the organization, and never so
+                // that fewer remain than must approve.
+                if (const GuardianSetting* g = guardians();
+                    g != nullptr && std::ranges::contains(g->guardians->approvers, b.actor)) {
+                    if (!signer.is_organization()) {
+                        return fail(Errc::rejected, "only the organization revokes a guardian");
+                    }
+                    // Revoked guardians stay named: they count as gone.
+                    std::uint64_t remaining = 0;
+                    for (const Id& guardian : g->guardians->approvers) {
+                        const ActorState* a = actor(guardian);
+                        if (guardian != b.actor && a != nullptr && !a->revoked) {
+                            ++remaining;
+                        }
+                    }
+                    if (remaining < g->guardians->needed) {
+                        return fail(Errc::rejected,
+                                    "revoking this guardian would leave fewer guardians than "
+                                    "must approve: set new guardians first");
+                    }
+                }
                 return {};
             },
             [&](const DelegationGrantBody& b) -> Status {
@@ -756,6 +1066,12 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                 }
                 if ((*grantee)->is_organization()) {
                     return fail(Errc::rejected, "the organization needs no delegation");
+                }
+                // An approval rule (v0.20) names actors of this ledger, people
+                // unless approvals without presence are allowed.
+                if (b.scope.approvals) {
+                    KANHE_CHECK(
+                        check_approvers(*b.scope.approvals, !b.scope.approvals->without_presence));
                 }
                 if (signer.is_organization()) {
                     return {};
@@ -792,6 +1108,14 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                 if ((*target)->kind != ActorKind::person) {
                     return fail(Errc::rejected, "only people have presence credentials");
                 }
+                // An approver's credentials (v0.20): only the approver or the
+                // organization, so nobody else proves presence in its name.
+                if (b.actor != signer.id && !signer.is_organization() &&
+                    protected_approver(b.actor)) {
+                    return fail(Errc::rejected,
+                                "an approver's presence credentials are changed only by the "
+                                "approver or the organization");
+                }
                 for (const PresenceCredential& c : b.credentials) {
                     if (crypto::is_weak_public_key(c.key.algorithm, c.key.bytes)) {
                         return fail(Errc::rejected, "a presence key is weak");
@@ -827,6 +1151,21 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                 }
                 if (actors_by_kid_.contains(key_of(*kid))) {
                     return fail(Errc::rejected, "the key belongs to an actor");
+                }
+                return {};
+            },
+            [&](const LedgerSetGuardiansBody& b) -> Status {
+                // Spec v0.20: the organization's own act, naming people of
+                // this ledger; removing guardians needs some to remove.
+                if (!signer.is_organization()) {
+                    return fail(Errc::rejected,
+                                "only the organization sets its guardians, with its root key");
+                }
+                if (b.guardians) {
+                    return check_approvers(*b.guardians, true);
+                }
+                if (guardians() == nullptr) {
+                    return fail(Errc::rejected, "there are no guardians to remove");
                 }
                 return {};
             },
@@ -1161,6 +1500,12 @@ Status LedgerState::apply(const crypto::Provider& provider, const SignedStatemen
                 delegation.granted_at_index = index;
                 delegations_.insert_or_assign(key_of(id), std::move(delegation));
                 changes_.push_back(key_of(id));
+                // Its approvers' keys are protected while it stands (v0.20).
+                if (b.scope.approvals) {
+                    for (const Id& approver : b.scope.approvals->approvers) {
+                        ++named_approvers_[key_of(approver)];
+                    }
+                }
                 return {};
             },
             [&](const DelegationRevokeBody& b) -> Status {
@@ -1168,6 +1513,14 @@ Status LedgerState::apply(const crypto::Provider& provider, const SignedStatemen
                 delegation.revoked = true;
                 delegation.revoked_at_index = index;
                 changes_.push_back(key_of(b.delegation));
+                if (delegation.scope.approvals) {
+                    for (const Id& approver : delegation.scope.approvals->approvers) {
+                        const auto named = named_approvers_.find(key_of(approver));
+                        if (named != named_approvers_.end() && --named->second == 0) {
+                            named_approvers_.erase(named);
+                        }
+                    }
+                }
                 return {};
             },
             [&](const ActorSetPresenceBody& b) -> Status {
@@ -1182,6 +1535,14 @@ Status LedgerState::apply(const crypto::Provider& provider, const SignedStatemen
                 // In the organization's history, so a complete bundle shows
                 // every rotation.
                 actors_.at(key_of(ledger_id_)).rotations.push_back(index);
+                changes_.push_back(key_of(ledger_id_));
+                return {};
+            },
+            [&](const LedgerSetGuardiansBody& b) -> Status {
+                // In the organization's history (v0.20), so a complete bundle
+                // shows every guardian setting.
+                guardians_.push_back(GuardianSetting{index, b.guardians, b.guarded});
+                actors_.at(key_of(ledger_id_)).guardian_updates.push_back(index);
                 changes_.push_back(key_of(ledger_id_));
                 return {};
             },

@@ -516,6 +516,210 @@ Json claim_json(const protocol::EvidenceReport::ClaimReport& c) {
                                     : Json(nullptr)}};
 }
 
+/// A window in words: "7 days", "12 hours", "30 minutes", or exactly.
+std::string window_text(protocol::Timestamp ms) {
+    struct Unit {
+        protocol::Timestamp size;
+        const char* name;
+    };
+    for (const Unit u : {Unit{86'400'000, "day"}, Unit{3'600'000, "hour"}, Unit{60'000, "minute"},
+                         Unit{1000, "second"}}) {
+        if (ms % u.size == 0) {
+            const protocol::Timestamp n = ms / u.size;
+            return std::format("{} {}{}", n, u.name, n == 1 ? "" : "s");
+        }
+    }
+    return std::format("{} ms", ms);
+}
+
+/// A rule (v0.20) in words: "2 of 3 named, within 7 days".
+std::string rule_summary(const protocol::ApprovalRule& rule) {
+    return std::format("{} of {} named, within {}{}", rule.needed, rule.approvers.size(),
+                       window_text(rule.within),
+                       rule.without_presence ? ", approvals without presence counting" : "");
+}
+
+std::string rule_source_text(const protocol::ApprovalRuleReport& rule) {
+    switch (rule.source) {
+    case protocol::RuleSource::delegation:
+        return rule.delegation ? "the delegation " + short_id(*rule.delegation)
+                               : std::string("a delegation");
+    case protocol::RuleSource::guardians:
+        return "the guardians";
+    case protocol::RuleSource::new_guardians:
+        return "the new guardians";
+    }
+    return "a rule";
+}
+
+/// How an approver proved presence (v0.20), or that it did not.
+std::string approval_presence_text(const std::optional<protocol::PresenceCheck>& presence) {
+    if (!presence) {
+        return "not in person";
+    }
+    if (presence->method == protocol::PresenceMethod::hardware_key) {
+        return "in person: hardware key";
+    }
+    return presence->user_verified ? "in person: passkey, user verified"
+                                   : "present: passkey, user not verified";
+}
+
+/// The rules that applied to an event (v0.20), in section 5.1's order:
+/// where each comes from, k of its approvers (named), its window, whether
+/// approvals without presence count, whether the signer counted, and how
+/// many counted, the signer among them.
+Json approval_rules_json(const std::vector<protocol::ApprovalRuleReport>& rules) {
+    Json out = Json::array();
+    for (const protocol::ApprovalRuleReport& r : rules) {
+        Json approvers = Json::array();
+        for (const protocol::ActorSummary& a : r.approvers) {
+            approvers.push_back(actor_json(a));
+        }
+        out.push_back({{"source", protocol::name(r.source)},
+                       {"delegation", r.delegation ? Json(hex_id(*r.delegation)) : Json(nullptr)},
+                       {"k", r.rule.needed},
+                       {"approvers", std::move(approvers)},
+                       {"within_ms", r.rule.within},
+                       {"without_presence", r.rule.without_presence},
+                       {"signer_counted", r.signer_counted},
+                       {"count", r.counted.size()}});
+    }
+    return out;
+}
+
+/// Each approval in its log entry's order: its approver, the time it
+/// claims, how presence was proven (null: not in person), and the rules
+/// (positions in `rules`) it counted for.
+Json approvals_json(const std::vector<protocol::ApprovalReport>& approvals,
+                    const std::vector<protocol::ApprovalRuleReport>& rules) {
+    Json out = Json::array();
+    for (const protocol::ApprovalReport& a : approvals) {
+        Json counted_for = Json::array();
+        for (std::size_t i = 0; i < rules.size(); ++i) {
+            if (std::ranges::contains(rules[i].counted, a.approver.id)) {
+                counted_for.push_back(i);
+            }
+        }
+        out.push_back({{"approver", actor_json(a.approver)},
+                       {"approved_at", iso_time(a.approved_at)},
+                       {"presence", presence_json(a.presence)},
+                       {"counted_for", std::move(counted_for)}});
+    }
+    return out;
+}
+
+/// The lines under an event (or a guardian setting) that met approval
+/// rules: each rule, then each approval, as the replay checked them.
+std::string approvals_text(const std::vector<protocol::ApprovalRuleReport>& rules,
+                           const std::vector<protocol::ApprovalReport>& approvals,
+                           std::string_view indent) {
+    std::string out;
+    for (const protocol::ApprovalRuleReport& r : rules) {
+        std::string names;
+        for (const protocol::ActorSummary& a : r.approvers) {
+            names += (names.empty() ? "" : ", ") + a.name;
+        }
+        out += std::format("{}needs {} by {} ({}): {} counted{}\n", indent, rule_summary(r.rule),
+                           rule_source_text(r), names, r.counted.size(),
+                           r.signer_counted ? ", the signer among them" : "");
+    }
+    for (const protocol::ApprovalReport& a : approvals) {
+        out += std::format("{}approved by \"{}\" [{}{}; {}] at {} (as claimed)\n", indent,
+                           a.approver.name, kind_label(a.approver.kind),
+                           a.approver.revoked ? ", since revoked" : "",
+                           approval_presence_text(a.presence), format_time(a.approved_at));
+    }
+    return out;
+}
+
+std::string guarded_text(const std::optional<std::vector<protocol::StatementType>>& guarded) {
+    if (!guarded) {
+        return "every statement the organization signs";
+    }
+    std::string types;
+    for (const protocol::StatementType t : *guarded) {
+        types += (types.empty() ? "" : ", ") + std::string(protocol::name(t));
+    }
+    return "the organization's " + types +
+           ", and always its key rotations, guardian settings, and statements about a guardian";
+}
+
+/// The guardians in effect at the checkpoint, and every guardian setting
+/// the bundle holds (v0.20).
+/// A guardian setting's rule (v0.20): k, the window, the guardians, and
+/// what they guard (null: every statement the organization signs; a list:
+/// the types key 2 lists, those always guarded besides). A removal has
+/// none of them.
+Json guardian_rule_json(const protocol::GuardianReport& g) {
+    if (!g.rule) {
+        return {{"k", nullptr},
+                {"within_ms", nullptr},
+                {"guardians", Json::array()},
+                {"guards", nullptr}};
+    }
+    Json guardians = Json::array();
+    for (const protocol::ActorSummary& a : g.guardians) {
+        guardians.push_back(actor_json(a));
+    }
+    Json guards = Json(nullptr);
+    if (g.guarded) {
+        guards = Json::array();
+        for (const protocol::StatementType t : *g.guarded) {
+            guards.push_back(protocol::name(t));
+        }
+    }
+    return {{"k", g.rule->needed},
+            {"within_ms", g.rule->within},
+            {"guardians", std::move(guardians)},
+            {"guards", std::move(guards)}};
+}
+
+/// The guardians in effect at the checkpoint, or null, and every guardian
+/// setting the bundle holds, in log order (v0.20).
+Json guardians_json(const protocol::EvidenceReport& r) {
+    Json settings = Json::array();
+    for (const protocol::GuardianReport& g : r.guardian_settings) {
+        Json setting = guardian_rule_json(g);
+        setting["index"] = g.index;
+        setting["registered_at"] = iso_time(g.registered_at);
+        setting["removed"] = !g.rule.has_value();
+        setting["rules"] = approval_rules_json(g.approval_rules);
+        setting["approvals"] = approvals_json(g.approvals, g.approval_rules);
+        settings.push_back(std::move(setting));
+    }
+    Json in_effect = Json(nullptr);
+    if (r.guardians && *r.guardians < r.guardian_settings.size()) {
+        const protocol::GuardianReport& g = r.guardian_settings[*r.guardians];
+        in_effect = guardian_rule_json(g);
+        in_effect["since"] = iso_time(g.registered_at);
+        in_effect["index"] = g.index;
+    }
+    return {{"in_effect", std::move(in_effect)}, {"settings", std::move(settings)}};
+}
+
+std::string guardians_text(const protocol::EvidenceReport& r) {
+    std::string out;
+    if (r.guardians && *r.guardians < r.guardian_settings.size()) {
+        const protocol::GuardianReport& g = r.guardian_settings[*r.guardians];
+        std::string names;
+        for (const protocol::ActorSummary& a : g.guardians) {
+            names += (names.empty() ? "" : ", ") + a.name + (a.revoked ? " (since revoked)" : "");
+        }
+        out += std::format("  Guardians    {} of {} must approve ({}), within {}; they guard {}; "
+                           "since {}\n",
+                           g.rule->needed, g.guardians.size(), names, window_text(g.rule->within),
+                           guarded_text(g.guarded), format_time(g.registered_at));
+    } else if (!r.guardian_settings.empty()) {
+        out += "  Guardians    none in effect\n";
+    }
+    for (const protocol::GuardianReport& g : r.guardian_settings) {
+        out += std::format("               #{} {}: {}\n", g.index, format_time(g.registered_at),
+                           g.rule ? "set " + rule_summary(*g.rule) : std::string("removed them"));
+        out += approvals_text(g.approval_rules, g.approvals, "                 ");
+    }
+    return out;
+}
+
 } // namespace
 
 std::string_view source_status_key(protocol::SourceStatus status) {
@@ -542,7 +746,9 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
              {"presence", presence_json(e.presence)},
              {"detail", e.detail},
              {"new_version", e.new_version ? Json(hex_id(*e.new_version)) : Json(nullptr)},
-             {"existed_by", e.existed_by ? Json(iso_time(*e.existed_by)) : Json(nullptr)}});
+             {"existed_by", e.existed_by ? Json(iso_time(*e.existed_by)) : Json(nullptr)},
+             {"rules", approval_rules_json(e.approval_rules)},
+             {"approvals", approvals_json(e.approvals, e.approval_rules)}});
     }
     Json fields = Json::object();
     for (const protocol::RecordField& f : r.disclosed_fields) {
@@ -570,6 +776,7 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
           {"root_key_rotations", r.root_key_rotations}}},
         {"witnesses", witnesses_json(r)},
         {"timestamps", timestamps_json(r)},
+        {"guardians", guardians_json(r)},
         {"memberships", memberships_json(r)},
         {"scripts", scripts_json(r)},
         {"sources", sources_json(r)},
@@ -617,6 +824,7 @@ std::string report_text(const protocol::EvidenceReport& r, bool ledger_checked) 
     }
     out += witnesses_text(r);
     out += timestamps_text(r);
+    out += guardians_text(r);
     out += memberships_text(r);
     line(std::format("  Record       {} (id {})", r.record_type, short_id(r.record)));
     line(std::format("  State        {}{}", r.state, r.revoked ? " - REVOKED" : ""));
@@ -676,6 +884,7 @@ std::string report_text(const protocol::EvidenceReport& r, bool ledger_checked) 
             }
             line("           authorized by " + chain);
         }
+        out += approvals_text(event.approval_rules, event.approvals, "           ");
     }
     if (!r.disclosed_fields.empty()) {
         line("\n  Disclosed fields (each proven against the record's commitment)");
@@ -968,20 +1177,23 @@ Json consent_json(const protocol::ContractConsentCheck& c) {
             authority.push_back(link.name);
         }
     }
-    return {{"ledger_id", hex_id(c.ref.ledger)},
-            {"organization", c.report.organization},
-            {"hash", crypto::name(c.report.hash)},
-            {"record", hex_id(c.ref.record)},
-            {"signer", given != nullptr ? actor_json(given->actor) : Json(nullptr)},
-            {"authority", std::move(authority)},
-            {"presence", given != nullptr ? Json(presence_text(*given)) : Json(nullptr)},
-            {"provenance", given != nullptr && given->provenance
-                               ? provenance_json(*given->provenance)
-                               : Json(nullptr)},
-            {"given_at", given != nullptr ? Json(iso_time(given->registered_at)) : Json(nullptr)},
-            {"until", iso_time(c.consent.until)},
-            {"reference", optional_text(c.consent.reference)},
-            {"witnesses", witnesses_json(c.report)}};
+    return {
+        {"ledger_id", hex_id(c.ref.ledger)},
+        {"organization", c.report.organization},
+        {"hash", crypto::name(c.report.hash)},
+        {"record", hex_id(c.ref.record)},
+        {"signer", given != nullptr ? actor_json(given->actor) : Json(nullptr)},
+        {"authority", std::move(authority)},
+        {"presence", given != nullptr ? Json(presence_text(*given)) : Json(nullptr)},
+        {"provenance", given != nullptr && given->provenance ? provenance_json(*given->provenance)
+                                                             : Json(nullptr)},
+        {"given_at", given != nullptr ? Json(iso_time(given->registered_at)) : Json(nullptr)},
+        {"until", iso_time(c.consent.until)},
+        {"reference", optional_text(c.consent.reference)},
+        {"witnesses", witnesses_json(c.report)},
+        {"rules", given != nullptr ? approval_rules_json(given->approval_rules) : Json::array()},
+        {"approvals", given != nullptr ? approvals_json(given->approvals, given->approval_rules)
+                                       : Json::array()}};
 }
 
 } // namespace
@@ -1019,7 +1231,9 @@ Json contract_report_json(const protocol::ContractReport& r, bool ledger_checked
                              ? outcome_json(names, *event.outcome, event.children, event.requests)
                              : Json(nullptr)},
              {"answer", answer_json(event)},
-             {"consents", std::move(consents)}});
+             {"consents", std::move(consents)},
+             {"rules", approval_rules_json(event.approval_rules)},
+             {"approvals", approvals_json(event.approvals, event.approval_rules)}});
     }
     // Requests (v0.8): the instance's own, as of the checkpoint, and which are
     // open, and overdue at the checkpoint's time.
@@ -1135,6 +1349,7 @@ std::string contract_report_text(const protocol::ContractReport& r, bool ledger_
                      e.checkpoint.tree_size, format_time(e.checkpoint.timestamp)));
     out += witnesses_text(e);
     out += timestamps_text(e);
+    out += guardians_text(e);
     out += memberships_text(e);
     auto call_lines = [&](const protocol::ContractStep& step) {
         const protocol::RecordEvent& event = e.events[step.event];
@@ -1152,6 +1367,7 @@ std::string contract_report_text(const protocol::ContractReport& r, bool ledger_
         if (call.reference) {
             line("           reference  " + *call.reference);
         }
+        out += approvals_text(event.approval_rules, event.approvals, "           ");
         if (event.outcome) {
             line("           outcome    " + outcome_text(names, *event.outcome, event.children));
             // Requests it made (v0.8), each with its id.

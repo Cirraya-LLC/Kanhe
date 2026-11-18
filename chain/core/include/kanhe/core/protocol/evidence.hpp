@@ -13,6 +13,7 @@
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/error.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
@@ -246,6 +247,51 @@ struct RequestReport {
     friend bool operator==(const RequestReport&, const RequestReport&) = default;
 };
 
+/// An approval an event carried (spec v0.20), as the replay checked it.
+struct ApprovalReport {
+    ActorSummary approver;
+    /// When the approver approved it, as the approver claims.
+    Timestamp approved_at = 0;
+    /// How the approver proved presence; nullopt: not in person.
+    std::optional<PresenceCheck> presence;
+
+    friend bool operator==(const ApprovalReport&, const ApprovalReport&) = default;
+};
+
+/// An approval rule an event met (spec v0.20): "k of n named, within D".
+struct ApprovalRuleReport {
+    RuleSource source = RuleSource::delegation;
+    /// The delegation whose rule it is (RuleSource::delegation).
+    std::optional<Id> delegation;
+    ApprovalRule rule;
+    /// The actors it names, in its order.
+    std::vector<ActorSummary> approvers;
+    /// Those whose approvals counted for it, ascending, and whether the
+    /// signer counted (it is then among them).
+    std::vector<Id> counted;
+    bool signer_counted = false;
+
+    friend bool operator==(const ApprovalRuleReport&, const ApprovalRuleReport&) = default;
+};
+
+/// A guardian setting (spec v0.20), as the organization's history shows it.
+struct GuardianReport {
+    std::uint64_t index = 0;
+    Timestamp registered_at = 0;
+    /// The guardians and their rule; nullopt: the setting removed them.
+    std::optional<ApprovalRule> rule;
+    std::vector<ActorSummary> guardians;
+    /// The types of the organization's statements they guard; nullopt:
+    /// every statement (some are guarded whatever it lists).
+    std::optional<std::vector<StatementType>> guarded;
+    /// The rules the setting met (the guardians before it, and those it
+    /// names) and the approvals it carried.
+    std::vector<ApprovalRuleReport> approval_rules;
+    std::vector<ApprovalReport> approvals;
+
+    friend bool operator==(const GuardianReport&, const GuardianReport&) = default;
+};
+
 struct RecordEvent {
     std::uint64_t index = 0;
     Timestamp registered_at = 0;
@@ -281,6 +327,10 @@ struct RecordEvent {
     /// covering this event (v0.11), the earliest if several did: its time
     /// plus the accuracy it states.
     std::optional<Timestamp> existed_by;
+    /// The approval rules this event met, and the approvals it carried, in
+    /// its log entry's order (v0.20). Empty when none applied.
+    std::vector<ApprovalRuleReport> approval_rules = {};
+    std::vector<ApprovalReport> approvals = {};
 
     friend bool operator==(const RecordEvent&, const RecordEvent&) = default;
 };
@@ -529,6 +579,12 @@ struct EvidenceReport {
     /// and the sources its registration names, in its order (v0.18).
     std::vector<ScriptReport> scripts;
     std::vector<SourceReport> sources;
+    /// Every guardian setting below the checkpoint, oldest first, and the
+    /// one in effect at the checkpoint if it names guardians, as a position
+    /// among them (v0.20). A complete report shows them all: they are in
+    /// the organization's history.
+    std::vector<GuardianReport> guardian_settings;
+    std::optional<std::size_t> guardians;
     /// If the bundle is about a contract instance.
     std::optional<InstanceReport> instance;
     /// The record's events, or the instance's calls (for a child, its
@@ -558,6 +614,17 @@ struct EvidenceReport {
 [[nodiscard]] std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
                                                std::span<const Statement> events,
                                                std::span<const Id> related);
+/// The same, with the approvers of those events (spec v0.20): every actor
+/// whose approval one of them carries is involved, so that a revocation or
+/// key change before it was used cannot be left out.
+[[nodiscard]] std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
+                                               std::span<const Statement> events,
+                                               std::span<const Id> related,
+                                               std::span<const Id> approvers);
+
+/// The approvers of a log entry's approvals (spec v0.20), in its order;
+/// approvals that do not parse are skipped (replay refuses them).
+[[nodiscard]] std::vector<Id> approvers_of(const LogEntry& entry);
 
 /// Verifies a bundle completely: every receipt against the signed checkpoint,
 /// every included statement replayed under the ledger rules, every disclosed

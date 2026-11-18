@@ -29,6 +29,19 @@ Json optional_text(const std::optional<std::string>& text) {
     return text ? Json(*text) : Json(nullptr);
 }
 
+/// An approval rule (spec v0.20): k of the approvers it names, within its
+/// window, and whether approvals without presence count.
+Json approval_rule_json(const protocol::ApprovalRule& rule) {
+    Json approvers = Json::array();
+    for (const protocol::Id& id : rule.approvers) {
+        approvers.push_back(to_hex(id.bytes()));
+    }
+    return {{"needed", rule.needed},
+            {"approvers", std::move(approvers)},
+            {"within_ms", rule.within},
+            {"without_presence", rule.without_presence}};
+}
+
 } // namespace
 
 Json presence_credential_json(const protocol::PresenceCredential& c) {
@@ -114,6 +127,8 @@ Json scope_json(const protocol::Scope& scope) {
     // Keys 8 and 9 (v0.8): null for any.
     out["functions"] = scope.functions ? Json(*scope.functions) : Json(nullptr);
     out["request_kinds"] = scope.request_kinds ? Json(*scope.request_kinds) : Json(nullptr);
+    // Key 10 (v0.20): null when none.
+    out["approvals"] = scope.approvals ? approval_rule_json(*scope.approvals) : Json(nullptr);
     return out;
 }
 
@@ -160,6 +175,10 @@ std::string scope_text(const protocol::Scope& scope) {
     }
     if (scope.require_presence) {
         out += " (presence required)";
+    }
+    if (scope.approvals) {
+        out += " (needs " + std::to_string(scope.approvals->needed) + " of " +
+               std::to_string(scope.approvals->approvers.size()) + " approvals)";
     }
     return out;
 }
@@ -344,6 +363,18 @@ Json body_json(const protocol::Body& body) {
             [](const protocol::LedgerRotateLogKeyBody& b) -> Json {
                 return {{"log_key", public_key_json(b.key)}};
             },
+            [](const protocol::LedgerSetGuardiansBody& b) -> Json {
+                Json guarded = Json(nullptr);
+                if (b.guarded) {
+                    guarded = Json::array();
+                    for (const protocol::StatementType type : *b.guarded) {
+                        guarded.push_back(protocol::name(type));
+                    }
+                }
+                return {
+                    {"guardians", b.guardians ? approval_rule_json(*b.guardians) : Json(nullptr)},
+                    {"guarded", std::move(guarded)}};
+            },
             [](const protocol::RecordRegisterBody& b) -> Json {
                 Json attachments = Json::array();
                 for (const protocol::Attachment& a : b.attachments) {
@@ -507,6 +538,12 @@ std::string body_summary(const Session& session, const protocol::Body& body,
             [&](const protocol::LedgerRotateLogKeyBody& b) {
                 return "rotate the log key to a new " + std::string(crypto::name(b.key.algorithm)) +
                        " key";
+            },
+            [&](const protocol::LedgerSetGuardiansBody& b) {
+                return b.guardians
+                           ? "set guardians: " + std::to_string(b.guardians->needed) + " of " +
+                                 std::to_string(b.guardians->approvers.size()) + " must approve"
+                           : std::string("remove the guardians");
             },
             [&](const protocol::RecordRegisterBody& b) {
                 return "issue " + b.record_type + id +

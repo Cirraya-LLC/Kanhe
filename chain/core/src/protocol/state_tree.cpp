@@ -76,6 +76,8 @@ StateLeaf actor_leaf(const ActorState& a) {
     StateLeaf leaf{ObjectKind::actor, a.id, {a.registered_at_index}};
     leaf.history.insert(leaf.history.end(), a.rotations.begin(), a.rotations.end());
     leaf.history.insert(leaf.history.end(), a.presence_updates.begin(), a.presence_updates.end());
+    // The organization's guardian settings (v0.20).
+    leaf.history.insert(leaf.history.end(), a.guardian_updates.begin(), a.guardian_updates.end());
     add_index(leaf.history, a.revoked_at_index);
     std::ranges::sort(leaf.history);
     return leaf;

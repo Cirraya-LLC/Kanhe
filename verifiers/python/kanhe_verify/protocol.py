@@ -15,7 +15,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import cbor, cose, crypto, network
-from .errors import VerifyError
+from .errors import ApprovalError, VerifyError
 
 # Statement types (section 4). 20 is reserved and unknown, like every type
 # not listed here.
@@ -27,6 +27,7 @@ DELEGATION_GRANT = 5
 DELEGATION_REVOKE = 6
 ACTOR_SET_PRESENCE = 7
 LEDGER_ROTATE_LOG_KEY = 8
+LEDGER_SET_GUARDIANS = 9  # v0.20
 RECORD_REGISTER = 16
 RECORD_ENDORSE = 17
 RECORD_TRANSITION = 18
@@ -44,6 +45,7 @@ STATEMENT_TYPE_NAMES = {
     DELEGATION_REVOKE: "delegation-revoke",
     ACTOR_SET_PRESENCE: "actor-set-presence",
     LEDGER_ROTATE_LOG_KEY: "ledger-rotate-log-key",
+    LEDGER_SET_GUARDIANS: "ledger-set-guardians",
     RECORD_REGISTER: "record-register",
     RECORD_ENDORSE: "record-endorse",
     RECORD_TRANSITION: "record-transition",
@@ -153,6 +155,82 @@ class Scope:
     contracts: list | None = None
     functions: list | None = None
     request_kinds: list | None = None
+    approval_rule: "ApprovalRule | None" = None  # key 10 (v0.20)
+
+
+# Approval rules (v0.20, section 5.1): k, 1 to 16 approvers, a window.
+MAX_RULE_K = 16
+MAX_RULE_APPROVERS = 16
+MIN_WITHIN_MS = 60_000
+MAX_WITHIN_MS = 2_592_000_000
+
+
+@dataclass(frozen=True)
+class ApprovalRule:
+    k: int
+    approvers: tuple  # actor ids, strictly ascending
+    within: int  # ms
+    without_presence: bool  # key 4: approvals without presence count too
+
+
+def _rule_fail(why: str, message: str):
+    raise ApprovalError(why, message)
+
+
+def parse_approval_rule(value, what: str = "an approval rule") -> ApprovalRule:
+    """approval-rule (v0.20): {1: k, 2: approvers, 3: within, ? 4: true}."""
+    if not isinstance(value, dict):
+        _rule_fail("not a map", f"{what} is not a map")
+    if not all(_is_int(k) for k in value) or set(value) - {1, 2, 3, 4}:
+        _rule_fail("unknown key", f"{what} has an unknown key")
+    if not {1, 2, 3} <= set(value):
+        _rule_fail("missing key", f"{what} lacks one of its keys 1, 2, and 3")
+    k, approvers, within = value[1], value[2], value[3]
+    if not (_is_int(k) and 1 <= k <= MAX_RULE_K):
+        _rule_fail("k", f"{what} needs a number of approvals out of 1 to 16")
+    if not (isinstance(approvers, list) and 1 <= len(approvers) <= MAX_RULE_APPROVERS):
+        _rule_fail("approvers", f"{what}'s approvers are not a list of 1 to 16")
+    if not all(_is_id(a) for a in approvers):
+        _rule_fail("approver", f"{what} names an approver that is not a 32-byte id")
+    if not _strictly_ascending(approvers):
+        _rule_fail("order", f"{what}'s approvers are not strictly ascending")
+    if len(approvers) < k:
+        _rule_fail("fewer than k", f"{what} names fewer approvers than it needs")
+    if not (_is_int(within) and MIN_WITHIN_MS <= within <= MAX_WITHIN_MS):
+        _rule_fail("within", f"{what}'s window is not 1 minute to 30 days")
+    if 4 in value and value[4] is not True:
+        _rule_fail("without presence", f"{what}'s key 4 is encoded only when true")
+    return ApprovalRule(k=k, approvers=tuple(approvers), within=within, without_presence=4 in value)
+
+
+@dataclass(frozen=True)
+class GuardiansBody:
+    """ledger-set-guardians-body (v0.20, section 5.2)."""
+    rule: ApprovalRule | None  # None removes the guardians
+    types: tuple | None  # the types they guard; None: every statement
+
+
+def parse_guardians_body(value) -> GuardiansBody:
+    """The body's shape (the CDDL). Its rules (no key 4, never genesis, key
+    2 only with a rule) are the ledger's: rules.py checks them."""
+    if not isinstance(value, dict):
+        _rule_fail("not a map", "a guardian setting is not a map")
+    if not all(_is_int(k) for k in value) or set(value) - {1, 2}:
+        _rule_fail("unknown key", "a guardian setting has an unknown key")
+    if 1 not in value:
+        _rule_fail("missing key", "a guardian setting lacks its key 1")
+    rule = None if value[1] is None else parse_approval_rule(value[1], "the guardians' rule")
+    types = None
+    if 2 in value:
+        listed = value[2]
+        if not (isinstance(listed, list) and listed):
+            _rule_fail("types", "a guardian setting's types are not a non-empty list")
+        if not all(_is_int(t) and t in STATEMENT_TYPE_NAMES for t in listed):
+            _rule_fail("type", "a guardian setting names an unknown statement type")
+        if not _strictly_ascending(listed):
+            _rule_fail("type order", "a guardian setting's types are not strictly ascending")
+        types = tuple(listed)
+    return GuardiansBody(rule=rule, types=types)
 
 
 @dataclass
@@ -206,7 +284,7 @@ class Statement:
 
 
 def parse_scope(value) -> Scope:
-    m = _map(value, "a scope", {1}, {2, 3, 4, 5, 6, 7, 8, 9})
+    m = _map(value, "a scope", {1}, {2, 3, 4, 5, 6, 7, 8, 9, 10})
     types = m[1]
     _check(isinstance(types, list) and types, "a scope's statement types are not a non-empty list")
     for t in types:
@@ -249,6 +327,8 @@ def parse_scope(value) -> Scope:
                and _strictly_ascending(kinds, lambda k: k.encode()),
                "a scope's request kinds are not strictly ascending request kinds")
         scope.request_kinds = list(kinds)
+    if 10 in m:
+        scope.approval_rule = parse_approval_rule(m[10], "a scope's approval rule")
     return scope
 
 
@@ -365,6 +445,8 @@ def _parse_body(kind: int, body) -> dict:
     if kind == LEDGER_ROTATE_LOG_KEY:
         m = _map(body, "a log key rotation", {1})
         return {"key": crypto.parse_public_key(m[1], "the new log key")}
+    if kind == LEDGER_SET_GUARDIANS:
+        return {"guardians": parse_guardians_body(body)}
     if kind == RECORD_REGISTER:
         m = _map(body, "a record registration", {1, 2, 3}, {4, 5, 6, 7})
         attachments = []
@@ -505,6 +587,10 @@ def parse_statement(signed: bytes) -> Statement:
 # The log (section 8) and state commitments (section 9)
 # ---------------------------------------------------------------------------
 
+# A log entry carries at most this many approvals (key 5, v0.20).
+MAX_APPROVALS = 32
+
+
 @dataclass
 class LogEntry:
     encoded: bytes
@@ -512,15 +598,25 @@ class LogEntry:
     registered_at: int
     statement: bytes | None
     commitment: bytes | None
+    approvals: list | None = None  # v0.20: the encoded approvals (key 5), as the entry lists them
 
 
 def parse_log_entry(encoded: bytes) -> LogEntry:
-    m = _map(cbor.decode(encoded), "a log entry", {1, 2}, {3, 4})
+    m = _map(cbor.decode(encoded), "a log entry", {1, 2}, {3, 4, 5})
     _check((3 in m) != (4 in m), "a log entry must hold exactly one of a statement and a state commitment")
+    approvals = None
+    if 5 in m:
+        # v0.20: 1 to 32 approvals, only beside a statement (section 8).
+        _check(3 in m, "a state commitment's log entry carries no approvals")
+        approvals = m[5]
+        _check(isinstance(approvals, list) and 1 <= len(approvals) <= MAX_APPROVALS
+               and all(isinstance(a, bytes) for a in approvals),
+               "a log entry's approvals are not 1 to 32 byte strings")
     return LogEntry(encoded=encoded, id=_id(m[1], "a log entry's id"),
                     registered_at=_uint(m[2], "a registration time"),
                     statement=_bstr(m[3], "a signed statement") if 3 in m else None,
-                    commitment=_bstr(m[4], "a signed state commitment") if 4 in m else None)
+                    commitment=_bstr(m[4], "a signed state commitment") if 4 in m else None,
+                    approvals=list(approvals) if approvals is not None else None)
 
 
 @dataclass

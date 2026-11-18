@@ -23,11 +23,16 @@ STATEMENT_TYPE = "application/kanhe-statement+cbor"
 CHECKPOINT_TYPE = "application/kanhe-checkpoint+cbor"
 COSIGNATURE_TYPE = "application/kanhe-cosignature+cbor"
 STATE_TYPE = "application/kanhe-state+cbor"
+APPROVAL_TYPE = "application/kanhe-approval+cbor"  # v0.20, section 5.1
 
 # RFC 9942 header parameters.
 VDS_LABEL = 395
 PROOFS_LABEL = 396
 INCLUSION_PROOFS = -1
+
+
+class ContentTypeError(VerifyError):
+    """A COSE_Sign1 of another content type than the one expected."""
 
 
 @dataclass
@@ -86,7 +91,7 @@ def parse_sign1(data: bytes, content_type: str, what: str) -> Sign1:
     if not _int(alg):
         raise VerifyError(f"{what}'s alg is not an integer")
     if ct != content_type:
-        raise VerifyError(f"{what} has content type {ct!r}, not {content_type!r}")
+        raise ContentTypeError(f"{what} has content type {ct!r}, not {content_type!r}")
     if not (isinstance(kid, bytes) and len(kid) == 32):
         raise VerifyError(f"{what}'s kid is not 32 bytes")
     if unprotected != {}:

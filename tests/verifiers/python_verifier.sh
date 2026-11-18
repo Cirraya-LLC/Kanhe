@@ -7,8 +7,9 @@
 # verify`: both read the same evidence, made here with the command line, and
 # must reach the same verdict and report the same facts (the record or the
 # instance, its events or calls with their outcomes, consents, requests and
-# answers, who acted under whose authority, presence, provenance, witnesses,
-# open witness networks' cosignatures, time-stamps, completeness). Damaged
+# answers, who acted under whose authority, presence, provenance, approvals
+# and guardians, witnesses, open witness networks' cosignatures, time-stamps,
+# completeness). Damaged
 # evidence must fail in both. Evidence
 # packed from the independent test vectors (testvectors/), and the contract
 # evidence the examples leave behind, must verify in both. Ledgers forged at
@@ -509,7 +510,8 @@ else
 fi
 
 # --- Bundles packed from the independent test vectors ------------------------
-echo "Bundles packed from testvectors/ (passkeys, hardware keys, rotations, versions, mechanism types)"
+echo "Bundles packed from testvectors/ (passkeys, hardware keys, rotations, versions, mechanism types, approvals"
+echo "and guardians: protocol-v0.20.json's logs)"
 "$PYTHON" "$VERIFIER/tests/vector_bundles.py" vectors > /dev/null
 while read -r file ledger; do
     compare "vectors: $file" "vectors/$file" verified --ledger-id "$ledger"

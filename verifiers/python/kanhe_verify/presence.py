@@ -8,6 +8,10 @@ CDDL).
 where kid is the statement's COSE kid and P the payload encoded without key
 8. A passkey (WebAuthn) proof is an assertion over the challenge; a hardware
 key's proof is its signature over the challenge itself.
+
+An approval (v0.20) is proven the same way over its own challenge,
+HASH("Kanhe approval v1" || kid || A), A the approval payload without key 5
+(approvals.challenge): verify_proof takes any challenge.
 """
 
 from __future__ import annotations
@@ -57,12 +61,12 @@ def origin_belongs(origin: str, rp_id: str) -> bool:
     return host == rp or host.endswith("." + rp)
 
 
-def _check_client_data(client_data: bytes, expected_challenge: bytes, rp_id: str) -> str:
+def _check_client_data(client_data: bytes, expected_challenge: bytes, rp_id: str, what: str = "statement") -> str:
     """The limited verification algorithm of WebAuthn Level 3, with the byte
     layout the CDDL fixes. Returns the origin."""
     prefix = b'{"type":"webauthn.get","challenge":"' + b64url(expected_challenge).encode() + b'","origin":"'
     if not client_data.startswith(prefix):
-        raise VerifyError("a passkey assertion is not over this statement's challenge")
+        raise VerifyError(f"a passkey assertion is not over this {what}'s challenge")
     rest = client_data[len(prefix):]
     end = rest.find(b'"')
     if end < 0:
@@ -84,11 +88,17 @@ def _check_client_data(client_data: bytes, expected_challenge: bytes, rp_id: str
 def verify(h, statement: protocol.Statement, credentials: list) -> PresenceResult:
     """Checks the statement's proof against the signer's credentials (those
     registered when it is registered)."""
-    proof = statement.presence
+    return verify_proof(statement.presence, credentials, challenge(h, statement))
+
+
+def verify_proof(proof: protocol.PresenceProof, credentials: list, expected: bytes,
+                 what: str = "statement") -> PresenceResult:
+    """Checks a proof of presence over the challenge `expected` against a
+    person's credentials (section 7): a statement's, or an approval's
+    (v0.20)."""
     credential = next((c for c in credentials if c.id == proof.credential_id), None)
     if credential is None:
         raise VerifyError("the proof of presence names a credential the person does not have")
-    expected = challenge(h, statement)
     if credential.hardware:
         if proof.authenticator_data is not None:
             raise VerifyError("a hardware key's proof carries WebAuthn data")
@@ -105,7 +115,7 @@ def verify(h, statement: protocol.Statement, credentials: list) -> PresenceResul
     flags = auth[32]
     if not flags & FLAG_USER_PRESENT:
         raise VerifyError("a passkey assertion lacks the user-present flag")
-    origin = _check_client_data(proof.client_data, expected, credential.rp_id)
+    origin = _check_client_data(proof.client_data, expected, credential.rp_id, what)
     signed = auth + crypto.sha256(proof.client_data)
     if credential.key.alg == crypto.ESP256:
         ok = (not crypto.is_weak(credential.key)

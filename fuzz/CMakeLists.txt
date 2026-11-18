@@ -28,6 +28,9 @@ kanhe_add_fuzzer(claim_fuzz)
 kanhe_add_fuzzer(membership_fuzz)
 # Scripts' metadata (spec v0.18), inside the evidence of what they made.
 kanhe_add_fuzzer(script_fuzz)
+# Approvals (spec v0.20): rules, guardian settings, signed approvals and
+# their proofs of presence, and the lists submissions and log entries carry.
+kanhe_add_fuzzer(approval_fuzz kanhe::crypto_openssl)
 # Credentials (spec/credentials.md): a JWS, its JSON, the addresses it names,
 # base URLs, roles; and a status list's GZIP, from any issuer.
 kanhe_add_fuzzer(credential_fuzz kanhe::verifier)

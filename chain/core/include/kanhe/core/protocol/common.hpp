@@ -19,7 +19,7 @@ namespace kanhe::protocol {
 
 inline constexpr std::uint64_t protocol_version = 1;
 /// The specification revision this implementation follows (spec/README.md).
-inline constexpr std::string_view spec_revision = "v0.19";
+inline constexpr std::string_view spec_revision = "v0.20";
 
 /// Identifiers (statement, ledger, actor, key) are digests under the ledger's
 /// hash algorithm. Ledgers use SHA-256 or SM3, so identifiers are 32
@@ -35,6 +35,13 @@ using Nonce = std::array<std::uint8_t, 16>;
 inline constexpr std::string_view statement_content_type = "application/kanhe-statement+cbor";
 inline constexpr std::string_view checkpoint_content_type = "application/kanhe-checkpoint+cbor";
 inline constexpr std::string_view cosignature_content_type = "application/kanhe-cosignature+cbor";
+/// An approval of a statement (spec v0.20), signed by the approver's key.
+inline constexpr std::string_view approval_content_type = "application/kanhe-approval+cbor";
+
+/// At most this many approvals travel beside one statement, in a submission
+/// and in its log entry (spec v0.20), each at most this many bytes encoded.
+inline constexpr std::size_t max_approvals = 32;
+inline constexpr std::size_t max_approval_size = 24'576;
 
 /// True for the hash algorithms a ledger may use: SHA-256 and SM3.
 [[nodiscard]] bool is_ledger_hash(crypto::HashAlg alg) noexcept;

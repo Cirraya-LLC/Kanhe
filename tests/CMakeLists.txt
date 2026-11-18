@@ -45,11 +45,13 @@ add_executable(kanhe_tests
     core/protocol_v015_test.cpp
     core/protocol_v016_test.cpp
     core/protocol_v018_test.cpp
+    core/protocol_v020_test.cpp
     core/exchange_test.cpp
     core/vm_test.cpp
     crypto/openssl_test.cpp
     crypto/timestamp_test.cpp
     ledger/access_test.cpp
+    ledger/approvals_test.cpp
     ledger/contracts_test.cpp
     ledger/backup_test.cpp
     ledger/children_test.cpp

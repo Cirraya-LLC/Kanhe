@@ -5,9 +5,11 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include <kanhe/core/bytes.hpp>
+#include <kanhe/core/cbor.hpp>
 #include <kanhe/core/cose.hpp>
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/error.hpp>
@@ -30,6 +32,11 @@ struct LogEntry {
     Bytes statement = {};
     /// The signed state commitment; empty for a statement.
     Bytes state_commitment = {};
+    /// The approvals the ledger accepted with the statement (key 5, spec
+    /// v0.20): signed approvals, 1 to 32, each at most 24,576 bytes, in the
+    /// order of their approvers (a ledger rule, checked on replay). Only
+    /// with a statement; empty for none.
+    std::vector<Bytes> approvals = {};
 
     [[nodiscard]] bool is_state_commitment() const noexcept { return !state_commitment.empty(); }
 
@@ -38,6 +45,12 @@ struct LogEntry {
 
 [[nodiscard]] Result<Bytes> encode_log_entry(const LogEntry& entry);
 [[nodiscard]] Result<LogEntry> decode_log_entry(ByteView encoded);
+
+/// A list of signed approvals as log entries and submissions carry it
+/// (spec v0.20): an array of 1 to 32 byte strings, each 1 to 24,576 bytes.
+/// Only the shape: what each approval says is the ledger's to check.
+[[nodiscard]] cbor::Value approval_list_value(std::span<const Bytes> approvals);
+[[nodiscard]] Result<std::vector<Bytes>> approval_list_from(const cbor::Value& value);
 
 // ---------------------------------------------------------------------------
 // Checkpoints

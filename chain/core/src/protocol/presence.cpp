@@ -226,10 +226,21 @@ Result<PresenceCheck> verify_presence(const crypto::Provider& provider, crypto::
         return fail(Errc::invalid_argument, "the statement carries no proof of presence");
     }
     const PresenceProof& proof = *statement.presence;
+    if (!std::ranges::contains(credentials, proof.credential_id,
+                               &PresenceCredential::credential_id)) {
+        return fail(Errc::verification_failed, "the passkey is not registered for the signer");
+    }
+    KANHE_TRY(Bytes challenge, presence_challenge(provider, ledger_hash, statement, kid));
+    return verify_presence_proof(provider, challenge, proof, credentials);
+}
+
+Result<PresenceCheck> verify_presence_proof(const crypto::Provider& provider, ByteView challenge,
+                                            const PresenceProof& proof,
+                                            std::span<const PresenceCredential> credentials) {
     const auto credential =
         std::ranges::find(credentials, proof.credential_id, &PresenceCredential::credential_id);
     if (credential == credentials.end()) {
-        return fail(Errc::verification_failed, "the passkey is not registered for the signer");
+        return fail(Errc::verification_failed, "the passkey is not registered for the person");
     }
     if (credential->method == PresenceMethod::hardware_key) {
         // The token signs the challenge itself, after its PIN was entered.
@@ -237,7 +248,6 @@ Result<PresenceCheck> verify_presence(const crypto::Provider& provider, crypto::
             return fail(Errc::verification_failed,
                         "a hardware key's proof carries no WebAuthn data");
         }
-        KANHE_TRY(Bytes challenge, presence_challenge(provider, ledger_hash, statement, kid));
         if (auto s = provider.verify(credential->key, challenge, proof.signature); !s) {
             return fail(Errc::verification_failed, "the hardware key's signature does not verify");
         }
@@ -245,7 +255,6 @@ Result<PresenceCheck> verify_presence(const crypto::Provider& provider, crypto::
         // entered (spec section 7).
         return PresenceCheck{true, {}, {}, credential->label, PresenceMethod::hardware_key};
     }
-    KANHE_TRY(Bytes challenge, presence_challenge(provider, ledger_hash, statement, kid));
     return verify_webauthn(provider, *credential, proof, challenge);
 }
 

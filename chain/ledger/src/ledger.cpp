@@ -423,7 +423,7 @@ struct Ledger::Impl {
     /// Parses, checks, runs ahead, validates, and applies a batch (the
     /// writer's): see Ledger::submit_batch.
     Staged stage(std::span<const ByteView> signed_statements, std::optional<protocol::Timestamp> at,
-                 Offers offers);
+                 Offers offers, Approvals approvals);
     /// When the entry at `index` (not later than this batch's) was
     /// registered: from the log below `durable`, else its batch's time.
     Result<protocol::Timestamp> registration_time(std::uint64_t index, std::uint64_t durable,
@@ -574,6 +574,8 @@ struct Ledger::Impl {
         /// The signature checked ahead, with the key its kid named (a copy:
         /// the state's keys change as statements apply).
         std::optional<protocol::SignatureCheck> signature;
+        /// The statement's approvals (v0.20), in its entry's order.
+        std::vector<protocol::SignedApproval> approvals;
     };
 
     /// Checks signatures in parallel, each with the key its kid names: an
@@ -643,6 +645,17 @@ struct Ledger::Impl {
                     out[i].error = st.error();
                     continue;
                 }
+                for (const Bytes& encoded : entry->approvals) {
+                    auto approval = protocol::parse_approval(encoded);
+                    if (!approval) {
+                        out[i].error = approval.error();
+                        break;
+                    }
+                    out[i].approvals.push_back(std::move(*approval));
+                }
+                if (out[i].error) {
+                    continue;
+                }
                 out[i].entry = std::move(*entry);
             }
         });
@@ -703,13 +716,14 @@ struct Ledger::Impl {
     Status validate_with(const protocol::SignedStatement& statement, protocol::Timestamp now,
                          const protocol::SignatureCheck* checked,
                          std::optional<protocol::ContractRun>& ahead,
-                         protocol::Validation& validation) {
+                         protocol::Validation& validation,
+                         std::span<const protocol::SignedApproval> approvals) {
         if (ahead) {
             validation.offer(std::move(*ahead));
             ahead.reset();
             runs_ahead.fetch_add(1, std::memory_order_relaxed);
         }
-        auto s = state.validate(*provider, statement, now, checked, &validation);
+        auto s = state.validate(*provider, statement, now, checked, &validation, approvals);
         if (validation.took_offer()) {
             runs_taken.fetch_add(1, std::memory_order_relaxed);
         }
@@ -749,7 +763,8 @@ struct Ledger::Impl {
             return fail(Errc::verification_failed, "a log entry has the wrong statement id");
         }
         if (auto s = validate_with(*d.statement, entry.registered_at,
-                                   d.signature ? &*d.signature : nullptr, ahead, validation);
+                                   d.signature ? &*d.signature : nullptr, ahead, validation,
+                                   d.approvals);
             !s) {
             return fail(Errc::verification_failed,
                         "a logged statement does not pass validation on replay");
@@ -1000,6 +1015,9 @@ struct Ledger::Impl {
         }
         if (genesis->id != first->statement_id) {
             return fail(Errc::malformed, "log entry 0 has the wrong statement id");
+        }
+        if (!first->approvals.empty()) {
+            return fail(Errc::malformed, "the genesis entry carries no approvals");
         }
         auto state = protocol::LedgerState::from_genesis(provider, *genesis, first->registered_at);
         if (!state) {
@@ -1521,7 +1539,7 @@ Result<Ledger> Ledger::create_replica(FileSystem& fs, Clock& clock,
         return fail(Errc::verification_failed, "a ledger begins with its genesis statement");
     }
     auto genesis = protocol::parse_statement(provider, first->statement);
-    if (!genesis || genesis->id != first->statement_id ||
+    if (!genesis || genesis->id != first->statement_id || !first->approvals.empty() ||
         !protocol::LedgerState::from_genesis(provider, *genesis, first->registered_at)) {
         return fail(Errc::verification_failed, "the first entry is not a valid genesis");
     }
@@ -1587,23 +1605,40 @@ Result<Registration> Ledger::submit(ByteView signed_statement) {
     return std::move(submit_batch(std::span(&signed_statement, 1)).front());
 }
 
+Result<Registration> Ledger::submit(ByteView signed_statement, std::span<const Bytes> approvals) {
+    Approvals with;
+    with.emplace_back(approvals.begin(), approvals.end());
+    return std::move(
+        submit_batch(std::span(&signed_statement, 1), std::nullopt, {}, std::move(with)).front());
+}
+
 Ledger::Impl::Staged Ledger::Impl::stage(std::span<const ByteView> signed_statements,
-                                         std::optional<protocol::Timestamp> at, Offers offers) {
+                                         std::optional<protocol::Timestamp> at, Offers offers,
+                                         Approvals approvals) {
     const std::size_t n = signed_statements.size();
     Staged out;
     out.results.reserve(n);
     // Parse and check signatures on all cores. (Only this thread changes the
-    // state, so reading it here needs no lock.)
+    // state, so reading it here needs no lock.) Approvals (v0.20) are parsed
+    // and put in their log entry's order: ascending by approver.
+    approvals.resize(n);
     std::vector<std::optional<protocol::SignedStatement>> parsed(n);
+    std::vector<std::vector<protocol::SignedApproval>> sorted(n);
     std::vector<std::optional<Error>> errors(n);
     parallel_for(n, [&](std::size_t begin, std::size_t end) {
         for (std::size_t i = begin; i < end; ++i) {
-            if (auto st =
-                    protocol::parse_statement(*provider, signed_statements[i], state.hash())) {
-                parsed[i] = std::move(*st);
-            } else {
+            auto st = protocol::parse_statement(*provider, signed_statements[i], state.hash());
+            if (!st) {
                 errors[i] = st.error();
+                continue;
             }
+            auto ordered = protocol::sort_approvals(approvals[i]);
+            if (!ordered) {
+                errors[i] = ordered.error();
+                continue;
+            }
+            parsed[i] = std::move(*st);
+            sorted[i] = std::move(*ordered);
         }
     });
     std::vector<const protocol::SignedStatement*> pointers(n, nullptr);
@@ -1658,12 +1693,16 @@ Ledger::Impl::Staged Ledger::Impl::stage(std::span<const ByteView> signed_statem
             continue;
         }
         if (auto s = validate_with(statement, out.now, checks[i] ? &*checks[i] : nullptr, ahead[i],
-                                   validation);
+                                   validation, sorted[i]);
             !s) {
             out.results.emplace_back(std::unexpected(s.error()));
             continue;
         }
-        auto encoded = protocol::encode_log_entry({statement.id, out.now, statement.encoded});
+        protocol::LogEntry logged{statement.id, out.now, statement.encoded};
+        for (protocol::SignedApproval& approval : sorted[i]) {
+            logged.approvals.push_back(std::move(approval.encoded));
+        }
+        auto encoded = protocol::encode_log_entry(logged);
         if (!encoded) {
             out.results.emplace_back(std::unexpected(encoded.error()));
             continue;
@@ -1727,13 +1766,14 @@ Result<protocol::Timestamp> Ledger::Impl::registration_time(std::uint64_t index,
 
 std::vector<Result<Registration>> Ledger::submit_batch(std::span<const ByteView> signed_statements,
                                                        std::optional<protocol::Timestamp> at,
-                                                       Offers offers) {
+                                                       Offers offers, Approvals approvals) {
     impl_->drain();
     if (auto s = impl_->require_usable(); !s) {
         return std::vector<Result<Registration>>(signed_statements.size(),
                                                  std::unexpected(s.error()));
     }
-    Impl::Staged staged = impl_->stage(signed_statements, at, std::move(offers));
+    Impl::Staged staged =
+        impl_->stage(signed_statements, at, std::move(offers), std::move(approvals));
     if (staged.entries.empty()) {
         return std::move(staged.results);
     }
@@ -1763,13 +1803,15 @@ std::vector<Result<Registration>> Ledger::submit_batch(std::span<const ByteView>
 }
 
 void Ledger::submit_batch_pipelined(std::span<const ByteView> signed_statements, Durable durable,
-                                    std::optional<protocol::Timestamp> at, Offers offers) {
+                                    std::optional<protocol::Timestamp> at, Offers offers,
+                                    Approvals approvals) {
     Impl::Commit commit;
     commit.durable = std::move(durable);
     if (auto s = impl_->require_usable(); !s) {
         commit.results.assign(signed_statements.size(), std::unexpected(s.error()));
     } else {
-        Impl::Staged staged = impl_->stage(signed_statements, at, std::move(offers));
+        Impl::Staged staged =
+            impl_->stage(signed_statements, at, std::move(offers), std::move(approvals));
         commit.entries = std::move(staged.entries);
         commit.first = staged.first;
         commit.results = std::move(staged.results);
@@ -2993,6 +3035,21 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
     auto need_delegation = [&](const protocol::Id& id) {
         if (const protocol::DelegationState* d = state.delegation(id)) {
             need(d->granted_at_index);
+            // An approval rule (v0.20): replay checks the actors it names at
+            // the grant, and, while the grant stands, that their keys are
+            // protected: their registrations, and its revocation if any.
+            if (d->scope.approvals) {
+                for (const protocol::Id& approver : d->scope.approvals->approvers) {
+                    if (const protocol::ActorState* a = state.actor(approver);
+                        a != nullptr && !a->is_organization()) {
+                        need(a->registered_at_index);
+                    }
+                }
+                if (d->revoked_at_index &&
+                    *d->revoked_at_index < checkpoint->checkpoint.tree_size) {
+                    need(*d->revoked_at_index);
+                }
+            }
         }
     };
     auto need_contract = [&](const protocol::Id& id) {
@@ -3004,8 +3061,15 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
         need(index);
     }
     // Every rotation of the organization's keys below the checkpoint: the
-    // verifier follows them to the log key that signed it (spec v0.4).
+    // verifier follows them to the log key that signed it (spec v0.4). And
+    // every guardian setting (v0.20): replay checks the organization's
+    // statements against the guardians in effect.
     for (const std::uint64_t index : state.actor(id())->rotations) {
+        if (index < checkpoint->checkpoint.tree_size) {
+            need(index);
+        }
+    }
+    for (const std::uint64_t index : state.actor(id())->guardian_updates) {
         if (index < checkpoint->checkpoint.tree_size) {
             need(index);
         }
@@ -3015,6 +3079,24 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
     // of everything involved, and include all of it.
     std::vector<protocol::StateProof> proofs;
     const bool committed = checkpoint && impl_->checkpoint_commitment;
+    std::set<protocol::IdKey> proven;
+    auto prove_involved = [&](const protocol::Id& id) -> Status {
+        if (!proven.insert(protocol::key_of(id)).second) {
+            return {};
+        }
+        auto proof = prove(*impl_, id);
+        if (!proof) {
+            return fail(Errc::not_found, "no checkpoint covers the record's statements yet");
+        }
+        for (const std::uint64_t index : proof->leaf.history) {
+            need(index);
+        }
+        proofs.push_back(std::move(*proof));
+        return {};
+    };
+    // Involved from v0.20 by what the bundle comes to hold: the actors its
+    // guardian settings name, and the approvers of its entries' approvals.
+    std::vector<protocol::Id> found;
     if (committed) {
         std::vector<protocol::Statement> events;
         for (const std::uint64_t index : history) {
@@ -3064,39 +3146,18 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
         }
         for (const protocol::Id& id :
              protocol::involved_objects(state, record_id, events, related)) {
-            auto proof = prove(*impl_, id);
-            if (!proof) {
-                return fail(Errc::not_found, "no checkpoint covers the record's statements yet");
+            if (auto proved = prove_involved(id); !proved) {
+                return std::unexpected(proved.error());
             }
-            for (const std::uint64_t index : proof->leaf.history) {
-                need(index);
-            }
-            proofs.push_back(std::move(*proof));
+        }
+        // The organization (v0.20): its leaf lists the guardian settings.
+        if (auto proved = prove_involved(id()); !proved) {
+            return std::unexpected(proved.error());
         }
     }
 
-    while (!work.empty()) {
-        const std::uint64_t index = work.back();
-        work.pop_back();
-        auto bytes = impl_->log.read(index);
-        if (!bytes) {
-            return std::unexpected(bytes.error());
-        }
-        auto entry = protocol::decode_log_entry(*bytes);
-        if (!entry) {
-            return std::unexpected(entry.error());
-        }
-        auto parsed = protocol::parse_statement(*impl_->provider, entry->statement, hash());
-        if (!parsed) {
-            return std::unexpected(parsed.error());
-        }
-        const protocol::Statement& statement = parsed->statement;
-        if (statement.actor_id) {
-            need_actor(*statement.actor_id, index);
-        }
-        if (statement.delegation_id) {
-            need_delegation(*statement.delegation_id);
-        }
+    // What a statement's body names, as of the statement.
+    auto visit_body = [&](const protocol::Statement& statement, std::uint64_t index) {
         std::visit(
             [&](const auto& body) {
                 using Body = std::decay_t<decltype(body)>;
@@ -3129,6 +3190,59 @@ Result<protocol::EvidenceBundle> Ledger::export_evidence(LogKeys log_keys,
                 }
             },
             statement.body);
+    };
+
+    // Every entry needed, and what it needs in turn; under a commitment, the
+    // approvers and guardians found bring in their whole histories, and those
+    // may carry approvals again: until nothing new turns up.
+    while (!work.empty()) {
+        while (!work.empty()) {
+            const std::uint64_t index = work.back();
+            work.pop_back();
+            auto bytes = impl_->log.read(index);
+            if (!bytes) {
+                return std::unexpected(bytes.error());
+            }
+            auto entry = protocol::decode_log_entry(*bytes);
+            if (!entry) {
+                return std::unexpected(entry.error());
+            }
+            if (entry->is_state_commitment()) {
+                continue;
+            }
+            auto parsed = protocol::parse_statement(*impl_->provider, entry->statement, hash());
+            if (!parsed) {
+                return std::unexpected(parsed.error());
+            }
+            const protocol::Statement& statement = parsed->statement;
+            if (statement.actor_id) {
+                need_actor(*statement.actor_id, index);
+            }
+            if (statement.delegation_id) {
+                need_delegation(*statement.delegation_id);
+            }
+            // Its approvers (v0.20): registered, with their keys and
+            // credentials as of it, and involved.
+            for (const protocol::Id& approver : protocol::approvers_of(*entry)) {
+                need_actor(approver, index);
+                found.push_back(approver);
+            }
+            if (const auto* set = std::get_if<protocol::LedgerSetGuardiansBody>(&statement.body);
+                set != nullptr && set->guardians) {
+                for (const protocol::Id& guardian : set->guardians->approvers) {
+                    need_actor(guardian, index);
+                    found.push_back(guardian);
+                }
+            }
+            visit_body(statement, index);
+        }
+        if (committed) {
+            for (const protocol::Id& id : std::exchange(found, {})) {
+                if (auto proved = prove_involved(id); !proved) {
+                    return std::unexpected(proved.error());
+                }
+            }
+        }
     }
 
     if (committed) {

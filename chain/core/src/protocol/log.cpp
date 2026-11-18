@@ -64,6 +64,58 @@ Result<SignedCheckpoint> sign_checkpoint_as(const crypto::Signer& signer,
 // Log entries
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// A list's shape (spec v0.20): 1 to 32 approvals, each 1 to 24,576 bytes.
+Status check_approval_list(std::span<const Bytes> approvals) {
+    if (approvals.empty() || approvals.size() > max_approvals) {
+        return fail(Errc::malformed, "a statement travels with 1 to 32 approvals");
+    }
+    for (const Bytes& approval : approvals) {
+        if (approval.empty() || approval.size() > max_approval_size) {
+            return fail(Errc::malformed, "an approval is 1 to 24,576 bytes encoded");
+        }
+    }
+    return {};
+}
+
+} // namespace
+
+cbor::Value approval_list_value(std::span<const Bytes> approvals) {
+    cbor::Array items;
+    for (const Bytes& approval : approvals) {
+        items.push_back(cbor::Value::bytes(approval));
+    }
+    return cbor::Value::array(std::move(items));
+}
+
+Result<std::vector<Bytes>> approval_list_from(const cbor::Value& value) {
+    const cbor::Array* items = value.as_array();
+    if (items == nullptr) {
+        return fail(Errc::malformed, "approvals are an array of signed approvals");
+    }
+    // The limits before anything is copied.
+    if (items->empty()) {
+        return fail(Errc::non_canonical, "an empty list of approvals must be omitted");
+    }
+    if (items->size() > max_approvals) {
+        return fail(Errc::malformed, "a statement travels with 1 to 32 approvals");
+    }
+    std::vector<Bytes> out;
+    out.reserve(items->size());
+    for (const cbor::Value& item : *items) {
+        const Bytes* bytes = item.as_bytes();
+        if (bytes == nullptr) {
+            return fail(Errc::malformed, "approvals are an array of signed approvals");
+        }
+        if (bytes->empty() || bytes->size() > max_approval_size) {
+            return fail(Errc::malformed, "an approval is 1 to 24,576 bytes encoded");
+        }
+        out.push_back(*bytes);
+    }
+    return out;
+}
+
 Result<Bytes> encode_log_entry(const LogEntry& log_entry) {
     if (log_entry.statement.empty() == log_entry.state_commitment.empty()) {
         return fail(Errc::invalid_argument, "a log entry holds a statement or a state commitment");
@@ -71,12 +123,23 @@ Result<Bytes> encode_log_entry(const LogEntry& log_entry) {
     if (log_entry.statement_id.size() != id_size) {
         return fail(Errc::invalid_argument, "log entry ids are 32 bytes");
     }
-    return cbor::encode(cbor::Value::map({
+    cbor::Map map{
         entry(1, cbor::Value::bytes(log_entry.statement_id.bytes())),
         entry(2, cbor::Value::unsigned_integer(log_entry.registered_at)),
         log_entry.is_state_commitment() ? entry(4, cbor::Value::bytes(log_entry.state_commitment))
                                         : entry(3, cbor::Value::bytes(log_entry.statement)),
-    }));
+    };
+    // Key 5 (v0.20): only beside a statement.
+    if (!log_entry.approvals.empty()) {
+        if (log_entry.is_state_commitment()) {
+            return fail(Errc::invalid_argument, "a state commitment carries no approvals");
+        }
+        if (auto s = check_approval_list(log_entry.approvals); !s) {
+            return std::unexpected(Error{Errc::invalid_argument, s.error().detail});
+        }
+        map.push_back(entry(5, approval_list_value(log_entry.approvals)));
+    }
+    return cbor::encode(cbor::Value::map(std::move(map)));
 }
 
 Result<LogEntry> decode_log_entry(ByteView encoded) {
@@ -93,6 +156,13 @@ Result<LogEntry> decode_log_entry(ByteView encoded) {
     }
     log_entry.statement = statement.value_or(Bytes{});
     log_entry.state_commitment = commitment.value_or(Bytes{});
+    // Key 5 (v0.20): the approvals beside a statement, never a commitment.
+    if (const cbor::Value* approvals = reader.get(5)) {
+        if (commitment) {
+            return fail(Errc::malformed, "a state commitment carries no approvals");
+        }
+        KANHE_TRY(log_entry.approvals, approval_list_from(*approvals));
+    }
     KANHE_CHECK(reader.finish());
     return log_entry;
 }

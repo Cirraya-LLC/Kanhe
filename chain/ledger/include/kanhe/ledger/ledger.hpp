@@ -206,6 +206,13 @@ public:
 
     /// Validates and registers a signed statement.
     [[nodiscard]] Result<Registration> submit(ByteView signed_statement);
+    /// The same with the approvals that travel beside it (spec v0.20), in
+    /// any order: each a signed approval (protocol::sign_approval). The
+    /// ledger keeps them in its log entry, ascending by approver. A
+    /// statement already registered is found as it is, whatever approvals
+    /// come with it.
+    [[nodiscard]] Result<Registration> submit(ByteView signed_statement,
+                                              std::span<const Bytes> approvals);
 
     /// Registers many signed statements with one sync (group commit):
     /// signatures are checked on all cores, then each statement is validated
@@ -222,10 +229,15 @@ public:
     /// takes one only if its input is the one built in turn (see
     /// protocol::Validation::offer). The ledger runs the other calls ahead
     /// itself, in parallel.
+    ///
+    /// `approvals` (one slot per statement, or empty) are the approvals
+    /// each travels with (spec v0.20), in any order, as `submit` takes them.
     using Offers = std::vector<std::optional<protocol::ContractRun>>;
+    using Approvals = std::vector<std::vector<Bytes>>;
     [[nodiscard]] std::vector<Result<Registration>>
     submit_batch(std::span<const ByteView> signed_statements,
-                 std::optional<protocol::Timestamp> at = std::nullopt, Offers offers = {});
+                 std::optional<protocol::Timestamp> at = std::nullopt, Offers offers = {},
+                 Approvals approvals = {});
 
     /// What became of a pipelined batch, once its entries are durable (or
     /// writing them failed). Called on the ledger's commit thread, in the
@@ -243,7 +255,7 @@ public:
     /// waits for the batches in flight first.
     void submit_batch_pipelined(std::span<const ByteView> signed_statements, Durable durable,
                                 std::optional<protocol::Timestamp> at = std::nullopt,
-                                Offers offers = {});
+                                Offers offers = {}, Approvals approvals = {});
 
     /// Waits until every pipelined batch is durable or has failed, and its
     /// `durable` has returned.
@@ -423,7 +435,11 @@ public:
     /// since only it holds the record's private data.
     /// The receipts are signed with the log key in effect for the latest
     /// checkpoint, which `log_key` must be, or `log_keys` must hold. Every
-    /// rotation of the organization's keys below its size is included.
+    /// rotation of the organization's keys below its size is included, and
+    /// (spec v0.20) every guardian setting, the registration of every actor
+    /// an included delegation's rule names, and, under a state commitment,
+    /// the whole history of every approver of an included entry and of
+    /// every guardian a setting names, until no new one turns up.
     [[nodiscard]] Result<protocol::EvidenceBundle>
     export_evidence(const crypto::Signer& log_key, const protocol::Id& record) const;
     [[nodiscard]] Result<protocol::EvidenceBundle>

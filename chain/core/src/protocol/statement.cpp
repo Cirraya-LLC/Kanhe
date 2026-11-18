@@ -81,6 +81,30 @@ bool ascending(const Id& a, const Id& b) {
     return std::ranges::lexicographical_compare(a.bytes(), b.bytes());
 }
 
+/// An approval rule's structural rules (spec v0.20): 1 to 16 needed, as
+/// many approvers or more up to 16, distinct and ascending, and a window of
+/// 1 minute to 30 days.
+Status check_approval_rule(const ApprovalRule& rule) {
+    if (rule.needed < 1 || rule.needed > max_rule_approvers) {
+        return fail(Errc::malformed, "an approval rule needs 1 to 16 approvals");
+    }
+    if (rule.approvers.size() < rule.needed || rule.approvers.size() > max_rule_approvers) {
+        return fail(Errc::malformed,
+                    "an approval rule names as many approvers as it needs, or more, up to 16");
+    }
+    for (std::size_t i = 0; i < rule.approvers.size(); ++i) {
+        if (rule.approvers[i].size() != id_size ||
+            (i > 0 && !ascending(rule.approvers[i - 1], rule.approvers[i]))) {
+            return fail(Errc::malformed,
+                        "an approval rule's approvers are distinct, ascending ids");
+        }
+    }
+    if (rule.within < min_approval_window || rule.within > max_approval_window) {
+        return fail(Errc::malformed, "an approval rule's window is 1 minute to 30 days");
+    }
+    return {};
+}
+
 Status check_scope(const Scope& scope) {
     if (scope.statement_types.empty()) {
         return fail(Errc::malformed, "scope must allow at least one statement type");
@@ -90,6 +114,13 @@ Status check_scope(const Scope& scope) {
     }
     if (std::ranges::contains(scope.statement_types, StatementType::ledger_rotate_log_key)) {
         return fail(Errc::malformed, "rotating the log key cannot be delegated");
+    }
+    // Spec v0.20: only the organization names its guardians.
+    if (std::ranges::contains(scope.statement_types, StatementType::ledger_set_guardians)) {
+        return fail(Errc::malformed, "setting guardians cannot be delegated");
+    }
+    if (scope.approvals) {
+        KANHE_CHECK(check_approval_rule(*scope.approvals));
     }
     if (scope.record_types) {
         if (scope.record_types->empty()) {
@@ -242,6 +273,40 @@ Status check_body(const Body& body) {
                 return {};
             },
             [](const LedgerRotateLogKeyBody&) -> Status { return {}; },
+            [](const LedgerSetGuardiansBody& b) -> Status {
+                // Guardians (v0.20) approve in person, always; the types
+                // they guard come only with them.
+                if (b.guardians) {
+                    KANHE_CHECK(check_approval_rule(*b.guardians));
+                    if (b.guardians->without_presence) {
+                        return fail(Errc::malformed,
+                                    "guardians approve in person: their rule never allows "
+                                    "approvals without presence");
+                    }
+                } else if (b.guarded) {
+                    return fail(Errc::malformed,
+                                "removing the guardians names no statement types to guard");
+                }
+                if (b.guarded) {
+                    if (b.guarded->empty()) {
+                        return fail(Errc::malformed,
+                                    "a guarded type list must not be empty when present");
+                    }
+                    for (std::size_t i = 0; i < b.guarded->size(); ++i) {
+                        const StatementType type = (*b.guarded)[i];
+                        if (!statement_type_from(static_cast<std::uint64_t>(type)) ||
+                            type == StatementType::genesis) {
+                            return fail(Errc::malformed,
+                                        "guardians guard known statement types, never genesis");
+                        }
+                        if (i > 0 && (*b.guarded)[i - 1] >= type) {
+                            return fail(Errc::malformed,
+                                        "the guarded types are strictly ascending");
+                        }
+                    }
+                }
+                return {};
+            },
             [](const RecordRegisterBody& b) -> Status {
                 KANHE_CHECK(require_text(b.record_type, "record type must not be empty"));
                 if (b.field_root.size() != id_size) {
@@ -466,7 +531,20 @@ Result<cbor::Value> encode_scope(const Scope& scope) {
     if (scope.request_kinds) {
         KANHE_CHECK(text_list(9, *scope.request_kinds, "scope lists a request kind twice"));
     }
+    // Key 10 (v0.20): the approvals statements under it need.
+    if (scope.approvals) {
+        KANHE_TRY(cbor::Value rule, approval_rule_value(*scope.approvals));
+        map.push_back(entry(10, std::move(rule)));
+    }
     return cbor::Value::map(std::move(map));
+}
+
+cbor::Value statement_types_value(const std::vector<StatementType>& types) {
+    cbor::Array values;
+    for (const StatementType type : types) {
+        values.push_back(uint_value(static_cast<std::uint64_t>(type)));
+    }
+    return cbor::Value::array(std::move(values));
 }
 
 cbor::Value presence_credential_value(const PresenceCredential& c) {
@@ -576,6 +654,19 @@ Result<cbor::Value> encode_body(const Body& body) {
             },
             [](const LedgerRotateLogKeyBody& b) -> Result<cbor::Value> {
                 return cbor::Value::map({entry(1, encode_public_key(b.key))});
+            },
+            [](const LedgerSetGuardiansBody& b) -> Result<cbor::Value> {
+                cbor::Map map;
+                if (b.guardians) {
+                    KANHE_TRY(cbor::Value rule, approval_rule_value(*b.guardians));
+                    map.push_back(entry(1, std::move(rule)));
+                } else {
+                    map.push_back(entry(1, cbor::Value::null()));
+                }
+                if (b.guarded) {
+                    map.push_back(entry(2, statement_types_value(*b.guarded)));
+                }
+                return cbor::Value::map(std::move(map));
             },
             [](const RecordRegisterBody& b) -> Result<cbor::Value> {
                 cbor::Map map{
@@ -793,8 +884,30 @@ Result<Scope> decode_scope(const cbor::Value& value) {
         }
         (key == 8 ? scope.functions : scope.request_kinds) = std::move(list);
     }
+    // Key 10 (v0.20): an approval rule.
+    if (const cbor::Value* rule = reader.get(10)) {
+        KANHE_TRY(scope.approvals, approval_rule_from(*rule));
+    }
     KANHE_CHECK(reader.finish());
     return scope;
+}
+
+/// A list of statement types, strictly ascending, each known.
+Result<std::vector<StatementType>> decode_statement_types(const cbor::Value& value) {
+    KANHE_TRY(const cbor::Array* items, detail::as_array(value));
+    std::vector<StatementType> out;
+    for (const cbor::Value& item : *items) {
+        KANHE_TRY(std::uint64_t raw, detail::as_uint(item));
+        const auto type = statement_type_from(raw);
+        if (!type) {
+            return fail(Errc::unsupported, "an unknown statement type is listed");
+        }
+        if (!out.empty() && out.back() >= *type) {
+            return fail(Errc::non_canonical, "statement types are listed strictly ascending");
+        }
+        out.push_back(*type);
+    }
+    return out;
 }
 
 Result<ContractSigner> decode_contract_signer(const cbor::Value& value) {
@@ -914,6 +1027,19 @@ Result<Body> decode_body(StatementType type, const cbor::Value& value) {
         LedgerRotateLogKeyBody b;
         KANHE_TRY(const cbor::Value* key, reader.need(1));
         KANHE_TRY(b.key, decode_public_key(*key));
+        body = std::move(b);
+        break;
+    }
+    case StatementType::ledger_set_guardians: {
+        // v0.20: {1: approval-rule / null, ? 2: [+ statement-type]}.
+        LedgerSetGuardiansBody b;
+        KANHE_TRY(const cbor::Value* rule, reader.need(1));
+        if (!rule->is_null()) {
+            KANHE_TRY(b.guardians, approval_rule_from(*rule));
+        }
+        if (const cbor::Value* guarded = reader.get(2)) {
+            KANHE_TRY(b.guarded, decode_statement_types(*guarded));
+        }
         body = std::move(b);
         break;
     }
@@ -1084,6 +1210,52 @@ Result<Body> decode_body(StatementType type, const cbor::Value& value) {
     return body;
 }
 
+/// An approval rule's map: {1: needed, 2: [approvers], 3: within, ? 4:
+/// true}.
+cbor::Value rule_map(const ApprovalRule& rule) {
+    cbor::Array approvers;
+    for (const Id& approver : rule.approvers) {
+        approvers.push_back(id_value(approver));
+    }
+    cbor::Map map{entry(1, uint_value(rule.needed)),
+                  entry(2, cbor::Value::array(std::move(approvers))),
+                  entry(3, uint_value(rule.within))};
+    if (rule.without_presence) {
+        map.push_back(entry(4, cbor::Value::boolean(true)));
+    }
+    return cbor::Value::map(std::move(map));
+}
+
+Result<ApprovalRule> decode_rule(const cbor::Value& value) {
+    KANHE_TRY(MapReader reader, MapReader::open(value));
+    ApprovalRule rule;
+    KANHE_TRY(rule.needed, reader.need_uint(1));
+    KANHE_TRY(const cbor::Value* list, reader.need(2));
+    KANHE_TRY(const cbor::Array* items, detail::as_array(*list));
+    // The limit before anything is kept.
+    if (items->size() > max_rule_approvers) {
+        return fail(Errc::malformed, "an approval rule names at most 16 approvers");
+    }
+    for (const cbor::Value& item : *items) {
+        KANHE_TRY(Bytes approver, detail::as_bytes_value(item));
+        KANHE_TRY(Id approver_id, to_id(approver));
+        if (!rule.approvers.empty() && !ascending(rule.approvers.back(), approver_id)) {
+            return fail(Errc::non_canonical, "an approval rule's approvers are strictly ascending");
+        }
+        rule.approvers.push_back(approver_id);
+    }
+    KANHE_TRY(rule.within, reader.need_uint(3));
+    KANHE_TRY(std::optional<bool> without_presence, reader.opt_bool(4));
+    if (without_presence && !*without_presence) {
+        return fail(Errc::non_canonical,
+                    "approvals without presence are encoded only when allowed (true)");
+    }
+    rule.without_presence = without_presence.value_or(false);
+    KANHE_CHECK(reader.finish());
+    KANHE_CHECK(check_approval_rule(rule));
+    return rule;
+}
+
 cbor::Value encode_presence_proof(const PresenceProof& p) {
     cbor::Map map{entry(1, cbor::Value::bytes(p.credential_id)),
                   entry(4, cbor::Value::bytes(p.signature))};
@@ -1152,6 +1324,40 @@ cbor::Value encode_contract_signer(const ContractSigner& signer) {
     return cbor::Value::map(std::move(map));
 }
 
+Result<cbor::Value> approval_rule_value(const ApprovalRule& rule) {
+    if (auto s = check_approval_rule(rule); !s) {
+        return std::unexpected(Error{Errc::invalid_argument, s.error().detail});
+    }
+    return rule_map(rule);
+}
+
+Result<ApprovalRule> approval_rule_from(const cbor::Value& value) {
+    return decode_rule(value);
+}
+
+Result<Bytes> encode_approval_rule(const ApprovalRule& rule) {
+    KANHE_TRY(cbor::Value value, approval_rule_value(rule));
+    return cbor::encode(value);
+}
+
+Result<ApprovalRule> decode_approval_rule(ByteView encoded) {
+    KANHE_TRY(cbor::Value value, cbor::decode(encoded));
+    return decode_rule(value);
+}
+
+Result<cbor::Value> presence_proof_value(const PresenceProof& proof) {
+    if (auto s = check_presence_proof(proof); !s) {
+        return std::unexpected(Error{Errc::invalid_argument, s.error().detail});
+    }
+    return encode_presence_proof(proof);
+}
+
+Result<PresenceProof> presence_proof_from(const cbor::Value& value) {
+    KANHE_TRY(PresenceProof proof, decode_presence_proof(value));
+    KANHE_CHECK(check_presence_proof(proof));
+    return proof;
+}
+
 std::optional<StatementType> statement_type_from(std::uint64_t value) noexcept {
     switch (value) {
     case 1:
@@ -1162,6 +1368,7 @@ std::optional<StatementType> statement_type_from(std::uint64_t value) noexcept {
     case 6:
     case 7:
     case 8:
+    case 9:
     case 16:
     case 17:
     case 18:
@@ -1193,6 +1400,8 @@ std::string_view name(StatementType type) noexcept {
         return "actor-set-presence";
     case StatementType::ledger_rotate_log_key:
         return "ledger-rotate-log-key";
+    case StatementType::ledger_set_guardians:
+        return "ledger-set-guardians";
     case StatementType::record_register:
         return "record-register";
     case StatementType::record_endorse:
@@ -1222,6 +1431,7 @@ StatementType type_of(const Body& body) noexcept {
             [](const DelegationRevokeBody&) { return StatementType::delegation_revoke; },
             [](const ActorSetPresenceBody&) { return StatementType::actor_set_presence; },
             [](const LedgerRotateLogKeyBody&) { return StatementType::ledger_rotate_log_key; },
+            [](const LedgerSetGuardiansBody&) { return StatementType::ledger_set_guardians; },
             [](const RecordRegisterBody&) { return StatementType::record_register; },
             [](const RecordEndorseBody&) { return StatementType::record_endorse; },
             [](const RecordTransitionBody&) { return StatementType::record_transition; },

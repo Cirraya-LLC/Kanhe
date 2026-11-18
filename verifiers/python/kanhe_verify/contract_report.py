@@ -126,7 +126,8 @@ class _Json:
                 "presence": presence_words(ledger, registration),
                 "provenance": report.provenance_json(registration.statement.provenance),
                 "given_at": iso_time(registration.registered_at), "until": iso_time(c.terms["until"]),
-                "reference": c.terms.get("reference"), "witnesses": report.witnesses_json(c.report)}
+                "reference": c.terms.get("reference"), "witnesses": report.witnesses_json(c.report),
+                **report.approvals_of(ledger, registration)}
 
     def call(self, applied: rules.Applied) -> dict:
         f = applied.statement.fields
@@ -140,7 +141,8 @@ class _Json:
                 "presence": report.presence_json(applied.presence),
                 "provenance": report.provenance_json(applied.statement.provenance),
                 "outcome": self.outcome(self.ledger.runs[applied.index]), "answer": self.answer(applied),
-                "consents": [self.consent(c) for c in self.r.consents[applied.index]]}
+                "consents": [self.consent(c) for c in self.r.consents[applied.index]],
+                **report.approvals_of(self.ledger, applied)}
 
     def instance(self) -> dict:
         r, i, c = self.r, self.r.instance, self.r.contract
@@ -229,6 +231,7 @@ def to_text(r: ContractReport) -> str:
         if applied.chain:
             names = [ledger.actors[ledger.delegations[d].grantor].name for d in applied.chain]
             lines.append("           authorized by " + " <- ".join(names))
+        lines += report.approvals_text(ledger, applied)
         lines.append(f"           arguments  {diagnostic(f['arguments'])}")
         if f["reference"]:
             lines.append(f"           reference  {f['reference']}")
@@ -260,6 +263,7 @@ def to_text(r: ContractReport) -> str:
             lines.append(f"           consent of {cl.name} ({crypto.HASH_NAMES[cl.hash_alg]}): given by "
                          f'"{signer.name}" ({presence_words(cl, consent.registration)})'
                          + (f", ref. {reference}" if reference else ""))
+            lines += report.approvals_text(cl, consent.registration, indent="             ")
     own = r.own_requests()
     if own:
         still_open = r.open_requests()

@@ -34,7 +34,14 @@ It verifies an evidence bundle (spec section 11), a record's or an instance's, e
   registration names (key 7), each on this ledger from the bundle itself or on another from its
   source proof (bundle key 10, a complete bundle of that ledger, one level, verified with the
   same trust settings), and where each stood when the record was registered and at the
-  checkpoint (`kanhe_verify/scripts.py`).
+  checkpoint (`kanhe_verify/scripts.py`);
+- approvals and guardians (spec v0.20): the approval rules of a statement's delegation chain
+  (scope key 10) and of the organization's guardians (statement type 9), and each approval its
+  log entry carries (key 5), checked as the ledger checked it, with its own presence challenge;
+  the rules that protect approvers' keys and credentials and keep guardians from being revoked
+  below k; every approver and guardian an involved object; and, for each event, the rules that
+  applied, who approved, how, and what counted, with the guardians in effect
+  (`kanhe_verify/approvals.py`).
 
 And it verifies an instance's contract evidence (sections 14 and 15):
 
@@ -99,6 +106,25 @@ Nothing cryptographic is implemented here:
 name the report gives it, repeatable; a ledger named twice is a usage error. The JSON report's
 `memberships` lists every proof, trusted or not, in the bundle's order, with the field names of
 `kanhe verify --json` and its times in ISO 8601 like every other time in the report.
+
+Approvals and guardians (spec v0.20) appear in the JSON report with these fields, which
+`kanhe verify --json` shares (actors as everywhere in the report, `{id, kind, name, revoked}` and
+an agent's `model`, `model_version`, `responsible`; presence as an event's, or null; times in ISO
+8601):
+
+- each event (and, in contract evidence, each call and each consent) has `rules`, the approval
+  rules that applied to it in the order of section 5.1, each `{source, delegation, k, approvers,
+  within_ms, without_presence, signer_counted, count}` (`source` is `delegation`, with the
+  delegation's id, or `guardians` or `new_guardians`, with `delegation` null; `approvers` the
+  actors it names; `count` the approvals that counted, with the signer if it did), and
+  `approvals`, in the log entry's order, each `{approver, approved_at, presence, counted_for}`
+  (`approved_at` as the approver claims it; `presence` null when not in person; `counted_for` the
+  indices in `rules` it counted for). Both lists are empty when no rule applied;
+- the report has `guardians`: `in_effect`, the guardians at the checkpoint, `{k, within_ms,
+  guardians, guards, since, index}` (`guards` null for every statement the organization signs, or
+  the names of the types key 2 lists), or null; and `settings`, every guardian setting the bundle
+  holds, in log order, each `{index, registered_at, removed, k, within_ms, guardians, guards,
+  rules, approvals}` (a removal has `k`, `within_ms`, and `guards` null and no `guardians`).
 
 `--witness-vkey` takes an open network's witness by its verifier key,
 `<name>+<key ID>+<base64(type || key)>` (c2sp.org/signed-note), of signature type 0x04 (Ed25519)
@@ -168,7 +194,11 @@ accepted or refused for the acceptance check they fail) and for trust nodes (`pr
 the six mechanism types, membership metadata with its values, and refused, each for its rule; where
 memberships stood at given times; a trust node's log, every refused statement; and member ledgers'
 bundles with membership proofs, each proof's report under the trust list, or refused whatever the
-list, and `--trust-node`), `tests/test_network.py` for open witness networks (`protocol-v0.13.json`: the origin, the note,
+list, and `--trust-node`), `tests/test_approvals.py` for approvals and guardians
+(`protocol-v0.20.json`: approval rules, guardian settings, and approvals decoded and refused, each
+for its rule; a log for each hash, every statement's rules and approvals as the vectors state
+them, every refused statement for its rule, and the logs that do not parse),
+`tests/test_network.py` for open witness networks (`protocol-v0.13.json`: the origin, the note,
 the note key's signed note, verifier keys, every cosignature's verdict and time, the anchor, in
 bundles too, and signed-note's own example), and `tests/test_contracts.py` for the profile (`vm-v1.json`), contracts, parts, requests and
 answers (`protocol-v0.6.json` to `protocol-v0.8.json`: every statement, every refused one, every

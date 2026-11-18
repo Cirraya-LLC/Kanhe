@@ -11,10 +11,10 @@ verifiers' reports can be compared field by field.
 
 from __future__ import annotations
 
-from . import cbor, claims, crypto, rules
+from . import approvals, cbor, claims, crypto, rules
 from .evidence import Report
 from .protocol import (AGENT, CONTRACT_CALL, ORGANIZATION, PERSON, RECORD_ENDORSE, RECORD_REGISTER, RECORD_REVOKE,
-                       RECORD_TRANSITION)
+                       RECORD_TRANSITION, STATEMENT_TYPE_NAMES)
 
 INCOMPLETE = ("The checkpoint does not end with a state commitment, so the bundle cannot prove that nothing, "
               "such as a later revocation, was left out.")
@@ -174,6 +174,109 @@ def presence_json(r) -> dict | None:
         return None
     return {"method": r.method, "user_verified": r.user_verified, "origin": r.origin, "rp_id": r.rp_id,
             "label": r.label}
+
+
+def rule_json(ledger: rules.Ledger, r: approvals.RuleResult) -> dict:
+    """A rule that applied to an event (v0.20, section 11): where it comes
+    from, k of its approvers (named), its window, whether approvals without
+    presence count, whether the signer counted, and how many counted."""
+    return {"source": r.source, "delegation": r.delegation.hex() if r.delegation is not None else None,
+            "k": r.rule.k, "approvers": [actor_json(ledger, a) for a in r.rule.approvers],
+            "within_ms": r.rule.within, "without_presence": r.rule.without_presence,
+            "signer_counted": r.signer_counted, "count": r.count}
+
+
+def approval_json(ledger: rules.Ledger, x: approvals.ApprovalResult) -> dict:
+    """An approval an event carried (v0.20): its approver, the time it
+    claims, how presence was proven (null: not in person), and the rules
+    (indices into the event's rules) it counted for."""
+    return {"approver": actor_json(ledger, x.approval.approver), "approved_at": iso_time(x.approval.approved_at),
+            "presence": presence_json(x.presence), "counted_for": list(x.counted_for)}
+
+
+def approvals_of(ledger: rules.Ledger, applied: rules.Applied) -> dict:
+    return {"rules": [rule_json(ledger, r) for r in applied.rules],
+            "approvals": [approval_json(ledger, x) for x in applied.approvals]}
+
+
+def _guardians_rule_json(ledger: rules.Ledger, body) -> dict:
+    if body.rule is None:
+        return {"k": None, "within_ms": None, "guardians": [], "guards": None}
+    return {"k": body.rule.k, "within_ms": body.rule.within,
+            "guardians": [actor_json(ledger, a) for a in body.rule.approvers],
+            "guards": None if body.types is None else [STATEMENT_TYPE_NAMES[t] for t in body.types]}
+
+
+def guardians_json(ledger: rules.Ledger) -> dict:
+    """The guardians in effect at the checkpoint (v0.20, section 5.2), or
+    null, and every guardian setting the bundle holds, in log order. `guards`
+    null means every statement the organization signs; a list names the
+    types key 2 lists (those always guarded are guarded besides)."""
+    current = ledger.guardians_in_effect()
+    in_effect = None
+    if current is not None:
+        in_effect = {**_guardians_rule_json(ledger, current.body), "since": iso_time(current.registered_at),
+                     "index": current.index}
+    settings = []
+    for setting in ledger.guardian_settings:
+        applied = ledger.applied[setting.index]
+        settings.append({"index": setting.index, "registered_at": iso_time(setting.registered_at),
+                         "removed": setting.body.rule is None, **_guardians_rule_json(ledger, setting.body),
+                         **approvals_of(ledger, applied)})
+    return {"in_effect": in_effect, "settings": settings}
+
+
+def _duration(ms: int) -> str:
+    for unit, size in (("day", 86_400_000), ("hour", 3_600_000), ("minute", 60_000), ("second", 1000)):
+        if ms % size == 0:
+            n = ms // size
+            return f"{n} {unit}{'' if n == 1 else 's'}"
+    return f"{ms} ms"
+
+
+def _rule_words(ledger: rules.Ledger, rule) -> str:
+    names = ", ".join(ledger.actors[a].name if a in ledger.actors else a.hex()[:12] for a in rule.approvers)
+    return f"{rule.k} of {names}, within {_duration(rule.within)}" + (
+        ", approvals without presence counting too" if rule.without_presence else "")
+
+
+def approvals_text(ledger: rules.Ledger, applied: rules.Applied, indent: str = "           ") -> list:
+    """An event's rules and approvals, for people (v0.20)."""
+    lines = []
+    sources = {approvals.DELEGATION: "the delegation's", approvals.GUARDIANS: "the guardians'",
+               approvals.NEW_GUARDIANS: "the new guardians'"}
+    for r in applied.rules:
+        signer = ", the signer among them" if r.signer_counted else ""
+        lines.append(f"{indent}needs approval ({sources[r.source]} rule): {_rule_words(ledger, r.rule)}; "
+                     f"{r.count} counted{signer}")
+    for x in applied.approvals:
+        actor = ledger.actors[x.approval.approver]
+        kind = rules.KIND_NAMES[actor.kind]
+        if x.presence is None:
+            how = "not in person"
+        elif x.presence.method == "webauthn":
+            how = "in person, passkey" + (", user verified" if x.presence.user_verified else ", NOT user verified")
+        else:
+            how = "in person, hardware key"
+        lines.append(f"{indent}approved by {actor.name} ({kind}{', since revoked' if actor.revoked else ''}), "
+                     f"{how}, on {human_time(x.approval.approved_at)} (as they claim)")
+    return lines
+
+
+def guardians_text(ledger: rules.Ledger) -> list:
+    current = ledger.guardians_in_effect()
+    if current is None:
+        return ["  Guardians    none: the organization's root key signs alone"] if ledger.guardian_settings else []
+    body = current.body
+    what = "every statement the organization signs" if body.types is None else \
+        ", ".join(STATEMENT_TYPE_NAMES[t] for t in body.types) + " (and its key rotations, guardian settings, " \
+        "and statements about a guardian)"
+    lines = [f"  Guardians    {_rule_words(ledger, body.rule)}; they guard {what}",
+             f"               since {human_time(current.registered_at)} (entry #{current.index})"]
+    revoked = [ledger.actors[a].name for a in body.rule.approvers if a in ledger.actors and ledger.actors[a].revoked]
+    if revoked:
+        lines.append("               revoked since: " + ", ".join(revoked))
+    return lines
 
 
 def authority_json(ledger: rules.Ledger, applied: rules.Applied) -> list:
@@ -349,6 +452,7 @@ def _event_json(report: Report, applied: rules.Applied) -> dict:
         "detail": detail,
         "new_version": new_version,
         "existed_by": iso_time(report.existed_by.get(applied.index)),
+        **approvals_of(ledger, applied),
     }
 
 
@@ -379,6 +483,7 @@ def to_json(report: Report) -> dict:
         "memberships": [membership_json(m) for m in report.memberships],
         "scripts": [script_json(report, s) for s in report.scripts],
         "sources": [source_json(s) for s in report.sources],
+        "guardians": guardians_json(ledger),
         "complete": report.complete,
         "state_commitment": None if report.commitment is None else {
             "index": report.commitment_index, "state_root": report.commitment.root.hex(),
@@ -420,6 +525,7 @@ def to_text(report: Report) -> str:
         lines.append(f"  Keys         log key rotated {log_rotations} time(s), root key "
                      f"{ledger.root_rotations} time(s); every rotation checked")
     lines += witnesses_text(report)
+    lines += guardians_text(ledger)
     if report.tokens:
         lines.append(f"  Time-stamps  {report.trusted_authorities} trusted authorit"
                      f"{'y' if report.trusted_authorities == 1 else 'ies'}")
@@ -465,6 +571,7 @@ def to_text(report: Report) -> str:
             named = next((x for x in report.scripts if x.id == provenance.script), None)
             lines.append(f"           by the script {named.values.name} {named.values.version}" if named else
                          f"           by the script {provenance.script.hex()[:12]}")
+        lines += approvals_text(ledger, applied)
         if report.existed_by.get(applied.index) is not None:
             lines.append(f"           existed by {human_time(report.existed_by[applied.index])}")
     if report.disclosed:
@@ -487,6 +594,7 @@ def to_text(report: Report) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["actor_json", "authority_json", "by_whom", "claim_json", "human_time", "iso_time", "membership_json",
+__all__ = ["actor_json", "approval_json", "approvals_of", "approvals_text", "authority_json", "by_whom", "claim_json",
+           "guardians_json", "guardians_text", "human_time", "iso_time", "membership_json", "rule_json",
            "membership_text", "presence_json", "provenance_json", "source_status", "to_json", "to_text",
            "witnesses_json", "witnesses_text"]

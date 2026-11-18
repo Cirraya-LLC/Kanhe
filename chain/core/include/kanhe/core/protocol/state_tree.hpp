@@ -44,7 +44,8 @@ struct StateLeaf {
     Id id;
     /// Ascending log indices of every statement that created or changed the
     /// object: registration, key rotations, passkey changes, and revocation
-    /// for actors; grant and revocation for delegations; every statement about
+    /// for actors (for the organization, the log key's rotations and its
+    /// guardian settings too); grant and revocation for delegations; every statement about
     /// a record; deploy and retire for contracts; creation and every call for
     /// instances.
     std::vector<std::uint64_t> history;

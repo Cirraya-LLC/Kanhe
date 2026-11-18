@@ -238,6 +238,50 @@ constexpr std::initializer_list<FunctionKind> function_kinds{FunctionKind::creat
 constexpr std::initializer_list<AnswerStatus> answer_statuses{
     AnswerStatus::done, AnswerStatus::failed, AnswerStatus::expired};
 
+void write_rule(Out& out, const ApprovalRule& r) {
+    out.u64(r.needed);
+    out.u32(static_cast<std::uint32_t>(r.approvers.size()));
+    for (const Id& id : r.approvers) {
+        out.id(id.bytes());
+    }
+    out.u64(r.within);
+    out.flag(r.without_presence);
+}
+
+ApprovalRule read_rule(In& in) {
+    ApprovalRule r;
+    r.needed = in.u64();
+    r.approvers.resize(in.count(id_size));
+    for (Id& id : r.approvers) {
+        id = in.id();
+    }
+    r.within = in.u64();
+    r.without_presence = in.flag();
+    return r;
+}
+
+void write_types(Out& out, const std::vector<StatementType>& types) {
+    out.u32(static_cast<std::uint32_t>(types.size()));
+    for (const StatementType t : types) {
+        out.u8(static_cast<std::uint8_t>(t));
+    }
+}
+
+/// Statement types, each refused unless it is one.
+std::vector<StatementType> read_types(In& in) {
+    std::vector<StatementType> out;
+    for (std::uint32_t n = in.count(); n > 0 && in.ok(); --n) {
+        const std::uint8_t raw = in.u8();
+        const auto type = statement_type_from(raw);
+        if (!type) {
+            in.spoil();
+            break;
+        }
+        out.push_back(*type);
+    }
+    return out;
+}
+
 void write_scope(Out& out, const Scope& s) {
     out.u32(static_cast<std::uint32_t>(s.statement_types.size()));
     for (const StatementType t : s.statement_types) {
@@ -256,13 +300,12 @@ void write_scope(Out& out, const Scope& s) {
     });
     out.opt(s.functions, [&](const auto& v) { out.texts(v); });
     out.opt(s.request_kinds, [&](const auto& v) { out.texts(v); });
+    out.opt(s.approvals, [&](const ApprovalRule& r) { write_rule(out, r); });
 }
 
 Scope read_scope(In& in) {
     Scope s;
-    for (std::uint32_t n = in.count(); n > 0; --n) {
-        s.statement_types.push_back(static_cast<StatementType>(in.u8()));
-    }
+    s.statement_types = read_types(in);
     s.record_types = in.opt<std::vector<std::string>>([&] { return in.texts(); });
     s.not_before = in.opt<Timestamp>([&] { return in.u64(); });
     s.not_after = in.opt<Timestamp>([&] { return in.u64(); });
@@ -277,6 +320,7 @@ Scope read_scope(In& in) {
     });
     s.functions = in.opt<std::vector<std::string>>([&] { return in.texts(); });
     s.request_kinds = in.opt<std::vector<std::string>>([&] { return in.texts(); });
+    s.approvals = in.opt<ApprovalRule>([&] { return read_rule(in); });
     return s;
 }
 
@@ -334,6 +378,7 @@ Result<Bytes> LedgerState::encode() const {
             out.u8(static_cast<std::uint8_t>(c.method));
         }
         out.indices(a.presence_updates);
+        out.indices(a.guardian_updates);
     }
     out.u32(static_cast<std::uint32_t>(actors_by_kid_.size()));
     for (const auto& [kid, actor] : actors_by_kid_) {
@@ -351,6 +396,14 @@ Result<Bytes> LedgerState::encode() const {
         out.flag(d.revoked);
         out.u64(d.granted_at_index);
         out.opt(d.revoked_at_index, [&](std::uint64_t v) { out.u64(v); });
+    }
+
+    // Guardian settings (v0.20), in log order.
+    out.u32(static_cast<std::uint32_t>(guardians_.size()));
+    for (const GuardianSetting& g : guardians_) {
+        out.u64(g.index);
+        out.opt(g.guardians, [&](const ApprovalRule& r) { write_rule(out, r); });
+        out.opt(g.guarded, [&](const std::vector<StatementType>& v) { write_types(out, v); });
     }
 
     // Records, the most numerous: their types and states as positions in a
@@ -511,6 +564,7 @@ LedgerState::decode(ByteView bytes,
             a.presence.push_back(std::move(credential));
         }
         a.presence_updates = in.indices();
+        a.guardian_updates = in.indices();
         s.actors_.insert_or_assign(key, std::move(a));
     }
     for (std::uint32_t n = in.count(2 * id_size); n > 0 && in.ok(); --n) {
@@ -530,6 +584,14 @@ LedgerState::decode(ByteView bytes,
         d.granted_at_index = in.u64();
         d.revoked_at_index = in.opt<std::uint64_t>([&] { return in.u64(); });
         s.delegations_.insert_or_assign(key, std::move(d));
+    }
+
+    for (std::uint32_t n = in.count(9); n > 0 && in.ok(); --n) {
+        GuardianSetting g;
+        g.index = in.u64();
+        g.guardians = in.opt<ApprovalRule>([&] { return read_rule(in); });
+        g.guarded = in.opt<std::vector<StatementType>>([&] { return read_types(in); });
+        s.guardians_.push_back(std::move(g));
     }
 
     const std::vector<std::string> strings = in.texts();
@@ -689,6 +751,20 @@ LedgerState::decode(ByteView bytes,
             if (++links > max_delegation_depth) {
                 return fail(Errc::malformed, "a snapshot's delegation chain does not end");
             }
+        }
+        // The approvers its rule names, while it stands (v0.20).
+        if (!d.revoked && d.scope.approvals) {
+            for (const Id& approver : d.scope.approvals->approvers) {
+                ++s.named_approvers_[key_of(approver)];
+            }
+        }
+    }
+    // Guardian settings ascend in the log, and name guardians as a rule does.
+    for (std::size_t i = 0; i < s.guardians_.size(); ++i) {
+        const GuardianSetting& g = s.guardians_[i];
+        if ((i > 0 && s.guardians_[i - 1].index >= g.index) ||
+            (g.guardians && !encode_approval_rule(*g.guardians))) {
+            return fail(Errc::malformed, "a snapshot's guardian settings are malformed");
         }
     }
     return s;

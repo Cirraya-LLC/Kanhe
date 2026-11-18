@@ -14,6 +14,7 @@ add_library(kanhe_core
     src/hex.cpp
     src/merkle.cpp
     src/protocol/access.cpp
+    src/protocol/approvals.cpp
     src/protocol/claims.cpp
     src/protocol/contract_evidence.cpp
     src/protocol/exchange.cpp

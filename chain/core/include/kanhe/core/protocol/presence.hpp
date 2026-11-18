@@ -58,6 +58,15 @@ verify_presence(const crypto::Provider& provider, crypto::HashAlg ledger_hash,
                 const Statement& statement, const Id& kid,
                 std::span<const PresenceCredential> credentials);
 
+/// Verifies a proof of presence over `challenge` against a person's
+/// registered credentials: the proof's credential is one of them, and it is
+/// a passkey's assertion over the challenge or a hardware key's signature of
+/// it. For statements (`verify_presence`) and approvals (spec v0.20), each
+/// with the challenge of its own construction.
+[[nodiscard]] Result<PresenceCheck>
+verify_presence_proof(const crypto::Provider& provider, ByteView challenge,
+                      const PresenceProof& proof, std::span<const PresenceCredential> credentials);
+
 /// Verifies a WebAuthn assertion (what navigator.credentials.get returns)
 /// over `challenge`, for challenges that are not a statement's, such as
 /// signing in: the credential is one of `credentials` (a passkey's, not a

@@ -31,6 +31,8 @@ enum class StatementType : std::uint8_t {
     delegation_revoke = 6,
     actor_set_presence = 7,
     ledger_rotate_log_key = 8,
+    /// Spec v0.20: the organization names its guardians.
+    ledger_set_guardians = 9,
     record_register = 16,
     record_endorse = 17,
     record_transition = 18,
@@ -137,6 +139,56 @@ struct LedgerRotateLogKeyBody {
     friend bool operator==(const LedgerRotateLogKeyBody&, const LedgerRotateLogKeyBody&) = default;
 };
 
+/// An approval rule (spec v0.20): a statement it applies to is registered
+/// only with the approvals of `needed` of the actors it names, within
+/// `within` of the statement's issue time. Scope key 10, and the guardians
+/// of a guardian setting (`approval-rule`).
+struct ApprovalRule {
+    /// Approvals needed (k): 1 to 16.
+    std::uint64_t needed = 1;
+    /// The approvers: actors of the ledger, at least `needed` and at most
+    /// 16, strictly ascending by their bytes.
+    std::vector<Id> approvers;
+    /// How long after its issue time the statement may be registered (ms):
+    /// 1 minute to 30 days.
+    Timestamp within = 0;
+    /// Approvals without proof of presence count too (key 4, encoded only
+    /// when true): a person's key alone, an agent's, a device's. Never for
+    /// guardians.
+    bool without_presence = false;
+
+    friend bool operator==(const ApprovalRule&, const ApprovalRule&) = default;
+};
+
+/// Limits of an approval rule (spec v0.20).
+inline constexpr std::size_t max_rule_approvers = 16;
+inline constexpr Timestamp min_approval_window = 60'000;
+inline constexpr Timestamp max_approval_window = 2'592'000'000;
+
+/// An approval rule as scopes and guardian settings encode it, and back;
+/// decoding refuses what does not keep the structural rules (counts,
+/// limits, order), not what only the ledger can check.
+[[nodiscard]] Result<Bytes> encode_approval_rule(const ApprovalRule& rule);
+[[nodiscard]] Result<ApprovalRule> decode_approval_rule(ByteView encoded);
+[[nodiscard]] Result<cbor::Value> approval_rule_value(const ApprovalRule& rule);
+[[nodiscard]] Result<ApprovalRule> approval_rule_from(const cbor::Value& value);
+
+/// Sets the organization's guardians (spec v0.20, statement type 9): people
+/// whose approvals the organization's own statements then need. Only the
+/// organization signs it, without a delegation.
+struct LedgerSetGuardiansBody {
+    /// The guardians and how many of them must approve; nullopt removes
+    /// them. Never approvals without presence.
+    std::optional<ApprovalRule> guardians;
+    /// The types of the organization's statements they guard, strictly
+    /// ascending, never genesis; nullopt guards every statement. Some
+    /// statements are guarded whatever this lists (see
+    /// LedgerState::guarded). Only with guardians.
+    std::optional<std::vector<StatementType>> guarded;
+
+    friend bool operator==(const LedgerSetGuardiansBody&, const LedgerSetGuardiansBody&) = default;
+};
+
 struct Scope {
     /// Statement types the grantee may submit. Non-empty, no duplicates.
     std::vector<StatementType> statement_types;
@@ -158,6 +210,10 @@ struct Scope {
     /// answer a request of one of these kinds; nullopt means any call.
     /// Encoded strictly ascending, each once.
     std::optional<std::vector<std::string>> request_kinds;
+    /// Statements under this delegation, or under any delegated from it,
+    /// need these approvals (key 10, spec v0.20). Every rule in a chain
+    /// applies.
+    std::optional<ApprovalRule> approvals;
 
     friend bool operator==(const Scope&, const Scope&) = default;
 };
@@ -355,9 +411,9 @@ struct ContractRetireBody {
 
 using Body = std::variant<GenesisBody, ActorRegisterBody, ActorRotateKeyBody, ActorRevokeBody,
                           DelegationGrantBody, DelegationRevokeBody, ActorSetPresenceBody,
-                          LedgerRotateLogKeyBody, RecordRegisterBody, RecordEndorseBody,
-                          RecordTransitionBody, RecordRevokeBody, ContractDeployBody,
-                          ContractCallBody, ContractRetireBody>;
+                          LedgerRotateLogKeyBody, LedgerSetGuardiansBody, RecordRegisterBody,
+                          RecordEndorseBody, RecordTransitionBody, RecordRevokeBody,
+                          ContractDeployBody, ContractCallBody, ContractRetireBody>;
 
 [[nodiscard]] StatementType type_of(const Body& body) noexcept;
 
@@ -418,6 +474,11 @@ struct Statement {
 /// Encodes a statement payload. Fails if the statement violates the
 /// structural rules of the specification.
 [[nodiscard]] Result<Bytes> encode_payload(const Statement& statement);
+
+/// A proof of presence as statements and approvals (spec v0.20) encode it
+/// (`presence-proof`), and back, with its structural limits.
+[[nodiscard]] Result<cbor::Value> presence_proof_value(const PresenceProof& proof);
+[[nodiscard]] Result<PresenceProof> presence_proof_from(const cbor::Value& value);
 
 /// Presence credentials as they are encoded in statements; credential files
 /// use the same encoding.

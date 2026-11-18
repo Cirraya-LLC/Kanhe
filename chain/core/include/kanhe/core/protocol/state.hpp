@@ -15,6 +15,7 @@
 
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/error.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/id_map.hpp>
 #include <kanhe/core/protocol/keys.hpp>
@@ -36,7 +37,7 @@ inline constexpr std::size_t max_delegation_depth = 16;
 /// The version of the rules a state is built by: raised whenever validation
 /// or application changes what a log replays to, so that a state written by
 /// earlier rules (a snapshot) is not taken for today's.
-inline constexpr std::uint32_t state_rules_version = 6;
+inline constexpr std::uint32_t state_rules_version = 7;
 
 // Ids in state objects are CompactIds: millions of objects.
 struct ActorState {
@@ -58,8 +59,24 @@ struct ActorState {
     std::vector<PresenceCredential> presence;
     /// Log indices of the statements that set those credentials.
     std::vector<std::uint64_t> presence_updates;
+    /// The organization only: log indices of its guardian settings (spec
+    /// v0.20), which its leaf lists with its key rotations.
+    std::vector<std::uint64_t> guardian_updates;
 
     [[nodiscard]] bool is_organization() const noexcept { return !kind.has_value(); }
+};
+
+/// A guardian setting (spec v0.20), as the state keeps every one.
+struct GuardianSetting {
+    /// The log index of the ledger-set-guardians statement.
+    std::uint64_t index = 0;
+    /// The guardians it named; nullopt: it removed them.
+    std::optional<ApprovalRule> guardians;
+    /// The types of the organization's statements they guard; nullopt:
+    /// every statement.
+    std::optional<std::vector<StatementType>> guarded;
+
+    friend bool operator==(const GuardianSetting&, const GuardianSetting&) = default;
 };
 
 struct DelegationState {
@@ -162,6 +179,13 @@ public:
     /// input was the one it built) instead of running the call.
     [[nodiscard]] bool took_offer() const noexcept { return took_offer_; }
 
+    /// The approvals the last `validate` given this accepted the statement
+    /// with (spec v0.20): each rule that applied and each approval as
+    /// checked; null if it failed, or no rule applied.
+    [[nodiscard]] const ApprovalTally* approvals() const noexcept {
+        return approvals_ ? &*approvals_ : nullptr;
+    }
+
 private:
     friend class LedgerState;
     Id statement_;
@@ -169,6 +193,7 @@ private:
     std::uint64_t stamp_ = 0;
     std::optional<ContractRun> run_;
     std::optional<ContractRun> offered_;
+    std::optional<ApprovalTally> approvals_;
     bool reused_ = false;
     bool took_offer_ = false;
 };
@@ -190,10 +215,57 @@ public:
     /// failed check is not repeated). Otherwise the signature is checked
     /// here. With `validation`, a contract call's accepted run is kept there
     /// for `apply` (and whatever was there before is dropped).
+    ///
+    /// `approvals` travel beside the statement (spec v0.20), in its log
+    /// entry's order: strictly ascending by approver. Every rule that
+    /// applies (see `approval_rules`) must be met with them at `now`, and
+    /// every one of them must verify; a statement no rule applies to carries
+    /// none. With `validation`, what they counted for is kept there.
     [[nodiscard]] Status validate(const crypto::Provider& provider,
                                   const SignedStatement& statement, Timestamp now,
                                   const SignatureCheck* checked = nullptr,
-                                  Validation* validation = nullptr) const;
+                                  Validation* validation = nullptr,
+                                  std::span<const SignedApproval> approvals = {}) const;
+
+    /// `validate` with every rule but the approval rules (spec v0.20): what
+    /// a statement held until its approvals arrive must already meet. Its
+    /// approvals are checked when it is registered, at that time.
+    [[nodiscard]] Status validate_held(const crypto::Provider& provider,
+                                       const SignedStatement& statement, Timestamp now) const;
+
+    /// The approval rules that apply to `statement` (spec v0.20): the rule
+    /// of each delegation in its signer's chain, nearest first; for a
+    /// statement of the organization, the guardians' rule if they guard it
+    /// (see `guarded`); for a guardian setting, the current guardians' rule
+    /// and the one it names. Empty if none applies.
+    [[nodiscard]] std::vector<AppliedRule> approval_rules(const Statement& statement) const;
+
+    /// Checks `approvals` (any order) of `statement` as `validate` would at
+    /// `now`, without requiring the rules to be met: each approval must be
+    /// valid (the error says why one is not), and the tally says what each
+    /// counts for, what is missing, and when each rule lapses. The signer's
+    /// own proof of presence, if any, is verified to count the signer. For
+    /// a server or a tool that collects approvals before registering.
+    [[nodiscard]] Result<ApprovalTally> check_approvals(const crypto::Provider& provider,
+                                                        const SignedStatement& statement,
+                                                        std::span<const SignedApproval> approvals,
+                                                        Timestamp now) const;
+
+    /// The guardian settings, oldest first (spec v0.20).
+    [[nodiscard]] std::span<const GuardianSetting> guardian_settings() const noexcept {
+        return guardians_;
+    }
+    /// The setting in effect, if it names guardians.
+    [[nodiscard]] const GuardianSetting* guardians() const noexcept;
+    /// Whether the guardians in effect guard `statement`, a statement of the
+    /// organization: every one, or the types the setting lists; always the
+    /// rotations of the root and log keys, guardian settings, and the key,
+    /// presence credentials, and revocation of a guardian.
+    [[nodiscard]] bool guarded(const Statement& statement) const;
+    /// Whether an actor's key and presence credentials are protected: named
+    /// by the guardians in effect or by the rule of an unrevoked delegation.
+    /// Then only the actor itself or the organization changes them.
+    [[nodiscard]] bool protected_approver(const Id& actor) const;
 
     /// The whole state, written deterministically: equal states give equal
     /// bytes. For a ledger's own snapshot, never sent anywhere (not part of
@@ -322,6 +394,23 @@ private:
     /// `vm::load(code)`, asking `modules_` first and telling it.
     [[nodiscard]] Result<vm::Module> load_module(ByteView code) const;
 
+    /// validate's checks; the approval rules only with `approvals_too`.
+    [[nodiscard]] Status validate_statement(const crypto::Provider& provider,
+                                            const SignedStatement& statement, Timestamp now,
+                                            const SignatureCheck* checked, Validation* validation,
+                                            std::span<const SignedApproval> approvals,
+                                            bool approvals_too) const;
+    /// Checks approvals in the log entry's order (ascending by approver) and
+    /// counts them toward the rules that apply; `signer_verified` says the
+    /// statement carries a user-verified proof of presence.
+    [[nodiscard]] Result<ApprovalTally> tally_approvals(const crypto::Provider& provider,
+                                                        const SignedStatement& statement,
+                                                        std::span<const SignedApproval> approvals,
+                                                        Timestamp now, const ActorState& signer,
+                                                        bool signer_verified) const;
+    /// The approvers a rule names are actors of this ledger, unrevoked, not
+    /// the organization, and people where `people` (spec v0.20).
+    [[nodiscard]] Status check_approvers(const ApprovalRule& rule, bool people) const;
     [[nodiscard]] Status check_authority(const Statement& statement, const ActorState& signer,
                                          Timestamp now) const;
     [[nodiscard]] Status check_rules(const crypto::Provider& provider, const Statement& statement,
@@ -363,6 +452,12 @@ private:
     IdMap<ContractState> contracts_;
     IdMap<InstanceState> instances_;
     IdMap<RequestState> requests_;
+    /// Every guardian setting, in log order (spec v0.20).
+    std::vector<GuardianSetting> guardians_;
+    /// How many unrevoked delegations' rules name each actor (spec v0.20):
+    /// approvers are few, so a plain map. Derived from the delegations, so
+    /// a snapshot does not keep it.
+    std::map<IdKey, std::uint32_t> named_approvers_;
     IdMap<std::uint64_t> statements_;
     /// (signer, nonce) of every statement: a payload is never accepted twice,
     /// even re-signed with a rotated key.

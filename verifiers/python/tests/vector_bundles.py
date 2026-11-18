@@ -2,8 +2,9 @@
 # Copyright 2026 Cirraya
 """Evidence bundles assembled from the independent test vectors.
 
-The protocol vectors of revisions v0.2, v0.4, v0.9, v0.10, v0.14, and v0.16
-(a trust node's log, with memberships) hold whole logs that the ledger rules
+The protocol vectors of revisions v0.2, v0.4, v0.9, v0.10, v0.14, v0.16
+(a trust node's log, with memberships), and v0.20 (approvals and guardians)
+hold whole logs that the ledger rules
 accept, each ending with a state commitment, and a checkpoint over them, all
 built by tools/testvectors/generate.py (not by the C++ code). Their keys are throwaway test keys with published seeds, so a test
 can sign the receipts a bundle needs. This module packs those logs into
@@ -115,6 +116,17 @@ def all_bundles():
                 name = f"{version}-{'sha256' if ledger['hash'] == crypto.SHA256 else 'sm3'}-{record['id'][:8]}"
                 data = bundle(ledger, document["seeds"], "log", bytes.fromhex(record["id"]), leaves)
                 yield name, ledger["ledger_id"], record["id"], data
+    # v0.20: logs with approvals and guardians, whose log key was rotated
+    # (the ledger names the key in effect at the end).
+    document = json.loads((VECTORS / "protocol-v0.20.json").read_text())
+    for ledger in document["ledgers"]:
+        leaves = _leaves(ledger["state_leaves"])
+        for leaf in leaves:
+            if leaf[0] != statetree.RECORD:
+                continue
+            name = f"v0.20-{'sha256' if ledger['hash'] == crypto.SHA256 else 'sm3'}-{leaf[1].hex()[:8]}"
+            data = bundle(ledger, document["seeds"], ledger["log_key"], leaf[1], leaves)
+            yield name, ledger["ledger_id"], leaf[1].hex(), data
 
 
 def network_bundles():

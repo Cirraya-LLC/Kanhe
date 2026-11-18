@@ -26,6 +26,7 @@
 #include <limits>
 #include <optional>
 #include <print>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -47,6 +48,7 @@
 #include <kanhe/core/cose.hpp>
 #include <kanhe/core/merkle.hpp>
 #include <kanhe/core/protocol/access.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/contracts.hpp>
@@ -1409,6 +1411,144 @@ void script_seeds(const Seeds& seeds) {
                 must(kanhe::protocol::encode_payload(st), "encode"));
 }
 
+/// Approvals (spec v0.20): a ledger where a delegation needs one of two
+/// people, one of whom approves in person with a hardware key, and the
+/// evidence of a record registered with that approval. Rules, guardian
+/// settings, the approval, its list, a submission, and the log entry go to
+/// the approval target; the entry and the bundle to the parser's.
+void approval_seeds(const Seeds& seeds) {
+    const crypto::openssl::Provider provider;
+    const auto hash = crypto::HashAlg::sha256;
+    auto org = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    auto log = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    auto clerk = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    auto chan = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    auto lee = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    auto token = must(crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519), "key");
+    ledger::ManualClock clock(1'791'244'800'000);
+    ledger::SeededEntropy entropy(3);
+    ledger::MemoryFileSystem fs;
+
+    protocol::Statement genesis;
+    genesis.issued_at = clock.now();
+    genesis.nonce = entropy.bytes<16>();
+    genesis.body = protocol::GenesisBody{hash, "Seed Org", org.public_key(), log.public_key()};
+    const auto signed_genesis =
+        must(protocol::sign_statement(org, provider, hash, genesis), "sign");
+    auto ledger =
+        must(ledger::Ledger::create(fs, clock, provider, signed_genesis.encoded), "create");
+    auto statement = [&](const protocol::Id& actor, std::optional<protocol::Id> delegation,
+                         protocol::Body body) {
+        protocol::Statement st;
+        st.ledger_id = ledger.id();
+        st.actor_id = actor;
+        st.delegation_id = std::move(delegation);
+        st.issued_at = clock.now();
+        st.nonce = entropy.bytes<16>();
+        st.body = std::move(body);
+        return st;
+    };
+    auto submit = [&](const crypto::Signer& signer, const protocol::Statement& st,
+                      std::span<const Bytes> approvals = {}) {
+        const auto signed_statement =
+            must(protocol::sign_statement(signer, provider, hash, st), "sign");
+        const auto id =
+            must(ledger.submit(signed_statement.encoded, approvals), "submit").statement_id;
+        clock.advance(1000);
+        return id;
+    };
+    auto person = [&](const crypto::openssl::KeyPair& key, const char* name) {
+        return submit(org, statement(ledger.id(), std::nullopt,
+                                     protocol::ActorRegisterBody{protocol::ActorKind::person, name,
+                                                                 key.public_key(), std::nullopt,
+                                                                 std::nullopt}));
+    };
+    const protocol::Id chan_id = person(chan, "Chan Tai Man");
+    const protocol::Id lee_id = person(lee, "Lee Ka Yan");
+    const protocol::Id clerk_id = person(clerk, "Wong Siu Ming");
+    const Bytes credential_id(32, 0x5a);
+    submit(org, statement(ledger.id(), std::nullopt,
+                          protocol::ActorSetPresenceBody{
+                              chan_id,
+                              {protocol::PresenceCredential{
+                                  "", credential_id, token.public_key(), std::string("token"),
+                                  protocol::PresenceMethod::hardware_key}}}));
+
+    protocol::ApprovalRule rule;
+    rule.needed = 1;
+    rule.approvers = {chan_id, lee_id};
+    std::ranges::sort(rule.approvers, [](const protocol::Id& a, const protocol::Id& b) {
+        return std::ranges::lexicographical_compare(a.bytes(), b.bytes());
+    });
+    rule.within = 7 * 86'400'000ULL;
+    seeds.write("approval_fuzz", "rule", must(protocol::encode_approval_rule(rule), "encode"));
+    protocol::ApprovalRule open = rule;
+    open.without_presence = true;
+    seeds.write("approval_fuzz", "rule-without-presence",
+                must(protocol::encode_approval_rule(open), "encode"));
+
+    protocol::Scope scope;
+    scope.statement_types = {protocol::StatementType::record_register};
+    scope.approvals = rule;
+    const protocol::Id grant = submit(
+        org, statement(ledger.id(), std::nullopt, protocol::DelegationGrantBody{clerk_id, scope}));
+
+    // The clerk's record, approved by Chan in person.
+    const auto record =
+        statement(clerk_id, grant,
+                  protocol::RecordRegisterBody{
+                      "example.org.po/1", Bytes(32, 0x42), 3, {}, std::nullopt, std::nullopt, {}});
+    const auto signed_record =
+        must(protocol::sign_statement(clerk, provider, hash, record), "sign");
+    protocol::Approval approval{ledger.id(), chan_id, signed_record.id, clock.now(), std::nullopt};
+    const auto chan_kid = must(protocol::key_id(provider, hash, chan.public_key()), "kid");
+    const Bytes challenge =
+        must(protocol::approval_challenge(provider, hash, approval, chan_kid), "challenge");
+    approval.presence =
+        protocol::PresenceProof{credential_id, {}, {}, must(token.sign(challenge), "sign")};
+    const auto signed_approval =
+        must(protocol::sign_approval(chan, provider, hash, approval), "sign");
+    seeds.write("approval_fuzz", "approval", signed_approval.encoded);
+    seeds.write("approval_fuzz", "approval-payload",
+                must(protocol::encode_approval_payload(approval), "encode"));
+    const std::vector<Bytes> approvals{signed_approval.encoded};
+    seeds.write("approval_fuzz", "list",
+                must(cbor::encode(protocol::approval_list_value(approvals)), "encode"));
+    seeds.write("approval_fuzz", "submission",
+                must(cbor::encode(cbor::Value::map(
+                         {{cbor::Value::integer(1), cbor::Value::bytes(signed_record.encoded)},
+                          {cbor::Value::integer(5), protocol::approval_list_value(approvals)}})),
+                     "encode"));
+    const auto registered = must(ledger.submit(signed_record.encoded, approvals), "submit");
+    clock.advance(1000);
+    const Bytes entry = must(ledger.entry(registered.index), "entry");
+    seeds.write("approval_fuzz", "log-entry", entry);
+    seeds.write("protocol_parse_fuzz", "log-entry-approvals", entry);
+
+    // Guardian settings: the two people guarding everything, or a list of
+    // types; and their removal.
+    const protocol::LedgerSetGuardiansBody guardians{rule, std::nullopt};
+    const auto setting = statement(ledger.id(), std::nullopt, guardians);
+    seeds.write("approval_fuzz", "guardian-setting",
+                must(protocol::encode_payload(setting), "encode"));
+    protocol::LedgerSetGuardiansBody listed{
+        rule, std::vector<protocol::StatementType>{protocol::StatementType::actor_register,
+                                                   protocol::StatementType::record_register}};
+    seeds.write(
+        "approval_fuzz", "guardian-setting-listed",
+        must(protocol::encode_payload(statement(ledger.id(), std::nullopt, listed)), "encode"));
+    seeds.write("approval_fuzz", "guardian-removal",
+                must(protocol::encode_payload(
+                         statement(ledger.id(), std::nullopt,
+                                   protocol::LedgerSetGuardiansBody{std::nullopt, std::nullopt})),
+                     "encode"));
+
+    must(ledger.checkpoint(log), "checkpoint");
+    const auto bundle = must(ledger.export_evidence(log, registered.statement_id), "export");
+    seeds.write("protocol_parse_fuzz", "bundle-approvals",
+                must(protocol::encode_bundle(bundle), "encode"));
+}
+
 /// A published record's file: one disclosed field, then none and untimed
 /// (a request to publish).
 void published_seeds(const Seeds& seeds) {
@@ -1725,6 +1865,7 @@ int main(int argc, char** argv) {
         claim_seeds(seeds);
         membership_seeds(seeds);
         script_seeds(seeds);
+        approval_seeds(seeds);
         form_seeds(seeds);
         calls_seeds(seeds);
         exchange_seeds(seeds);

@@ -1,6 +1,6 @@
 # The Kanhe protocol
 
-Revision v0.19 (draft). Wire protocol version 1.
+Revision v0.20 (draft). Wire protocol version 1.
 
 This document explains the protocol in prose. The normative definitions are:
 
@@ -14,6 +14,8 @@ The key words MUST, MUST NOT, SHOULD, and MAY are used as in RFC 2119.
 Bo, the language contracts are written in, has its own reference: [`bo.md`](bo.md).
 
 Records handed over as W3C Verifiable Credentials, which change nothing in the protocol, have a profile of their own: [`credentials.md`](credentials.md).
+
+**Changes in v0.20.** Control shared by several people. A delegation may require that the statements made under it be approved by k of up to 16 named actors within a time (scope key 10, an **approval rule**). An **approval** is the approver's own signature over the statement's id, in person unless the rule allows otherwise, under a content type and a presence challenge of its own (sections 2 and 7). Approvals travel beside the signed statement, in a submission and in its log entry (key 5), never inside it, so the signer signs once (section 5.1). Every rule in the signer's chain applies, and the signer counts as one approver when a rule names it. The organization, which signs without a delegation, may name **guardians** (statement type 9, `ledger-set-guardians`): people whose approvals its own statements then need, every statement by default, and always the rotations of its root and log keys, guardian settings, and statements about a guardian (section 5.2). A change of guardians needs k of the current guardians and k of the new ones; a guardian is never revoked below k; and while a rule names an actor, its key and presence credentials are changed only by itself or by the organization. The organization's leaf lists guardian settings (section 9). A bundle carries approvers as involved objects, and a report states every rule and approval and the guardians in effect (section 11). Approval files carry a statement between approvers (section 5.1), and a server may hold a statement until its approvals arrive (section 16). The wire protocol stays version 1: a log without the new key and type replays as before, and an earlier verifier refuses one with them. `state_rules_version` 7.
 
 **Changes in v0.19.** Rules both verifiers kept, or should have, written down; nothing new on the wire. The genesis statement keeps the rules every statement keeps, and its root and log keys differ (section 5). A record's own scripts and local sources are registered before the event that names them, and a statement that is not one of the record's own events is checked without the scripts and sources it names that the bundle does not hold (section 11, step 3). A time-stamp token's TSTInfo is version 1 with its accuracy in RFC 3161's ranges, and a token of an authority the verifier does not trust is checked for its signature alone (section 10.1). A log that broke these rules, which no ledger of this code writes, now fails to replay: `state_rules_version` 6.
 
@@ -47,7 +49,7 @@ A record's type is now its registrant's choice, with one generic lifecycle, and 
 2. [Encoding](#2-encoding)
 3. [Keys, algorithms, and identifiers](#3-keys-algorithms-and-identifiers)
 4. [Statements](#4-statements)
-5. [Ledger rules](#5-ledger-rules)
+5. [Ledger rules](#5-ledger-rules), [approvals](#51-approvals-v020), [guardians](#52-guardians-v020)
 6. [Records and private data](#6-records-and-private-data)
 7. [Proof of presence](#7-proof-of-presence)
 8. [The log](#8-the-log)
@@ -83,6 +85,8 @@ Two organizations exchange records through the same mechanism (section 12): each
 
 **Machine by default.** A signature shows only that a key was used. A statement counts as a person's action only if it carries proof of presence (section 7).
 
+**Shared control** (v0.20). A delegation may require that what is signed under it be approved by several named people, each in person, and the organization may name guardians, whose approvals its own statements then need, its key rotations always (sections 5.1 and 5.2).
+
 ## 2. Encoding
 
 All structures are **deterministic CBOR** (RFC 8949 section 4.2.1), restricted further:
@@ -109,6 +113,7 @@ Content types tell signed objects apart, so a signature on one kind can never be
 | `application/kanhe-checkpoint+cbor` | checkpoint | the log key |
 | `application/kanhe-cosignature+cbor` | cosignature of a checkpoint | a witness key |
 | `application/kanhe-state+cbor` | state commitment | the log key |
+| `application/kanhe-approval+cbor` | approval of a statement (v0.20, section 5.1) | the approver's key |
 
 ## 3. Keys, algorithms, and identifiers
 
@@ -163,6 +168,7 @@ Statement types:
 | 6 | delegation-revoke | delegation, reason |
 | 7 | actor-set-presence | person, presence credentials (at most 16) |
 | 8 | ledger-rotate-log-key | the new log key (v0.4) |
+| 9 | ledger-set-guardians | the guardians' approval rule, or null to remove them; the statement types they guard (v0.20; section 5.2) |
 | 16 | record-register | record type, field root, field count, attachments, public metadata, the record it supersedes (v0.10) |
 | 17 | record-endorse | record, role |
 | 18 | record-transition | record, from state, to state |
@@ -194,16 +200,18 @@ A ledger accepts a statement only if every rule below holds at its registration 
   - a person may replace their own presence credentials while proving presence with one already registered.
 
   In both, the proof MUST be user-verified (section 7).
-- A scope never covers genesis or ledger-rotate-log-key.
+- A scope never covers genesis, ledger-rotate-log-key, or ledger-set-guardians (v0.20).
 - Every delegation in the chain from the organization to the signer MUST be unrevoked and valid at `now`: from scope key 3 to scope key 4, both included, an absent key leaving that side open. Every grantor in the chain MUST be unrevoked. If any delegation in the chain requires presence (scope key 6), the statement MUST carry valid proof of presence.
 - A delegation may only narrow its grantor's scope:
   - statement types and record types are subsets of the grantor's;
   - the validity window lies inside the grantor's: each bound the grantor's has, the delegated one has too, and no wider;
   - "may delegate further" (scope key 5) must be set on the grantor's delegation;
-  - presence, once required, stays required.
+  - presence, once required, stays required;
+  - approval rules (scope key 10, v0.20) are not compared: every rule in the chain applies (section 5.1), so a delegated scope need not repeat its grantor's rule, and may have one of its own.
 - Chains have at most 16 delegations.
 - A scope may list contracts (scope key 7, v0.6). Calls and retires under it must then act on one of them, and a delegated scope's contracts are a subset of its grantor's (section 15).
 - A scope may list functions (scope key 8, v0.8): calls under it must name one of them. It may list request kinds (scope key 9, v0.8): calls under it must then be answers to requests of those kinds. A delegated scope's lists are subsets of its grantor's (section 15).
+- A scope may require approvals (scope key 10, v0.20): every statement made under the delegation, or under any delegation beneath it in a chain, needs the approvals of k of the actors the rule names (section 5.1).
 
 **Bodies**
 
@@ -212,15 +220,115 @@ A ledger accepts a statement only if every rule below holds at its registration 
   - An agent names a responsible actor, which must be a person. A device may name one too.
   - The organization actor cannot be revoked. Only the organization itself rotates its root key (actor-rotate-key on the ledger id).
   - Only people have presence credentials, and only people prove presence. A presence credential's key must not be the person's signing key, any actor's key, or a log key: it is a second key.
+  - While a rule names an actor as an approver, its key and presence credentials are changed only by itself or by the organization, and a guardian is revoked only by the organization, never below k (v0.20; sections 5.1 and 5.2).
 - **The log key.** Only the organization rotates it (ledger-rotate-log-key), without a delegation. The new key must not be weak, must not be an actor's key, and must never have been a log key of this ledger.
 - **Delegations.** Only the grantor or the organization may revoke a delegation. Revoking an actor or a delegation ends everything that depends on it, because authority is checked through the whole chain at every statement.
 - **Revoked objects** (v0.12). A revoked actor or delegation takes no statement about it: revoking it again, rotating a revoked actor's key or setting its presence credentials, granting a delegation to it, and registering an agent with it as the responsible person are refused.
 - **Records.** A registration's type must not begin with `kanhe.` unless it is one of the protocol's mechanism types (v0.9; section 6). Records follow their type's lifecycle (section 6). Transitions must start from the record's current state and be allowed by its type, so a record of the generic lifecycle takes none. Endorsement roles must be allowed by the type: any role under the generic lifecycle, none for a mechanism type. An actor endorses a record at most once per role. A revoked record accepts no further statements, except a registration that supersedes it.
 - **Versions** (v0.10). A registration that supersedes a record (section 6) is refused unless that record is a record of this ledger, neither of the two types is a mechanism type, the record was not superseded before, and the signer's scope covers that record's type as well as its own (the organization needs no scope). The record may be revoked.
-- **Scripts** (v0.18). A registration of `kanhe.script/1` is refused unless its signer is a person who proves presence, user-verified (section 7), whatever the signer's scope: an approval is a person's act.
+- **Scripts** (v0.18). A registration of `kanhe.script/1` is refused unless its signer is a person who proves presence, user-verified (section 7), whatever the signer's scope: approving a script is a person's act.
 - **Sources** (v0.18). A registration that names sources (key 7) is refused if it is of a mechanism type, and unless each source on this ledger (its ledger id is this ledger's) is a record of this ledger, of a generic type, neither revoked nor superseded at `now`. A source on another ledger is checked for its shape only.
 - **Contracts.** Deploys, calls, and retires follow the rules of section 15. A call is registered only if its contract, run on the call, accepts it. An answer (v0.8) answers an open request of its instance, at most once.
-- **Genesis** (v0.19). The log's first entry is the genesis statement, signed by its root key. It keeps the rules above that apply to it: its `issued at` is no later than its registration time plus 5 minutes, it carries no proof of presence (the organization never proves presence), and its keys are not weak. Its root key and its log key differ.
+- **Genesis** (v0.19). The log's first entry is the genesis statement, signed by its root key. It keeps the rules above that apply to it: its `issued at` is no later than its registration time plus 5 minutes, it carries no proof of presence (the organization never proves presence), and its keys are not weak. Its root key and its log key differ. Its log entry carries no approvals (v0.20).
+- **Approvals and guardians** (v0.20). The statement meets every approval rule that applies to it (its chain's delegations', and the organization's guardians'), with the approvals it carries (section 5.1). A ledger-set-guardians statement follows section 5.2.
+
+### 5.1 Approvals (v0.20)
+
+An **approval** is an actor's signed agreement to one statement that another actor signed. A delegation may require approvals of the statements made under it (scope key 10), and the organization's guardians approve the organization's own statements (section 5.2). An approval never changes the statement: the signer signs once, and the approvals travel beside the signed statement and are kept in its log entry.
+
+**The rule.** Scope key 10 is an `approval-rule`:
+
+| Key | Field | Notes |
+|---|---|---|
+| 1 | k | the approvals needed: 1 to 16 |
+| 2 | approvers | the actors who may approve: 1 to 16 actor ids, strictly ascending (bytewise), at least k |
+| 3 | within | 60,000 to 2,592,000,000 ms (1 minute to 30 days): the statement is registered at most this long after its `issued at` |
+| 4 | without presence | `true`, encoded only when true: approvals without proof of presence count too (a person's key alone, an agent's, a device's) |
+
+- **At the grant.** A delegation-grant is refused if its rule names an actor that is not a registered, unrevoked actor of this ledger, or names the organization, or, without key 4, names an actor that is not a person. The grantee may be among the approvers.
+- **Every rule in the chain applies.** A statement under a delegation must meet the rule of that delegation and of every delegation above it in the chain, as presence is required through the whole chain. A rule therefore binds the grantee and everyone the grantee delegates to: nobody sheds it by delegating. Rules are not narrowed (section 5): a delegated scope need not repeat its grantor's rule, and may have its own. A rule changes only when its delegation is revoked and a new one granted, each a statement under its signer's own rules.
+- Scope key 6 (presence) is about the signer, and key 10 about others. They combine freely.
+
+**An approval** is a COSE_Sign1 (section 2) by the approver's current key, with the protected header `{1: alg, 3: "application/kanhe-approval+cbor", 4: kid}` and an empty unprotected header, at most 24,576 bytes encoded. Its payload (`approval-payload` in the CDDL) holds:
+
+| Key | Field | Notes |
+|---|---|---|
+| 1 | ledger id | the ledger the statement is for |
+| 2 | approver | the approver's actor id |
+| 3 | statement | the approved statement's `statement_id` |
+| 4 | approved at | milliseconds since the Unix epoch, as claimed by the approver |
+| 5 | proof of presence | optional: the approver's (section 7) |
+
+An approval signs the statement's id: the hash of exactly the bytes its signer signed, so of its content, its signer and the key it signed with, its delegation, its issue time, its nonce, and the signer's own proof of presence. Every report, list, and screen names that one value, so an approver can compare it on two screens, and an approval cannot be moved to a re-signed variant. The id contains the ledger id and the signer's nonce, and a ledger registers a statement once, so an approval is good for one statement, on one ledger, once.
+
+**Where approvals travel.** A submission carries a statement's approvals in key 5, in any order (section 16). The log entry of a statement registered with approvals carries them in key 5 (section 8): the approvals the ledger accepted, strictly ascending by approver. Below, the approvals a statement **carries** are those of its submission when it is registered, and those of its log entry in replay. The statement and its id do not change as approvals arrive, so whoever holds the signed statement and enough approvals may submit it, until its window ends.
+
+**The rules that apply** to a statement S at its registration time `now` are, in this order:
+1. for each delegation in S's chain, the signer's own first and then each grantor's in turn, its rule, if its scope has key 10;
+2. if the organization signs S, guardians are in effect, and S is guarded: the guardians' rule (section 5.2);
+3. if S is a ledger-set-guardians statement whose body sets a rule: that rule, the new guardians'.
+
+Each is a rule of its own, even when two have the same content. A statement signed under the exceptions of section 5, with no delegation (an actor rotating its own key, a person replacing their own credentials), is under no delegation's rule.
+
+**Counting.** An approval **counts** for a rule if the rule names its approver and the approval carries a user-verified proof of presence (section 7: a passkey assertion with the user-verified flag, or a hardware key's signature), or, if the rule has key 4, whatever it carries. The **signer counts** for a rule if the rule names the signer and S carries a user-verified proof of presence, or, if the rule has key 4, by its signature alone. A rule is **met** when the approvals that count for it, with the signer if it counts, number at least k. An approval counts for every rule that names its approver: one person named in two rules fills one place in each.
+
+**What the ledger checks.** With the state as it was before S, at `now`, the ledger refuses S unless all of these hold:
+1. If no rule applies, S carries no approvals.
+2. S carries at most 32 approvals, no two by one approver, and none by S's own signer (who counts through S itself). In its log entry they are strictly ascending by approver (section 8).
+3. Each approval:
+   1. is at most 24,576 bytes, a tagged COSE_Sign1 in the profile of section 2 with the approval content type, and its payload is an `approval-payload`;
+   2. names this ledger, and S's statement id;
+   3. names as its approver a registered, unrevoked actor named by a rule that applies (never the organization, which no rule names);
+   4. is signed with the approver's current key: its `kid` and `alg` are that key's, and its signature verifies;
+   5. has an approved-at no earlier than S's `issued at` minus 5 minutes (300,000 ms), and no later than `now` plus 5 minutes;
+   6. carries a proof of presence only if its approver is a person, and then one that verifies for the approval's challenge (section 7) against the approver's current credentials;
+   7. counts for at least one rule that applies.
+4. For each rule that applies, `now` is no later than S's `issued at` plus the rule's `within`, and the rule is met.
+
+Times are compared as exact integers: no sum or difference may wrap. One approval that fails any of this refuses S, so nothing unchecked rides in the log. Replay applies the same checks at each entry's recorded registration time, with the state before that entry, so every verifier reaches the same answer.
+
+**Time.** The window runs from S's `issued at`, the signer's claim, which every approver signs over through the id, to its registration time, by the ledger's clock as for every rule. A statement prepared on 1 December under a 7-day rule is registered by 8 December or never. A signer who backdates only shortens its own window. A post-dated statement is bounded as any other (`issued at` at most 5 minutes after `now`), and tools SHOULD refuse to approve a statement issued more than 5 minutes ahead of the approver's own clock, so that nobody approves one unawares. Approved-at is the approver's claim, reported as such; it decides nothing beyond its bounds.
+
+**Checked when registered, not when given.** An approval is checked with the approver's key, credentials, and standing when the statement is registered. An approver revoked, whose key was rotated, or whose credential was removed after approving no longer counts: an approval signed with an old key fails check 3.4 and so refuses the statement, and a submitter leaves it out. A person who fears their key was stolen rotates it, and every approval made with the old key dies with it.
+
+**Protected approvers.** While an actor is named by the guardians' rule in effect, or by the rule of a delegation that is not revoked (whatever its validity window or chain), an actor-rotate-key or actor-set-presence statement about it is refused unless its signer is that actor itself or the organization. Otherwise an administrator whose delegation covers those types could give an approver a new key and passkey, and approve in their name. Revoking a delegation's approver stays open to whoever may revoke actors: it can only make the rule harder to meet, and the grantor can grant anew. A guardian's revocation is restricted further (section 5.2).
+
+**People in person, machines only where allowed.** Without key 4, every approval that counts is a person's, in person and user-verified: an approval guards something, and a touch alone, perhaps tricked, should not. With key 4, approvals without presence count too, which also lets the agents and devices the rule names approve (an AI reviewer, an automated compliance check); a report marks each such approval as not in person. The guardians' rule never has key 4. So an agent may prepare what people then approve: an agent's delegation with the rule "1 of the finance team" makes "the agent drafts, a person approves" a rule of the ledger.
+
+**Approval files.** An approval file (`approval-file` in the CDDL; extension `.kanheapproval`, at most 16 MiB) carries a statement between approvers who do not share a server, as exchange files carry consents (section 15). It holds:
+- key 2, the signed statement, and key 3, its ledger's hash, from which a reader computes the statement id;
+- key 4, the approvals gathered so far: 1 to 32, in any order, no approver twice (a tool that adds an approval by an approver already present replaces it);
+- key 5, the rest of its submission (section 16): a registration's sealed private data and files, or a call's consent bundles, so that the file can be submitted whole;
+- key 6, for a registration, every one of its fields as `[name, salt, value]`, in the order of its leaves (section 6), so that approvers see what the field root commits to;
+- key 7, a note for people, 1 to 1,000 bytes.
+
+A reader refuses a file of another format version or with any other key; whose statement does not decode or is a genesis; with an approval that does not decode, is not for that statement and its ledger, or repeats an approver; with fields for a statement that is not a registration, or fields that do not give its field root and field count; or with submission parts the statement does not take. Nothing in a file is relied on unchecked: tools check the statement and each approval against the ledger itself (its directory, or a mirror they verified), as the ledger will. A file with fields holds those values in clear, and tools SHOULD say so when they write one.
+
+### 5.2 Guardians (v0.20)
+
+The organization signs with its root key and without a delegation, so no scope reaches it. **Guardians** are people whose approvals the organization's own statements then need. A ledger-set-guardians statement (type 9, `ledger-set-guardians-body` in the CDDL) sets them:
+
+| Key | Field | Notes |
+|---|---|---|
+| 1 | guardians | an approval rule (section 5.1) naming them, or null to remove them |
+| 2 | guarded types | optional, only with a rule: the statement types they guard, strictly ascending, never genesis; absent: every statement |
+
+- **Who signs it.** Only the organization, without a delegation; no scope covers type 9 (section 5).
+- **The rule.** Its approvers are registered, unrevoked people of this ledger, and it has no key 4: every approval of a guardian's that counts is in person and user-verified. A setting with null is refused when no guardians are in effect, and a null with key 2 is refused. Key 2 may list any known statement type but genesis; listing one that is always guarded (below) changes nothing.
+- **In effect.** The guardians in effect for the entry at index i are those the last ledger-set-guardians statement below i set, or none if there is no such statement or it removed them. A setting takes effect from the next entry.
+- **What is guarded.** While guardians are in effect, a statement the organization signs is **guarded** if key 2 is absent, if key 2 lists its type, or, whatever key 2 says, if it is:
+  - an actor-rotate-key of the organization (its root key);
+  - a ledger-rotate-log-key;
+  - a ledger-set-guardians;
+  - an actor-rotate-key, actor-set-presence, or actor-revoke whose actor (body key 1) the guardians' rule names.
+
+  A guarded statement needs the guardians' approvals (section 5.1). The last case stops a stolen root key from giving k guardians new keys and passkeys and approving in their names. With key 2 absent, which is recommended, a stolen root key alone can neither register a record as the organization nor take the ledger over. Day-to-day work then belongs to delegated actors, whose statements the guardians do not guard.
+- **Changing guardians.** A setting is checked against the guardians in effect before it and against the rule it sets (section 5.1, the rules that apply): changing guardians needs k of the current guardians and k of the new ones, each set with its own k and its own `within`; the first setting needs k of the new ones; removing them, k of the current ones. A guardian in both sets approves once and counts in both. So a ledger never names guardians who cannot act: their own approvals show that they hold working keys and credentials. Such a statement may carry up to 32 approvals.
+- **Revoking a guardian.** An actor-revoke whose actor the guardians' rule in effect names is refused unless the organization signs it (it is then guarded, above), and refused if fewer than k of the actors that rule names would then be unrevoked. To retire guardians, set new ones first. A guardian's key and credentials are protected as every approver's (section 5.1): only the guardian, or the organization with the guardians' approvals, changes them. A guardian who fears their key is exposed rotates it themselves, in person (section 5); one who lost it gets a new key from the organization, approved by k guardians, who may be others.
+- **In the state.** The organization's leaf lists every guardian setting (section 9), as it lists every rotation of its root and log keys, and the organization is involved in every bundle (section 11): every complete bundle shows the guardians in effect, and none can be left out.
+- **Witnesses** follow key rotations by the root key's signature alone (section 10), and do not check guardians' approvals (section 17).
+- **Lockout.** If fewer than k guardians can ever approve again, the guarded statements can never be made again, and the remedy is a new ledger. Tools SHOULD refuse k equal to the number of guardians unless told otherwise, recommend at least one guardian more than k, and ask guardians to register a second passkey, or a hardware key kept apart.
+- **Recovery** of a lost root key by the guardians is not defined: witnesses learn the root key only from its own signatures.
 
 ## 6. Records and private data
 
@@ -314,13 +422,21 @@ This is weaker evidence than a passkey's touch, and depends on how the token is 
 
 A hardware key's proof counts as user-verified: the token signs only once its PIN is entered.
 
+**Approvals** (v0.20). An approver proves presence for exactly one approval (section 5.1) in the same way, over its own challenge
+
+```
+challenge = HASH("Kanhe approval v1" || kid || A)
+```
+
+where `kid` is the approval's COSE kid and `A` is the approval payload encoded without key 5. The checks above apply as written, for the approver's credential with the proof's credential id, with this challenge in place of the statement's. The context strings differ, so a touch for an approval is never one for a statement, nor the reverse. An approval counts as in person only if its proof is user-verified (section 5.1).
+
 **What presence defends against.** Presence defeats a stolen key file: the thief also needs the person's authenticator, in their hands. It does not defeat malware on the person's own machine, which can show a misleading page and ask for a touch. The reference implementation's passkeys use the relying party id of the page that made them: `localhost`, for the command line's one-time local page and a web console on one computer, or a company console's own host name, over HTTPS. Such a console is not a signing oracle: it computes each challenge from a statement that its signed-in user asked it to prepare, holds it for two minutes, and takes one approval of it; it never signs a challenge that a link or another site hands it. A compromised console serves its own page, so, as with local malware, presence does not defend against the server itself.
 
-Verifiers report how presence was proven. A statement without proof of presence is attributed to a machine, whoever signed it.
+Verifiers report how presence was proven. A statement without proof of presence is attributed to a machine, whoever signed it, and so is an approval without one (v0.20).
 
 ## 8. The log
 
-Each accepted statement becomes a **log entry**: `{1: id, 2: registered at, 3: the signed statement}`. Alternatively, key 4 replaces key 3 and holds a state commitment (section 9). The tree commits to the encoded log entries, in order, under the ledger's hash. Registration times never go back: each entry's is no earlier than the one before it, and a verifier refuses entries whose times do (v0.12).
+Each accepted statement becomes a **log entry**: `{1: id, 2: registered at, 3: the signed statement}`. Alternatively, key 4 replaces key 3 and holds a state commitment (section 9). A statement registered with approvals (v0.20, section 5.1) has key 5 too: the approvals the ledger accepted, 1 to 32, strictly ascending by approver (bytewise), each an approval as signed. Key 5 is present only with key 3, never empty, and never in the genesis entry. The tree commits to the encoded log entries, in order, under the ledger's hash, so a statement's approvals are witnessed with it, carried by every bundle that carries its entry, and never changed afterwards. The entry's id (key 1) is the statement's id, which approvals do not change. Registration times never go back: each entry's is no earlier than the one before it, and a verifier refuses entries whose times do (v0.12).
 
 A **checkpoint** is signed by the log key over `{1: ledger id, 2: hash, 3: tree size, 4: root, 5: timestamp}`. The tree size is at least 1, since genesis is always in the log.
 
@@ -349,7 +465,7 @@ state-leaf = [kind (actor 1, delegation 2, record 3, contract 4, instance 5), id
 ```
 
 A leaf's history lists every log index that created or changed the object:
-- actors: registration, key rotations, presence changes, revocation;
+- actors: registration, key rotations, presence changes, revocation; for the organization, also every log-key rotation (v0.4) and every guardian setting (v0.20), below. Approving changes no object: an approver's leaf does not list the statements it approved;
 - delegations: grant and revocation;
 - records: every statement about them, including the registration of the record that supersedes them (v0.10);
 - contracts: deploy and retire;
@@ -359,7 +475,7 @@ Each key has exactly one position, and leaf and node hashes are domain-separated
 
 When it checkpoints, the ledger first appends a **state commitment** as a log entry, unless the last entry already is one. The commitment is signed by the log key in effect at its index over `{1: ledger id, 2: hash, 3: tree size = its own index, 4: state root, 5: timestamp}`. Then the ledger signs a checkpoint that covers it.
 
-The organization's leaf lists every rotation of its root key and of the log key. The organization is involved in every bundle, so a complete bundle shows every rotation.
+The organization's leaf lists every rotation of its root key and of the log key, and every guardian setting (ledger-set-guardians, v0.20). The organization is involved in every bundle, so a complete bundle shows every rotation, and the guardians in effect. A guardian setting is in the organization's leaf only: the actors it names keep their leaves unchanged, as do the approvers a delegation's rule names.
 
 Being in the log, a commitment is witnessed like any entry and can never be withdrawn. Replaying the log MUST check every commitment against the replayed state. A false root is therefore a permanent, detectable fork, not a quiet lie.
 
@@ -374,6 +490,8 @@ A **cosign request** is `{1: signed checkpoint, 2: old size, 3: consistency proo
 3. the old size equals the size it last cosigned (otherwise it refuses, and the operator asks again from that size);
 4. the new size is not smaller;
 5. the RFC 9162 consistency proof (at most 65 hashes) shows the new tree extends the old one.
+
+A rotation's log entry may carry approvals (key 5, v0.20), when guardians guard the rotation (section 5.2). A witness accepts such an entry, with key 5 a list of 1 to 32 byte strings, and ignores the approvals in it: it follows a rotation by the root key's signature alone, and never checks the guardians' approvals, which every verifier's replay does (section 17).
 
 A **cosignature** is a COSE_Sign1 by the witness key over the same checkpoint payload bytes, with the cosignature content type. Its kid is the witness key's, under the hash of the ledger it cosigns. Asking again for the checkpoint cosigned last MAY be answered with a fresh cosignature of it, so a lost answer can be retried.
 
@@ -414,7 +532,7 @@ A ledger can also be witnessed by the witnesses of open transparency networks th
 An evidence bundle (`evidence-bundle`) holds:
 
 - the record id, or an instance's id (section 15);
-- log entries with their receipts, in ascending order, starting with genesis: the record's statements (with the registration that supersedes it, if any; not the record it supersedes) and every statement they depend on (signers' registrations and key rotations, delegation chains, referenced actors), and every rotation of the organization's keys below the checkpoint's size. For a claim (v0.14), also its source's statements (with the registration that superseded the source, if any) and theirs. For a record whose registration names local sources, and for events whose provenance names a script (v0.18), also those records' statements (with the registration that superseded a source, if any) and theirs. For an instance created by a call, also its ancestors' calls up to the one that created each next generation (section 15);
+- log entries with their receipts, in ascending order, starting with genesis: the record's statements (with the registration that supersedes it, if any; not the record it supersedes) and every statement they depend on (signers' registrations and key rotations, delegation chains, referenced actors), and every rotation of the organization's keys below the checkpoint's size. For a claim (v0.14), also its source's statements (with the registration that superseded the source, if any) and theirs. For a record whose registration names local sources, and for events whose provenance names a script (v0.18), also those records' statements (with the registration that superseded a source, if any) and theirs. From v0.20, also every guardian setting below the checkpoint's size, which the organization's history lists; the registration of every actor an included delegation's rule names, which replay checks at the grant; and the whole history of every approver and guardian that step 7 makes an involved object, with the statements it depends on. For an instance created by a call, also its ancestors' calls up to the one that created each next generation (section 15);
 - the signed checkpoint all receipts lead to, and witness cosignatures of it;
 - optional field disclosures and attachment openings (salts; the contents travel alongside);
 - state proofs for every involved object;
@@ -426,14 +544,14 @@ A verifier MUST:
 
 1. Take the ledger's identity, hash, and first keys from the genesis entry. If it expects a particular ledger, check the ledger id.
 2. Check every receipt's inclusion proof against the checkpoint (same size and root), with indices strictly ascending from 0.
-3. Replay the included statements under the ledger rules (section 5), at their registration times. This follows the organization's key rotations. A registration that supersedes a record the bundle does not hold (v0.10) is checked under every rule except those about that record: that record's own bundle shows the link. A claim's source (v0.14) has no such exception: a claim's bundle without its source fails. Nor have the record's own local sources and scripts (v0.18), which step 7 requires, and each of which MUST be registered before the event that names it (v0.19). Any other statement (a related object's, such as a source's own sources or its script, or one the record's statements depend on, such as a signer's registration) that names sources or a script the bundle does not hold is checked under every rule except those about them.
+3. Replay the included statements under the ledger rules (section 5), at their registration times. This follows the organization's key rotations. A registration that supersedes a record the bundle does not hold (v0.10) is checked under every rule except those about that record: that record's own bundle shows the link. A claim's source (v0.14) has no such exception: a claim's bundle without its source fails. Nor have the record's own local sources and scripts (v0.18), which step 7 requires, and each of which MUST be registered before the event that names it (v0.19). Any other statement (a related object's, such as a source's own sources or its script, or one the record's statements depend on, such as a signer's registration) that names sources or a script the bundle does not hold is checked under every rule except those about them. Each included statement's approvals (v0.20) are checked as the ledger checked them (section 5.1), with the guardians in effect at its index: an approval whose approver the bundle does not register fails the evidence, and so does a rule that names an actor the bundle does not register. The rule that protects approvers (section 5.1) is checked against the delegations the bundle holds: one it does not hold protects nobody in its replay.
 4. Verify the checkpoint and every receipt's signature with the log key in effect at the checkpoint's size, and each state commitment with the one in effect at its index. A bundle that leaves out a log key rotation fails here, since keys never repeat.
 5. Check disclosed fields against the record's field root and count, and the contents provided for opened attachments against their sizes and commitments: a content that does not match fails the evidence. A content given for an attachment the bundle does not open is reported as not provided (v0.12).
 6. Count cosignatures only by witnesses it trusts, each witness once, network witnesses' among them (step 8). A cosignature over another checkpoint, and one by a trusted witness that does not verify, fail the evidence; one by a witness it does not trust is counted and relied on for nothing (v0.12).
 7. If the last entry the checkpoint covers is a state commitment (included with its receipt):
    - check it as replay would;
    - verify every state proof against its root;
-   - for the record and each involved object, require a proof whose leaf equals that object's leaf in the replayed state. The involved objects are the record's **related objects**: for a claim (v0.14), its source; for a record whose registration names sources (v0.18), each local source; for an event of the record whose provenance names a script (v0.18), that script. Their statements count as events too, and bring in no further related objects. Then each event's signer, an agent signer's responsible person, and every delegation in the chain with its grantor; for an instance, also its contract. For an instance created by a call, its ancestors' included calls count as events too, and the ancestors themselves need no proof (section 15).
+   - for the record and each involved object, require a proof whose leaf equals that object's leaf in the replayed state. The involved objects are the record's **related objects**: for a claim (v0.14), its source; for a record whose registration names sources (v0.18), each local source; for an event of the record whose provenance names a script (v0.18), that script. Their statements count as events too, and bring in no further related objects. Then each event's signer, an agent signer's responsible person, and every delegation in the chain with its grantor; for an instance, also its contract. For an instance created by a call, its ancestors' included calls count as events too, and the ancestors themselves need no proof (section 15). From v0.20, also: the organization (which every event's signature or chain already involves); every actor that a guardian setting the bundle includes names; and the approver of every approval that an included entry carries, whether or not the entry is an event. So the histories of these approvers and guardians are included whole, and the approvers of the approvals in them are involved in turn: a revocation, rotation, or credential change before an approval was used cannot be left out.
 
    A missing or differing proof fails the evidence, and so do state proofs in a bundle that does not include that commitment (v0.12). Only then is the report **complete**: nothing, such as a later revocation, was left out.
 8. For each anchor (v0.11):
@@ -460,6 +578,8 @@ A verifier MUST:
 A report states:
 - who did what, when, and under whose authority;
 - for each event, whether a person proved presence and how, and any AI provenance;
+- for each event to which an approval rule applied (v0.20, section 5.1): each rule, in the order section 5.1 gives them (each delegation's in the chain, naming the delegation; the guardians'; the new guardians'), as k of its n approvers, named, within its `within`, and whether approvals without presence count; each approval, in the log entry's order: the approver's name and kind, how they proved presence and whether it was user-verified, or that they were not in person, the approved-at they claim, and the rules it counted for; and whether the signer counted, and for which rules. Who was asked and did not approve is not on the ledger, and a report says nothing of it;
+- the guardians in effect at the checkpoint (v0.20, section 5.2), or that there are none: each guardian's name, and whether revoked since; k and `within`; what they guard (every statement the organization signs, or the types key 2 lists with those always guarded); and since when (the setting's registration time). Then each guardian setting the bundle holds, in log order: when it was registered, the rule it set or that it removed the guardians, and its rules and approvals as for an event;
 - for a record, the record it supersedes, and the registration that superseded it, if any (by whom and when);
 - for a claim (v0.14): its condition in words (below), whether it holds, the subject, `as_of`, `until` and whether the checkpoint's time is past it, and its source's id, type, and status: revoked if it was revoked, else replaced if it was superseded, else live. The report's events are the claim's own;
 - the disclosed fields and attachment checks;
@@ -767,6 +887,8 @@ A **signer** describes who signed a statement: `{1: kind, ? 2: presence, ? 3: mo
 
 So a contract can require that a person approved in person, or that an agent's step is confirmed by a person.
 
+A call's approvals (v0.20) are checked by the ledger rules (section 5.1) and not shown to the contract: the input does not change, and a contract that needs several people's agreement counts it in its own state, each agreement a call of its own.
+
 **The output** is a deterministic CBOR array, written with `output_write`:
 - `[1, accept]` accepts the call. `accept` is `{1: state, ? 2: status, ? 3: parties, ? 4: events, ? 5: true, ? 6: children, ? 7: requests}`:
   - **state:** any CBOR value, at most 65,536 bytes encoded, kept by the home and given to the next call;
@@ -821,7 +943,7 @@ An output is well formed only if it is deterministic CBOR within the limits of s
 
   An executor keeps contact details in its own directory, keyed by ledger id. It keeps an outside system's response too, and puts in the answer only `HASH(salt || response)` under the home's hash, with a fresh 16-byte salt, as attachments do (section 6), so that it can disclose the response later, with proof. The ledger cannot check any of this; verifiers show what requests and answers carry.
 
-**Consents.** A party consents with a `kanhe.contract-consent/1` record on its own ledger (state given, which may become withdrawn), under its own delegations and with proof of presence if a person approved. Its metadata names the terms:
+**Consents.** A party consents with a `kanhe.contract-consent/1` record on its own ledger (state given, which may become withdrawn), under its own delegations and with proof of presence if a person approved. Those delegations may require approvals (v0.20, section 5.1), by the party's own people: the consent's bundle carries them, and the home and every verifier check them as part of it. Its metadata names the terms:
 - `ledger` (the home), `instance`, `function`, and `head`;
 - `arguments`: the hash, under the home's hash, of the encoded arguments;
 - `until`, when it lapses;
@@ -842,7 +964,7 @@ A call cites each consent as `[ledger, record, bundle, signer]`: the party's led
    - the record's registration was signed as the citation claims (kind, presence method, and model);
 4. refuse bundles that no citation pins, and citations without a bundle.
 
-The report shows each call: the function and arguments, the outcome (status and events), who called and who consented, under whose authority, whether a person proved presence, and any AI provenance. For a child, it shows the ancestors first, each with its depth and its calls up to the one that created the next generation.
+The report shows each call: the function and arguments, the outcome (status and events), who called and who consented, under whose authority, whether a person proved presence, and any AI provenance, and the rules and approvals of each call and of each consent's registration (v0.20), as section 11 states them for an event. For a child, it shows the ancestors first, each with its depth and its calls up to the one that created the next generation.
 
 **Requests in evidence** (v0.8). They need no state leaf of their own: they are derived by replay from the calls in the instance's history, and a complete bundle holds every one of those calls. So complete evidence proves every request the instance made and every answer it took, and that none is missing. The report shows, besides each call:
 - for each call, the requests it made: id, kind, params, deadline, and reply;
@@ -871,9 +993,9 @@ This section is informative. The reference implementation serves a ledger over H
 | Scope | Routes |
 |---|---|
 | none | `GET /healthz`, `GET /v1/checkpoint[?size=N]`, `GET /v1/consistency?old=&new=`, `GET /c/{token}` (a published record, below), `GET /m/{ledger}` (a membership, v0.16, below), and on a server with a credential key `GET /.well-known/did.json`, `GET /did.json`, `GET /status/{N}` ([`credentials.md`](credentials.md), section 8) |
-| read | `GET /metrics`, `/v1/status`, `/v1/entries?start=&count=`, `/v1/genesis`, `/v1/checkpoints`, `/v1/cosignatures`, `/v1/timestamps` (v0.11), `/v1/network-cosignatures` (v0.13), `/v1/inclusion?index=&size=`, `/v1/statements/{id}`, `/v1/receipts/{index}`, `/v1/state/{id}`, `/v1/evidence/{record}`, `/v1/vault/public-key`, `/v1/vault/records/{record}`, `/v1/vault/files/{record}`, `/v1/vault/files/{record}/{index}`, `/v1/contracts?start=&count=`, `/v1/contracts/{contract}`, `/v1/contracts/instances/{instance}`, `/v1/contracts/calls`, `/v1/contracts/calls/{call}`, `/v1/requests` (v0.8), `/v1/contracts/due`; on a server with the search index, `/v1/records`, `/v1/records/{id}`, `/v1/records/{id}/versions`, `/v1/instances`, `/v1/reports/records`, `/v1/reports/instances` |
-| submit | `POST /v1/statements`, `POST /v1/contracts/calls`, `PUT /v1/vault/files/{record}/{index}` |
-| admin | `POST /v1/checkpoint`, `POST /v1/cosignatures`, `POST /v1/timestamps` (v0.11), `POST /v1/network-cosignatures` (v0.13), `DELETE /v1/vault/files/{record}/{index}`, `GET`, `POST /v1/published`, `DELETE /v1/published/{token}` |
+| read | `GET /metrics`, `/v1/status`, `/v1/entries?start=&count=`, `/v1/genesis`, `/v1/checkpoints`, `/v1/cosignatures`, `/v1/timestamps` (v0.11), `/v1/network-cosignatures` (v0.13), `/v1/inclusion?index=&size=`, `/v1/statements/{id}`, `/v1/receipts/{index}`, `/v1/state/{id}`, `/v1/evidence/{record}`, `/v1/vault/public-key`, `/v1/vault/records/{record}`, `/v1/vault/files/{record}`, `/v1/vault/files/{record}/{index}`, `/v1/contracts?start=&count=`, `/v1/contracts/{contract}`, `/v1/contracts/instances/{instance}`, `/v1/contracts/calls`, `/v1/contracts/calls/{call}`, `/v1/requests` (v0.8), `/v1/contracts/due`, `/v1/approvals`, `/v1/approvals/{id}` (v0.20); on a server with the search index, `/v1/records`, `/v1/records/{id}`, `/v1/records/{id}/versions`, `/v1/instances`, `/v1/reports/records`, `/v1/reports/instances` |
+| submit | `POST /v1/statements`, `POST /v1/contracts/calls`, `PUT /v1/vault/files/{record}/{index}`, `POST /v1/approvals`, `POST /v1/approvals/{id}` (v0.20) |
+| admin | `POST /v1/checkpoint`, `POST /v1/cosignatures`, `DELETE /v1/approvals/{id}` (v0.20), `POST /v1/timestamps` (v0.11), `POST /v1/network-cosignatures` (v0.13), `DELETE /v1/vault/files/{record}/{index}`, `GET`, `POST /v1/published`, `DELETE /v1/published/{token}` |
 | peer | `POST /v1/access/requests`, `GET /v1/access/deliveries/{request}` (a delivery, or, v0.15, the bundle of the claim that answers a request for a condition), `POST /v1/access/receipts`, `POST /v1/witness/cosign`, `POST /v1/contracts/calls` and `GET /v1/contracts/instances/{instance}` (the instance's current parties), `GET /v1/contracts/calls`, `/v1/contracts/calls/{call}` (the calls that concern the peer), `POST /v1/contracts/consents`, `GET /v1/genesis` (the genesis entry, which the ledger id authenticates: a peer that witnesses the ledger follows its root and log keys from it) |
 | executor | `GET /v1/requests`, `GET /v1/contracts/instances/{instance}`, and `POST /v1/statements` for answers only (v0.8) |
 | none, on a public witness | `GET /v1/witness`, `POST /v1/witness/register`, `POST /v1/witness/cosign` (below) |
@@ -882,9 +1004,18 @@ This section is informative. The reference implementation serves a ledger over H
 
 **Clusters.** Several members can keep one ledger with Raft. Each group of statements is replicated as `{time, statements, sealed private data}` and applied by every member at that time, so their logs are identical. Checkpoints are signed by the leader and replicated as signed. The consent bundles a statement cites, and the calls a registrar holds, are replicated too, so a new leader carries on with them. A follower answers writes with 307 and the leader's API. What peers send to be kept beside the ledger, access requests and receipts, is not replicated: a cluster refuses them for now (501). Members authenticate their Raft messages with a shared secret. None of this changes the protocol: a cluster's log is one ledger's log.
 
-`POST /v1/statements` also takes `application/kanhe-submission+cbor`: `{1: signed statement, 2: sealed private data}`, a record's registration with its vault file. The server stores the file with the record, once: the same file again is accepted (a retry), a different one refused, so nobody can store other data for a record first. With `4: [[index, sealed file], ...]` (indexes ascending and distinct), the record's attached files come too, each sealed to the vault key like the vault file (HPKE `info` "Kanhe record file v1", the associated data the ledger id, the record id, and the attachment's name) and holding exactly the size the registration gives that attachment, at most 16 MiB: the server keeps each once, beside the vault file, and `GET /v1/vault/files/{record}` lists the indexes it keeps, `GET .../{index}` returns one, `PUT` keeps one later (once), `DELETE` removes one. The ledger still holds only the attachments' commitments: a reader opens a kept file with the vault key and checks it against the commitment with the salt in the vault file. For a contract call, the submission is `{1: signed statement, 3: [consent bundles]}`, one bundle per consent in the statement's order: the server checks every consent the call cites against its bundle, and the signer each citation claims (section 15), before registering it, and keeps the bundles. A statement that cites consents is refused without them.
+`POST /v1/statements` also takes `application/kanhe-submission+cbor`: `{1: signed statement, 2: sealed private data}`, a record's registration with its vault file. The server stores the file with the record, once: the same file again is accepted (a retry), a different one refused, so nobody can store other data for a record first. With `4: [[index, sealed file], ...]` (indexes ascending and distinct), the record's attached files come too, each sealed to the vault key like the vault file (HPKE `info` "Kanhe record file v1", the associated data the ledger id, the record id, and the attachment's name) and holding exactly the size the registration gives that attachment, at most 16 MiB: the server keeps each once, beside the vault file, and `GET /v1/vault/files/{record}` lists the indexes it keeps, `GET .../{index}` returns one, `PUT` keeps one later (once), `DELETE` removes one. The ledger still holds only the attachments' commitments: a reader opens a kept file with the vault key and checks it against the commitment with the salt in the vault file. For a contract call, the submission is `{1: signed statement, 3: [consent bundles]}`, one bundle per consent in the statement's order: the server checks every consent the call cites against its bundle, and the signer each citation claims (section 15), before registering it, and keeps the bundles. A statement that cites consents is refused without them. Any of these submissions, or `{1: signed statement, 5: approvals}` alone, may carry the statement's approvals (v0.20) in key 5, 1 to 32 in any order: the server registers the statement with them, sorted by approver, if they meet its rules (section 5.1). A statement whose rules need approvals is refused without them. `submission` in the CDDL gives every key.
 
-**Contracts.** A server with a registrar key records the calls that need consents (an actor of the home with a delegation for type 22 whose scope covers the contract):
+**Approvals** (v0.20). A server holds statements that wait for approvals, and registers each one the moment its rules are met, as the registrar does for consents (below). One person prepares; the others approve on their own machines, each checking the statement against the ledger itself (a mirror it verified, or the ledger's directory), never against what the server says:
+- `POST /v1/approvals` takes CBOR `{1: signed statement, ? 2: submission parts, ? 3: fields, ? 4: note}`, keys 2 to 4 as an approval file's keys 5 to 7 (section 5.1). The server checks the statement against every rule but its approvals, at its clock. If it needs no approvals (no rule applies, or its signer meets every rule), it registers it at once (201, as `POST /v1/statements` answers). Otherwise it holds it until the earliest end of its rules' windows, and answers 202 with JSON: `id`, `rules` (each with its source, the delegation's id or `guardians` or `new guardians`, its `k`, `approvers`, `within_ms`, and `without_presence`), `missing` (for each rule, how many more approvals it needs), and `lapses_at`.
+- `GET /v1/approvals[?approver=ACTOR&state=open|all&wait=S]` lists the held statements as JSON: each with its id, type, a summary of its body, its signer and `issued_at`, its rules, the approvals kept so far (approver, approved-at, how presence was proven, whether user-verified, the rules it counts for), `missing`, `lapses_at`, and the note. `approver` selects the statements that actor may approve; `state=all` adds those registered, lapsed, withdrawn, or dropped in the last 30 days, each with what became of it. With `wait=S` (at most 25 seconds) it is a long poll, as for requests.
+- `GET /v1/approvals/{id}` answers the approval file (section 5.1) for the held statement, with the approvals kept so far.
+- `POST /v1/approvals/{id}` takes one approval (COSE_Sign1). The server checks it as the ledger will (section 5.1, checks 3.1 to 3.7) at its clock, and keeps it: the same bytes again are a retry; another approval by an approver it keeps one of is refused (409). When the approvals it keeps meet every rule, the server registers the statement with every approval it keeps (201, with its log index); otherwise it answers 202 with `missing`.
+- `DELETE /v1/approvals/{id}` withdraws a held statement (204; 404 if none is held).
+
+A person who disagrees does nothing: silence is not on the ledger. A console MAY keep a decline beside a held statement, for the preparer (who and when); it goes nowhere else. A held statement is dropped when it lapses, when it is registered, and when it could no longer be (its signer revoked or its key rotated, a delegation in its chain revoked). An approval kept that stops verifying (its approver revoked, or its key or credential changed) is dropped and listed as dropped, so that its approver may approve again. A server holds at most 1,000 statements per ledger, each with its parts at most 1 MiB. Fields shown to approvers are kept only while the statement is held, then deleted. In a cluster, held statements and their approvals are replicated like the registrar's held calls, and a follower answers 307. Withdrawing at the server destroys no copies: whoever holds the signed statement and enough approvals can still register it until its window ends, and a signer who must be sure rotates its key.
+
+**Contracts.** A server with a registrar key records the calls that need consents (an actor of the home with a delegation for type 22 whose scope covers the contract; its chain SHOULD carry no approval rule, v0.20, since a registrar collects consents, not approvals, and the ledger refuses a call whose rules are not met):
 
 1. **Proposal.** `POST /v1/contracts/calls` proposes a call on an instance, from the home's submit tokens or from a peer whose ledger is one of the instance's current parties. For a part (v0.7), these are the part's own parties, not its parent's; a final instance, such as a parent a split ended, takes no proposals. The body is CBOR: `{1: instance, 2: head, 3: function, 4: arguments, ? 5: reference, ? 6: until}`. The server runs the contract on the call without consents, signed as the registrar:
    - it refuses the call if the contract rejects it (with the contract's reason), or if the ledger would (a call that creates parts on a retired contract or at depth 8, with the ledger's reason), or if the contract takes it as it is: the home's people sign such calls themselves, so the registrar never records a call on its own word;
@@ -958,7 +1089,7 @@ A server holds the log key to sign checkpoints, receipts, and evidence. Across a
   - inclusion: the entry is in the log the log key signed;
   - completeness: proven against the state commitment.
 
-  Presence shows that a person approved. Without it, an action is a machine's.
+  Presence shows that a person approved. Without it, an action is a machine's. Approvals (v0.20) show that the named others agreed, each by their own signature.
 - **What it does not prove alone.** A ledger's operator could show different histories to different parties. Witnesses detect this: verifiers SHOULD require cosignatures from witnesses they trust. The log key is the operator's single point of trust and SHOULD be kept in an HSM.
 - **Time.** Registration times come from the ledger's clock and are ordered. Issued-at times are claims by the signer, bounded only in the future direction. A trusted time-stamp authority's token (v0.11) bounds them from outside: what a stamped checkpoint covers existed by the authority's time, and a ledger that dates such an entry later fails verification. Without one, nothing outside the ledger bounds its times.
 - **Open witness networks** (v0.13).
@@ -975,8 +1106,20 @@ A server holds the log key to sign checkpoints, receipts, and evidence. Across a
 - **Keys.**
   - Actor keys can be rotated, and revocation cascades through delegation chains.
   - The log key and the organization root key can be rotated (v0.4), for instance to ML-DSA. A leaked old log key can still sign a different history that never rotated. Only witnesses that followed the rotation reject it, so verifiers SHOULD require cosignatures from trusted witnesses.
-  - A leaked root key can rotate both keys. Recovering from that needs action outside the ledger, such as a new ledger. Keep the root key in an HSM; threshold root keys are future work.
+  - A leaked root key can rotate both keys, unless guardians guard them (v0.20, below). Recovering from that needs action outside the ledger, such as a new ledger. Keep the root key in an HSM; threshold root keys are future work.
   - Algorithms are pluggable, and post-quantum signatures (ML-DSA) are supported now.
+- **Approvals and guardians** (v0.20).
+  - **What approvals prove:** that k named actors signed this exact statement's id, each in person unless the rule allowed otherwise, with keys and credentials that were current when it was registered. Each approval is attributable to its approver, as a statement is to its signer.
+  - **Approving blind.** An approver sees what their own tool decodes. A registration's fields are sealed unless the preparer shows them, checked against the field root. Malware on an approver's machine can show something else, as section 7 says of presence: tools decode the statement and compute its id themselves, and never rely on a server's summary.
+  - **One person, two actors** counts twice. The organization registers its people, and a report names every approver.
+  - **Approvers without credentials.** A person named by a rule without key 4 counts only with a user-verified proof, so tools SHOULD name only people who have presence credentials registered: a person who has none may be given their first by whoever holds their signing key and a delegation for actor-set-presence (section 5).
+  - **Rules add up.** Every rule in a chain applies, and a statement carries at most 32 approvals, so a chain whose rules cannot all be met with 32 approvals can never be used. Tools SHOULD say so before granting such a delegation.
+  - **Held statements** can be registered by anyone who holds them with enough approvals, until their window ends: the window bounds this, and rotating the signer's key ends it.
+  - **The root key and witnesses.** While guardians guard the root and log keys, a stolen root key alone makes no rotation that verifies: every verifier replays the log and finds the guardians' approvals missing. Witnesses follow rotations by the root key's signature alone (section 10), so whoever holds the root key and can have the log key in effect sign a checkpoint (the ledger's server, say) can still make a witness follow a rotation without the guardians' approvals; that witness then refuses the real ledger's later checkpoints. No evidence verifies with such a rotation, but the ledger needs another witness. Keep the root key in an HSM all the same: threshold root keys would close this.
+  - **Lockout.** If fewer than k guardians can ever approve again, the guarded statements cannot be made again (section 5.2). Guardians stop a stolen root key; they do not replace a lost one.
+  - **Censorship.** A ledger can refuse to register a statement whose approvals are complete, as it can refuse any. It cannot register one whose approvals are missing without every verifier seeing it.
+  - **Privacy.** Approvers' names are visible to whoever holds a bundle, like signers'. Who was asked and did not approve is not recorded.
+  - **Time.** Issued-at and approved-at are claims. The window is measured by the ledger's clock, which time-stamp authorities bound from outside (section 10.1).
 - **Relays.** A relay learns which ledgers write to which, when, and how much; never what (requests and answers are sealed), and nothing it says is trusted: the answer key that only the sender holds lets only the node that opened a request answer it, and the peer token inside the request still decides what the recipient's API does. A relay can drop or delay messages, which shows as a party not reached. Its signatures are checked against the log keys its witness follows, so only witnessed ledgers use it.
 - **Public witnesses.** A public witness learns the ledger id, the genesis entry (its organization's name and first keys), each checkpoint's size, root, and time, and the caller's address: how many entries a ledger has and when it grows, never its statements, records, fields, parties, or files. Checkpoints on a fixed schedule hide timing, not counts. Its state is bounded by its quotas (about 200 bytes per ledger). A witness that refuses a ledger, or disappears, cannot change what it cosigned; verifiers SHOULD trust more than one, run by different operators.
 - **Privacy.**
@@ -1042,9 +1185,12 @@ A server holds the log key to sign checkpoints, receipts, and evidence. Across a
 | `protocol-v0.15.json` | asking about a condition (v0.15, section 12): access request metadata of both forms, with their encodings, and refused metadata, each for the one rule it breaks; claims checked as answers to requests, accepted, or refused for the one rule of acceptance (items 3 and 4) they break, values equal as numbers or amounts but encoded otherwise among the refused |
 | `protocol-v0.16.json` | trust nodes (v0.16, sections 6 and 11): membership metadata with its encodings, and refused metadata, each for the one rule it breaks; where a membership stood at given times, from its registration, transitions, revocation, and `until`; replay of a trust node's log, with the ledger's refusals; evidence bundles carrying membership proofs, verified with their reports, or refused for the one rule of step 9 they break |
 | `protocol-v0.18.json` | scripts and sources (v0.18, sections 5, 6, and 11): script metadata, valid and refused, each for the one rule it breaks; where a source stood at a time; a script approved in person, and refused without presence, without user verification, and by the organization; statements naming a script, refused when it is missing, withdrawn, or not a script; registrations naming local sources and sources on another ledger, refused for a missing, revoked, superseded, or mechanism-type source, and on a mechanism type; source lists and provenance that do not parse (an empty list, a source twice, more than 64, a source of the wrong shape, a script id that is not an id); the state, and the log under a checkpoint. Evidence with scripts, sources, and source proofs comes from the reference implementation's tests, which both verifiers report alike |
+| `protocol-v0.20.json` | approvals and guardians (v0.20, sections 5.1, 5.2, 7, 8, 9, and 11): approval rules and guardian bodies, valid and refused, each for the one rule it breaks; approvals with their encodings and presence challenges (a passkey assertion and a hardware key, on a SHA-256 and an SM3 ledger); a log in which statements are accepted with k approvals and refused with k − 1, after their window, by an actor no rule names, by a revoked approver, after an approver's key rotation, for another statement or ledger, by one approver twice, out of order, by the signer, without presence or without user verification, and with approvals no rule asks for; approvals without presence, by an agent and a device, under key 4; the signer counting; rules through a chain of two delegations; guardians set (approved by the new ones), changed (by both sets), and removed, guarding every statement and a list; the statements always guarded; an administrator refused an approver's key change; a guardian's revocation refused below k; the state, in which the organization's leaf lists the guardian settings, and the log under a checkpoint |
 | `vm-v1.json` | contract execution (section 14): modules in and out of the profile, invocations with their outputs, traps, and fuel, and random integer programs, all from an independent reference interpreter (`tools/testvectors/wasm_ref.py`) |
 | `evidence-v1.json` | conformance (sections 11 and 15): record evidence and contract evidence forged from this specification independently of both verifiers, each with the options to verify it with, the verdict this specification decides (a failure names the section and step that decide it), and facts its report must show. A verifier passes it: `tests/verifiers/conformance.py` runs `kanhe verify` and `contract verify` on every case, and the Python verifier (`verifiers/python`) its own command line |
 | `bo-v1.json` | the Bo language ([`bo.md`](bo.md), section 18): contracts' sources in each language, their interfaces and bo-source bundles, the code `kanhe-bo` builds and its bounds (informative), calls with their outcomes (normative; answers to requests among them, with input key 9, and accepts with key 7), and sources that must not build with their errors' codes |
+
+From v0.20, `evidence-v1.json` also holds evidence with approvals that verifies, and evidence that fails for an approver's revocation left out (completeness), an approval of another statement, and a guarded root key rotation without its approvals (replay).
 
 Revision v0.9 retired `protocol-v0.5.json` (native assets), and regenerated `protocol-v0.1.json`, `protocol-v0.2.json`, and `protocol-v0.4.json` with the user type `example.document/1` in place of the removed built-in types; nothing else in them changed.
 

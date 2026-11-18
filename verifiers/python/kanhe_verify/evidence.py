@@ -538,7 +538,9 @@ def involved_objects(ledger: rules.Ledger, subject) -> dict:
     and every delegation in the chain with its grantor. A child's ancestors
     need no proof, but their included calls count as events. A claim's source
     (v0.14) is involved, and its statements count as events too, the
-    registration that superseded it included. Returns {id: state kind}."""
+    registration that superseded it included. From v0.20, also the
+    organization, every guardian, and every approver of an included entry.
+    Returns {id: state kind}."""
     events = event_indices(ledger, subject)
     if isinstance(subject, rules.Record):
         involved = {subject.id: statetree.RECORD}
@@ -562,6 +564,17 @@ def involved_objects(ledger: rules.Ledger, subject) -> dict:
         for delegation_id in applied.chain:
             involved[delegation_id] = statetree.DELEGATION
             involved[ledger.delegations[delegation_id].grantor] = statetree.ACTOR
+    # v0.20: the organization, whose leaf lists every guardian setting; every
+    # actor a guardian setting the bundle includes names; and the approver of
+    # every approval any included entry carries, event or not.
+    involved.setdefault(ledger.id, statetree.ACTOR)
+    for setting in ledger.guardian_settings:
+        if setting.body.rule is not None:
+            for guardian in setting.body.rule.approvers:
+                involved.setdefault(guardian, statetree.ACTOR)
+    for applied in ledger.applied.values():
+        for result in applied.approvals:
+            involved.setdefault(result.approval.approver, statetree.ACTOR)
     return involved
 
 

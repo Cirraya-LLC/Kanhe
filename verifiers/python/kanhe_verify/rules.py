@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Cirraya
 """Replaying statements under the ledger rules (spec section 5), with
+approvals and guardians (sections 5.1 and 5.2, v0.20, in approvals.py),
 records' lifecycles, claims, and memberships (section 6), proof of presence (section 7),
 the log key in effect (section 8), state histories (section 9), and
 contracts (section 15, in contracts.py).
@@ -16,12 +17,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import claims, contracts, cose, crypto, memberships, presence, protocol, scripts
-from .errors import VerifyError
+from . import approvals, claims, contracts, cose, crypto, memberships, presence, protocol, scripts
+from .errors import ApprovalError, VerifyError
 from .protocol import (ACTOR_REGISTER, ACTOR_REVOKE, ACTOR_ROTATE_KEY, ACTOR_SET_PRESENCE, AGENT,
                        CONTRACT_CALL, CONTRACT_DEPLOY, CONTRACT_RETIRE, DELEGATION_GRANT, DELEGATION_REVOKE,
-                       GENESIS, LEDGER_ROTATE_LOG_KEY, ORGANIZATION, PERSON, RECORD_ENDORSE, RECORD_REGISTER,
-                       RECORD_REVOKE, RECORD_STATEMENTS, RECORD_TRANSITION)
+                       GENESIS, LEDGER_ROTATE_LOG_KEY, LEDGER_SET_GUARDIANS, ORGANIZATION, PERSON, RECORD_ENDORSE,
+                       RECORD_REGISTER, RECORD_REVOKE, RECORD_STATEMENTS, RECORD_TRANSITION)
 
 # `issued at` may be at most this far after the registration time.
 MAX_FUTURE_MS = 5 * 60 * 1000
@@ -93,7 +94,8 @@ class Record:
 @dataclass
 class Applied:
     """A statement as replayed: who signed it, under which delegations,
-    with what proof of presence."""
+    with what proof of presence, and, from v0.20, the approval rules that
+    applied to it and the approvals it carried."""
     index: int
     registered_at: int
     statement: protocol.Statement
@@ -101,6 +103,16 @@ class Applied:
     signer: bytes
     chain: list  # delegation ids, the signer's own first
     presence: presence.PresenceResult | None
+    rules: list = field(default_factory=list)  # [approvals.RuleResult], in section 5.1's order
+    approvals: list = field(default_factory=list)  # [approvals.ApprovalResult], in the log entry's order
+
+
+@dataclass
+class GuardianSetting:
+    """A ledger-set-guardians statement as replayed (v0.20)."""
+    index: int
+    registered_at: int
+    body: protocol.GuardiansBody
 
 
 def fail(message: str):
@@ -136,6 +148,8 @@ class Ledger(contracts.ContractRules):
             fail("the genesis is issued more than 5 minutes after its registration")
         if statement.presence is not None:
             fail("the organization does not prove presence")
+        if entry.approvals is not None:
+            fail("the genesis entry carries no approvals")
         self.actors: dict[bytes, Actor] = {
             sid: Actor(id=sid, kind=ORGANIZATION, name=self.name, key=root, history=[0])}
         self.delegations: dict[bytes, Delegation] = {}
@@ -148,6 +162,7 @@ class Ledger(contracts.ContractRules):
             0: Applied(index=0, registered_at=entry.registered_at, statement=statement, id=sid, signer=sid,
                        chain=[], presence=None)}
         self.commitments: dict[int, protocol.TreeHead] = {}
+        self.guardian_settings: list[GuardianSetting] = []  # v0.20, in log order
         self._init_contracts()
 
     # -- keys -------------------------------------------------------------
@@ -198,6 +213,57 @@ class Ledger(contracts.ContractRules):
             fail("the new key is a presence key")
         if self._is_log_key(key):
             fail("the new key is (or was) a log key of the ledger")
+
+    # -- approvals and guardians (v0.20) ----------------------------------
+
+    def guardians_in_effect(self) -> GuardianSetting | None:
+        """The guardians in effect for the next entry (section 5.2): set by
+        the last guardian setting, unless it removed them."""
+        if not self.guardian_settings or self.guardian_settings[-1].body.rule is None:
+            return None
+        return self.guardian_settings[-1]
+
+    def is_guarded(self, statement: protocol.Statement, body: protocol.GuardiansBody) -> bool:
+        """Whether guardians of `body` guard a statement the organization
+        signs: every one without key 2, those of the types it lists, and
+        always the root and log key rotations, guardian settings, and the
+        key rotations, presence changes, and revocations of a guardian."""
+        kind, f = statement.type, statement.fields
+        if body.types is None or kind in body.types:
+            return True
+        if kind in (LEDGER_ROTATE_LOG_KEY, LEDGER_SET_GUARDIANS):
+            return True
+        if kind == ACTOR_ROTATE_KEY and f["actor"] == self.id:
+            return True
+        about = f["actor"] if kind in (ACTOR_ROTATE_KEY, ACTOR_SET_PRESENCE) else \
+            f["target"] if kind == ACTOR_REVOKE else None
+        return about is not None and about in body.rule.approvers
+
+    def is_protected(self, actor_id: bytes) -> bool:
+        """Whether a rule names the actor as an approver (section 5.1,
+        protected approvers): the guardians' in effect, or that of a
+        delegation the bundle holds that is not revoked, whatever its window
+        or chain."""
+        setting = self.guardians_in_effect()
+        if setting is not None and actor_id in setting.body.rule.approvers:
+            return True
+        return any(not d.revoked and d.scope.approval_rule is not None and actor_id in d.scope.approval_rule.approvers
+                   for d in self.delegations.values())
+
+    def _check_rule_approvers(self, rule: protocol.ApprovalRule, what: str):
+        """At the grant or setting: each approver a registered, unrevoked
+        actor of this ledger, not the organization, and, without key 4, a
+        person. One the bundle does not register fails the evidence."""
+        for approver in rule.approvers:
+            actor = self.actors.get(approver)
+            if actor is None:
+                raise ApprovalError("approver", f"{what} names an approver the bundle does not register")
+            if actor.kind == ORGANIZATION:
+                raise ApprovalError("approver", f"{what} names the organization as an approver")
+            if actor.revoked:
+                raise ApprovalError("approver", f"{what} names a revoked approver")
+            if not rule.without_presence and actor.kind != PERSON:
+                raise ApprovalError("approver", f"{what} names an approver that is not a person, without key 4")
 
     # -- entries ----------------------------------------------------------
 
@@ -266,6 +332,9 @@ class Ledger(contracts.ContractRules):
 
         record_types = self._record_types(statement)
         chain = self._authorize(statement, signer, proven, now, record_types, index)
+        # Approvals (v0.20): checked with the state before the statement.
+        applied_rules, applied_approvals = approvals.check(self, statement, sid, signer, chain, proven,
+                                                           entry.approvals, now)
 
         handler = {
             ACTOR_REGISTER: self._actor_register,
@@ -275,6 +344,7 @@ class Ledger(contracts.ContractRules):
             DELEGATION_REVOKE: self._delegation_revoke,
             ACTOR_SET_PRESENCE: self._actor_set_presence,
             LEDGER_ROTATE_LOG_KEY: self._ledger_rotate_log_key,
+            LEDGER_SET_GUARDIANS: self._ledger_set_guardians,
             RECORD_REGISTER: self._record_register,
             RECORD_ENDORSE: self._record_endorse,
             RECORD_TRANSITION: self._record_transition,
@@ -284,7 +354,8 @@ class Ledger(contracts.ContractRules):
             CONTRACT_RETIRE: self._contract_retire,
         }[statement.type]
         applied = Applied(index=index, registered_at=now, statement=statement, id=sid, signer=signer.id,
-                          chain=[d.id for d in chain], presence=proven)
+                          chain=[d.id for d in chain], presence=proven, rules=applied_rules,
+                          approvals=applied_approvals)
         handler(applied, signer, chain)
         self.statement_ids.add(sid)
         self.nonces.add((statement.actor, statement.nonce))
@@ -320,7 +391,7 @@ class Ledger(contracts.ContractRules):
             if statement.delegation is not None:
                 fail(f"the organization acts without a delegation (statement {index})")
             return []
-        if kind in (GENESIS, LEDGER_ROTATE_LOG_KEY):
+        if kind in (GENESIS, LEDGER_ROTATE_LOG_KEY, LEDGER_SET_GUARDIANS):
             fail(f"only the organization may submit a {protocol.STATEMENT_TYPE_NAMES[kind]} (statement {index})")
         own = kind in (ACTOR_ROTATE_KEY, ACTOR_SET_PRESENCE) and statement.fields["actor"] == signer.id
         if statement.delegation is None:
@@ -394,6 +465,8 @@ class Ledger(contracts.ContractRules):
         target = self._target_actor(f["actor"])
         if target.id == self.id and signer.id != self.id:
             fail("only the organization rotates its root key")
+        if self.is_protected(target.id) and signer.id not in (target.id, self.id):
+            raise ApprovalError("protected", "an approver's key is rotated only by the approver or the organization")
         self._check_new_actor_key(f["key"], target)
         if target.id == signer.id and signer.kind == PERSON and signer.credentials:
             if applied.presence is None or not applied.presence.user_verified:
@@ -407,6 +480,15 @@ class Ledger(contracts.ContractRules):
         target = self._target_actor(applied.statement.fields["target"])
         if target.id == self.id:
             fail("the organization actor cannot be revoked")
+        setting = self.guardians_in_effect()
+        if setting is not None and target.id in setting.body.rule.approvers:
+            if signer.id != self.id:
+                raise ApprovalError("guardian", "only the organization revokes a guardian")
+            rule = setting.body.rule
+            remaining = sum(1 for a in rule.approvers
+                            if a != target.id and a in self.actors and not self.actors[a].revoked)
+            if remaining < rule.k:
+                raise ApprovalError("below k", f"revoking this guardian would leave fewer than {rule.k} unrevoked")
         target.revoked = True
         target.history.append(applied.index)
 
@@ -414,8 +496,12 @@ class Ledger(contracts.ContractRules):
         f = applied.statement.fields
         grantee = self._target_actor(f["grantee"])
         scope: protocol.Scope = f["scope"]
+        if LEDGER_SET_GUARDIANS in scope.types:
+            raise ApprovalError("scope", "a scope never covers ledger-set-guardians")
         if GENESIS in scope.types or LEDGER_ROTATE_LOG_KEY in scope.types:
             fail("a scope never covers genesis or ledger-rotate-log-key")
+        if scope.approval_rule is not None:
+            self._check_rule_approvers(scope.approval_rule, "a delegation's approval rule")
         parent = None
         if signer.kind != ORGANIZATION:
             parent_delegation = chain[0]
@@ -459,6 +545,9 @@ class Ledger(contracts.ContractRules):
         person = self._target_actor(f["actor"])
         if person.kind != PERSON:
             fail("only people have presence credentials")
+        if self.is_protected(person.id) and signer.id not in (person.id, self.id):
+            raise ApprovalError("protected", "an approver's presence credentials are changed only by the approver "
+                                             "or the organization")
         for credential in f["credentials"]:
             key = credential.key
             if crypto.is_weak(key):
@@ -486,6 +575,23 @@ class Ledger(contracts.ContractRules):
         if self._is_log_key(key):
             fail("the new log key was a log key of this ledger before")
         self.log_keys.append((applied.index, key))
+        self.actors[self.id].history.append(applied.index)
+
+    def _ledger_set_guardians(self, applied: Applied, signer: Actor, chain):
+        """Section 5.2 (v0.20): only the organization; the body's rules; null
+        only while guardians are in effect; the guardians registered,
+        unrevoked people. Listed in the organization's leaf only."""
+        body: protocol.GuardiansBody = applied.statement.fields["guardians"]
+        if signer.id != self.id:
+            fail("only the organization sets guardians")
+        approvals.check_guardians_body(body)
+        if body.rule is None:
+            if self.guardians_in_effect() is None:
+                raise ApprovalError("no guardians", "a setting removes guardians, but none are in effect")
+        else:
+            self._check_rule_approvers(body.rule, "the guardians' rule")
+        self.guardian_settings.append(GuardianSetting(index=applied.index, registered_at=applied.registered_at,
+                                                      body=body))
         self.actors[self.id].history.append(applied.index)
 
     def _record(self, record_id: bytes) -> Record:

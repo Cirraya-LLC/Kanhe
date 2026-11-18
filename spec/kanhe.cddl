@@ -1,7 +1,7 @@
 ; SPDX-License-Identifier: Apache-2.0
 ; Copyright 2026 Cirraya
 ;
-; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.19 (draft); the
+; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.20 (draft); the
 ; wire protocol version (statement key 0) is 1.
 ;
 ; Revision history:
@@ -79,6 +79,11 @@
 ;   v0.19 no structure changes: rules written down (genesis, the order of a
 ;         record's scripts and sources, time-stamp tokens' version and
 ;         accuracy). Earlier objects remain valid where they kept them.
+;   v0.20 approvals and guardians: approval rules (scope key 10), approvals
+;         (approval-payload, content type application/kanhe-approval+cbor)
+;         carried by a submission (key 5) and kept in the log entry (key 5),
+;         ledger-set-guardians (statement type 9), approval files, and the
+;         submission written down. Earlier objects remain valid.
 ;
 ; Every structure is encoded as deterministic CBOR (RFC 8949 section 4.2.1) in
 ; the Kanhe profile: no floats, no indefinite lengths, no duplicate keys.
@@ -140,6 +145,7 @@ statement-type = &(
   delegation-revoke: 6,
   actor-set-presence: 7,
   ledger-rotate-log-key: 8,
+  ledger-set-guardians: 9,     ; v0.20
   record-register: 16,
   record-endorse: 17,
   record-transition: 18,
@@ -154,9 +160,9 @@ statement-type = &(
 statement-body = genesis-body / actor-register-body / actor-rotate-key-body /
                  actor-revoke-body / delegation-grant-body / delegation-revoke-body /
                  actor-set-presence-body / ledger-rotate-log-key-body /
-                 record-register-body / record-endorse-body / record-transition-body /
-                 record-revoke-body / contract-deploy-body / contract-call-body /
-                 contract-retire-body
+                 ledger-set-guardians-body / record-register-body /
+                 record-endorse-body / record-transition-body / record-revoke-body /
+                 contract-deploy-body / contract-call-body / contract-retire-body
 
 ; Genesis creates the ledger. It is signed by the organization root key, and
 ;   ledger_id = statement_id of the genesis statement.
@@ -207,6 +213,29 @@ ledger-rotate-log-key-body = {
   1 => public-key,             ; the new log key
 }
 
+; Sets the organization's guardians (v0.20; spec section 5.2): people whose
+; approvals the organization's own statements need. Only the organization
+; signs it, without a delegation (no scope may name type 9). The rule's
+; approvers are registered, unrevoked people of this ledger, and it has no
+; key 4. The guardians in effect for the entry at index i are those the
+; last setting below i set (none if it removed them). While guardians are
+; in effect, a statement the organization signs is guarded if key 2 is
+; absent or lists its type, and always if it rotates the root key
+; (actor-rotate-key of the organization), rotates the log key, sets
+; guardians, or rotates the key of, sets the presence credentials of, or
+; revokes a guardian. A setting needs the approvals of k of the guardians
+; in effect (if any) and of k of the new ones (if it sets a rule); null is
+; refused when no guardians are in effect. A guardian is revoked only by
+; the organization, and never so that fewer than k of the actors the rule
+; names stay unrevoked. The setting is listed in the organization's state
+; leaf.
+ledger-set-guardians-body = {
+  1 => approval-rule / null,   ; the guardians; null removes them
+  ? 2 => [+ statement-type],   ; the types they guard, strictly ascending,
+                               ; never genesis; absent: every statement.
+                               ; Only with a rule.
+}
+
 actor-revoke-body = {
   1 => id,                     ; actor
   ? 2 => tstr,                 ; reason
@@ -220,7 +249,8 @@ delegation-grant-body = {
 ; organization to an actor has at most 16 delegations.
 scope = {
   1 => [+ statement-type],     ; statement types the grantee may submit, strictly
-                               ; ascending; never genesis or ledger-rotate-log-key
+                               ; ascending; never genesis, ledger-rotate-log-key,
+                               ; or ledger-set-guardians (v0.20)
   ? 2 => [+ tstr],             ; record types, non-empty, strictly ascending in
                                ; the bytewise order of their UTF-8; absent: any
   ? 3 => timestamp,            ; not before
@@ -239,11 +269,15 @@ scope = {
   ? 9 => [+ request-kind],     ; request kinds (v0.8): contract calls must be
                                ; answers to requests of these kinds; absent
                                ; means any call.
+  ? 10 => approval-rule,       ; v0.20: statements under it, and under every
+                               ; delegation beneath it, need these approvals
+                               ; (spec section 5.1)
 }
 ; Keys 7 to 9 are strictly ascending (ids bytewise, text by its UTF-8
 ; bytes). They restrict contract calls only (key 7 retires too). When the
 ; grantor's scope has one of them, a delegated scope must have it too, and
-; list a subset of the grantor's.
+; list a subset of the grantor's. Key 10 is not narrowed: every rule in the
+; chain applies, so a delegated scope need not repeat its grantor's.
 
 ; Proof of human presence (machine by default: a statement without it shows
 ; only that the signer's key was used). A person registers credentials:
@@ -309,6 +343,59 @@ presence-proof = {
   ),                           ; both for WebAuthn, neither for hardware keys
   4 => bstr,                   ; signature, 1-8192 bytes
 }
+
+; Approvals (v0.20; spec section 5.1): others' signed agreement to a
+; statement, which a delegation's rule (scope key 10) or the organization's
+; guardians (ledger-set-guardians) require.
+;
+; The rule. At the grant (or the guardian setting) each approver is a
+; registered, unrevoked actor of this ledger, not the organization, and,
+; without key 4, a person. The rules that apply to a statement, in this
+; order: each delegation's in the signer's chain (its own first); the
+; guardians' if the organization signs it and it is guarded; for a guardian
+; setting that sets a rule, that rule.
+approval-rule = {
+  1 => 1..16,                  ; k: the approvals needed
+  2 => [1*16 id],              ; the approvers: actors of this ledger,
+                               ; strictly ascending (bytewise), at least k
+  3 => 60000..2592000000,      ; within (ms): the statement is registered at
+                               ; most this long after its issued_at (1 minute
+                               ; to 30 days)
+  ? 4 => true,                 ; approvals without presence count too; encoded
+                               ; only when true; never in the guardians' rule
+}
+
+; An approval is a COSE_Sign1 by the approver's current key with protected
+; header
+;   { 1: alg, 3: "application/kanhe-approval+cbor", 4: kid }
+; and an empty unprotected header, at most 24,576 bytes encoded. It is good
+; for one statement on one ledger, once: the statement_id holds the ledger
+; id and the signer's nonce.
+approval-payload = {
+  1 => id,                     ; the ledger
+  2 => id,                     ; the approver, an actor of that ledger
+  3 => id,                     ; the statement approved: its statement_id
+  4 => timestamp,              ; approved at, as the approver claims: from
+                               ; issued_at - 300,000 to registration + 300,000
+  ? 5 => presence-proof,       ; the approver's (a person's only)
+}
+; Its proof of presence's challenge is
+;   HASH("Kanhe approval v1" || kid || A)
+; where HASH is the ledger hash, kid the approval's COSE kid (32 bytes), and
+; A the approval payload encoded without key 5; the proof is checked against
+; the approver's credentials as a statement's is against its signer's.
+;
+; Counting. An approval counts for a rule that names its approver if its
+; proof is user-verified (a passkey with the user-verified flag, or a
+; hardware key), or, under key 4, whatever it carries. The signer counts
+; for a rule that names it if its statement's proof is user-verified, or,
+; under key 4, by its signature. A statement is registered only if, at its
+; registration time and with the state before it: it carries no approvals
+; when no rule applies; at most 32, no approver twice, none by its signer;
+; each approval verifies as above, names this ledger and the statement,
+; is by an unrevoked actor a rule that applies names, and counts for at
+; least one of them; and each rule's window holds (registration <= issued_at
+; + within) and k count (the signer included).
 
 delegation-revoke-body = {
   1 => id,                     ; delegation (statement_id of its grant)
@@ -502,12 +589,17 @@ tool-pin = [name: tstr, digest: bstr]
 
 ; A log entry holds a statement, or (key 4 instead of 3) a state commitment
 ; the ledger appended when checkpointing. Exactly one of 3 and 4 is present.
+; Key 5 (v0.20) is present only with key 3, never in the genesis entry.
 log-entry = {
   1 => id,                     ; statement_id: HASH(Sig_structure) of the
                                ; statement or of the state commitment
   2 => timestamp,              ; registered_at, by the ledger clock
   ? 3 => bstr,                 ; the signed statement (COSE_Sign1) as submitted
   ? 4 => bstr,                 ; a signed state commitment (COSE_Sign1)
+  ? 5 => [1*32 bstr],          ; v0.20: the statement's approvals (COSE_Sign1
+                               ; over approval-payload) the ledger accepted,
+                               ; strictly ascending by approver (payload key
+                               ; 2, bytewise)
 }
 
 ; A state commitment is a COSE_Sign1 by the log key in effect at its index
@@ -562,7 +654,9 @@ checkpoint-payload = {
 ;      tree the witness last cosigned (empty from size 0; equal sizes need
 ;      equal roots).
 ; Since state commitments are log entries, consistency also covers them: a
-; ledger cannot show two states for one history.
+; ledger cannot show two states for one history. A rotation's entry may
+; carry approvals (log-entry key 5, v0.20): the witness accepts it and
+; ignores them, following the rotation by the root key's signature alone.
 cosign-request = {
   1 => bstr,                   ; the signed checkpoint (COSE_Sign1)
   2 => uint,                   ; old size
@@ -602,8 +696,9 @@ inclusion-proof = [
 ;   2. checks each entry's receipt proof against the checkpoint (same tree
 ;      size and root), with entries strictly ascending from index 0;
 ;   3. replays the included statements under the ledger rules, among them
-;      every rotation of the organization's keys below the checkpoint's size
-;      (the bundle must carry them all);
+;      every rotation of the organization's keys and every guardian setting
+;      (v0.20) below the checkpoint's size (the bundle must carry them all),
+;      with each entry's approvals;
 ;   4. verifies the checkpoint and every receipt's signature with the log key
 ;      in effect at the checkpoint's size, and each state commitment with the
 ;      one in effect at its index;
@@ -619,7 +714,11 @@ inclusion-proof = [
 ;      its grantor; for an instance, its contract; for a child, the events
 ;      of its ancestors' included calls too, but no ancestor itself)
 ;      requires a proof whose leaf equals that object's leaf in the replayed
-;      state. Then nothing was omitted: the report is complete.
+;      state. From v0.20 the involved objects also include the
+;      organization, every actor a guardian setting in the bundle names, and
+;      the approver of every approval any included entry carries (whose
+;      histories are then included whole, and the approvers in them in
+;      turn). Then nothing was omitted: the report is complete.
 ;      Without that commitment, a bundle cannot rule out omissions (such as
 ;      a later revocation).
 
@@ -633,8 +732,10 @@ inclusion-proof = [
 ; commitment: for actors registration, key rotations, passkey changes, and
 ; revocation; for delegations grant and revocation; for records every
 ; statement about them. The organization's leaf is [1, ledger_id, [0, ...]],
-; with every rotation of its root key and of the log key (v0.4), so a
-; complete bundle shows them all.
+; with every rotation of its root key and of the log key (v0.4) and every
+; guardian setting (v0.20), so a complete bundle shows them all. Approving
+; changes no leaf, and a guardian setting is in the organization's leaf
+; only.
 ; Contracts list their deploy and retire (v0.6); instances their creation
 ; and every call. A child (v0.7) starts with the call that created it, which
 ; its parent's history lists too.
@@ -1002,4 +1103,58 @@ exchange-file = {
   9 => bstr,                   ; evidence, as above
   ? 10 => [1*16 bstr .size 32],
   ? 11 => tstr,                ; a note for people, 1-1000 bytes
+}
+
+; ---------------------------------------------------------------------------
+; Submissions and approval files (v0.20)
+; ---------------------------------------------------------------------------
+
+; What POST /v1/statements takes as application/kanhe-submission+cbor (spec
+; section 16, informative): a record's registration with its vault file
+; (key 2) and, optionally, its attached files (key 4); or a contract call
+; with one consent bundle per consent it cites, in its order (key 3); and,
+; with either or alone, the statement's approvals (key 5, v0.20).
+submission = {
+  1 => bstr,                   ; the signed statement (COSE_Sign1)
+  submission-part-entries,
+  ? 5 => [1*32 bstr],          ; v0.20: its approvals, in any order; the
+                               ; ledger keeps them sorted (log-entry key 5)
+}
+submission-part-entries = (
+  ? 2 => bstr,                 ; sealed private data: the record's vault file
+  ? 3 => [1*16 bstr],          ; consent evidence bundles, in the call's order
+  ? 4 => [+ sealed-file],      ; attached files, indexes strictly ascending;
+                               ; only with key 2
+)
+; Key 3 is never with key 2 or key 4.
+sealed-file = [
+  index: uint,                 ; the attachment's index in the registration
+  sealed: bstr,                ; its content (exactly the attachment's size,
+                               ; at most 16 MiB) sealed to the vault key
+]
+; The parts of a submission besides the statement and its approvals, as an
+; approval file carries them: at least one key.
+submission-parts = { submission-part-entries }
+
+; An approval file (.kanheapproval, v0.20; spec section 5.1), at most 16 MiB:
+; a statement carried between approvers who share no server. Nothing in it
+; is relied on unchecked: tools check the statement and each approval
+; against the ledger itself, as the ledger will. A reader refuses another
+; format version, any other key, a statement that does not decode or is a
+; genesis, an approval that does not decode, is not for that statement and
+; its ledger, or repeats an approver, fields for a statement that is not a
+; registration or that do not give its field root and field count, and
+; submission parts the statement does not take.
+approval-file = {
+  1 => 1,                      ; format version
+  2 => bstr,                   ; the signed statement (COSE_Sign1)
+  3 => -16 / -65538,           ; the ledger's hash (SHA-256 or SM3), to compute
+                               ; the statement id
+  ? 4 => [1*32 bstr],          ; the approvals gathered so far, in any order,
+                               ; no approver twice
+  ? 5 => bstr .cbor submission-parts, ; the rest of the submission, so that the
+                               ; file can be submitted whole
+  ? 6 => [+ record-field],     ; a registration's fields, every one, in the
+                               ; order of their leaves: shown to approvers
+  ? 7 => tstr,                 ; a note for people, 1-1000 bytes
 }
