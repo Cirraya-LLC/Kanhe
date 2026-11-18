@@ -113,10 +113,10 @@ async function approveWaiting(page, what) {
     // Chan, Lee, and Wong register passkeys in their own browsers; Alice
     // approves each. What Wong signs needs 2 of Chan and Lee.
     const others = {};
+    await a.getByRole("link", { name: "People" }).click();
+    await a.getByRole("heading", { name: "People", level: 1 }).waitFor();
     for (const name of ["Chan Tai Man", "Lee Ka Yan", "Wong Siu Ming"]) {
       current = alice;
-      await a.getByRole("link", { name: "People" }).click();
-      await a.getByRole("heading", { name: "People", level: 1 }).waitFor();
       await a.getByLabel("Name", { exact: true }).fill(name);
       await a.getByRole("button", { name: "Make an invitation link" }).click();
       const link = await a.getByLabel(`The invitation for ${name}:`).inputValue();
@@ -145,9 +145,12 @@ async function approveWaiting(page, what) {
         await confirm(a, what);
       }
       await a.getByRole("heading", { name: "Done" }).waitFor();
+      // The address is still #/people: the link would not draw the screen
+      // again, the button does.
+      await a.getByRole("button", { name: "People" }).click();
+      await a.getByRole("heading", { name: "People", level: 1 }).waitFor();
     }
     // The People screen says who approves for whom.
-    await a.getByRole("link", { name: "People" }).click();
     // Approvers are listed as the rule keeps them, by their ids.
     const both = "(Chan Tai Man, Lee Ka Yan|Lee Ka Yan, Chan Tai Man)";
     await a.getByRole("cell", { name: new RegExp(`needs approval: 2 of ${both}, within 7 days`) }).waitFor();
@@ -211,7 +214,7 @@ async function approveWaiting(page, what) {
     await a.getByText("No guardians: the top key signs alone.").waitFor();
     await a.getByText(/If fewer of them than must approve can ever approve again/).waitFor();
     for (const name of ["Alice", "Chan Tai Man", "Lee Ka Yan"]) {
-      await a.getByLabel(new RegExp(`^${name} \\(`)).check();
+      await a.getByLabel(new RegExp(`^\\s*${name} \\(`)).check();
     }
     await a.getByRole("button", { name: "Prepare" }).click();
     await confirm(a, "Set the organization's guardians", "Confirm and send for approval");
