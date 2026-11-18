@@ -10,6 +10,8 @@
 //      readings are an error;
 //   3. numbers joined with the words after or around them: a multiplier,
 //      a unit, a currency on either side.
+// A number may also be followed directly by the word that counts approvals
+// (2人批核), which stays a word of its own after the number.
 // Nothing depends on addresses, the locale, or unordered iteration.
 
 #include <algorithm>
@@ -75,6 +77,12 @@ struct Lexicon::Impl {
     /// One-word spellings of units, time units, and currencies: what may
     /// follow a number directly (2TB, 30日, 500萬港元).
     std::vector<const Entry*> measures;
+    /// One-word spellings of the word that counts approvals, which may
+    /// follow a number directly too (2人批核), as a word of its own.
+    std::vector<const Entry*> counters;
+    /// The keyword `by`, which the prefix `requires` joins (須由), in a set
+    /// of the current official packs (earlier releases read 須由 as a name).
+    const Concept* requires_by = nullptr;
     std::map<std::string, std::uint64_t, std::less<>> multipliers;
     std::map<char32_t, char> punctuation;
     std::vector<Prefix> prefixes;
@@ -90,6 +98,10 @@ using Entry = Lexicon::Impl::Entry;
 using Attach = Lexicon::Impl::Attach;
 
 constexpr std::size_t npos = std::string_view::npos;
+
+bool is_counter(const Concept* c) noexcept {
+    return c->id == "cond.approval";
+}
 
 bool is_measure(const Concept* c) noexcept {
     if (c->category == Category::unit || c->category == Category::currency) {
@@ -185,6 +197,9 @@ std::vector<Lexicon::Impl::DatePart> date_parts(std::string_view pattern) {
 Lexicon::Lexicon(const PackSet& packs) : impl_(std::make_unique<Impl>()) {
     Impl& lx = *impl_;
     lx.implicit_vocabulary = packs.implicit_vocabulary();
+    if (packs.officials() == Officials::current) {
+        lx.requires_by = find_concept("kw.by");
+    }
     lx.vocabularies = packs.vocabularies_handle();
     for (const auto& [spelling, meaning] : packs.spellings()) {
         switch (meaning.kind) {
@@ -222,6 +237,10 @@ Lexicon::Lexicon(const PackSet& packs) : impl_(std::make_unique<Impl>()) {
             if (entry.words.size() == 1 && entry.piece == Piece::whole &&
                 is_measure(entry.concept_entry)) {
                 lx.measures.push_back(&entry);
+            }
+            if (entry.words.size() == 1 && entry.piece == Piece::whole &&
+                is_counter(entry.concept_entry)) {
+                lx.counters.push_back(&entry);
             }
             for (const std::string& word : entry.words) {
                 if (const auto points = detail::code_points(word)) {
@@ -394,6 +413,8 @@ private:
         std::size_t multiplier_bytes = 0;
         const Entry* measure = nullptr;
         const Attach* attach = nullptr;
+        /// The word counting approvals (2人批核), a token of its own.
+        const Entry* counter = nullptr;
     };
 
     // Characters.
@@ -1003,8 +1024,13 @@ std::vector<Lexer::Segment> Lexer::segments(std::string_view suffix) const {
     for (const auto& [value, bytes] : multipliers) {
         const std::string_view rest = suffix.substr(bytes);
         if (rest.empty()) {
-            out.push_back({value, bytes, nullptr, nullptr});
+            out.push_back({value, bytes, nullptr, nullptr, nullptr});
             continue;
+        }
+        for (const Entry* counter : lx_.counters) {
+            if (rest == counter->words.front()) {
+                out.push_back({value, bytes, nullptr, nullptr, counter});
+            }
         }
         for (const Entry* measure : lx_.measures) {
             const std::string& word = measure->words.front();
@@ -1013,12 +1039,12 @@ std::vector<Lexer::Segment> Lexer::segments(std::string_view suffix) const {
             }
             const std::string_view tail = rest.substr(word.size());
             if (tail.empty()) {
-                out.push_back({value, bytes, measure, nullptr});
+                out.push_back({value, bytes, measure, nullptr, nullptr});
                 continue;
             }
             for (const Attach& a : lx_.attach) {
                 if (tail == a.word && accepts(a.after, measure->concept_entry)) {
-                    out.push_back({value, bytes, measure, &a});
+                    out.push_back({value, bytes, measure, &a, nullptr});
                 }
             }
         }
@@ -1165,6 +1191,12 @@ std::size_t Lexer::number(std::size_t i, std::vector<Raw>& raws, const std::size
             false, measured, end,
             word(segment.attach->concept_entry, segment.attach->piece, {}, measured, end), false});
     }
+    if (segment.counter != nullptr) {
+        raws.push_back(Raw{false, measured, end,
+                           word(segment.counter->concept_entry, Piece::whole, segment.counter->form,
+                                measured, end),
+                           false});
+    }
     return end;
 }
 
@@ -1275,6 +1307,30 @@ std::size_t Lexer::read_run(const std::vector<Raw>& raws, std::size_t k, std::ve
             add({word(prefix.keyword, Piece::whole, {}, raw.from, split),
                  word(entry->concept_entry, entry->piece, entry->form, split, end_of(runs))},
                 runs);
+        }
+    }
+    // The prefix `requires` joined to the keyword `by`, in a requirement
+    // of approvals: 須由 directors 2人批核 (from the official packs version
+    // 7, which spell approvals).
+    if (lx_.requires_by != nullptr) {
+        for (const auto& prefix : lx_.prefixes) {
+            if (prefix.keyword->id != "kw.requires" || text.size() <= prefix.spelling.size() ||
+                !text.starts_with(prefix.spelling)) {
+                continue;
+            }
+            const auto it = lx_.by_first.find(text.substr(prefix.spelling.size()));
+            if (it == lx_.by_first.end()) {
+                continue;
+            }
+            const std::size_t split = after_bytes(raw.from, prefix.spelling.size());
+            for (const Entry& entry : it->second) {
+                if (entry.words.size() == 1 && entry.piece == Piece::whole &&
+                    entry.concept_entry == lx_.requires_by) {
+                    add({word(prefix.keyword, Piece::whole, {}, raw.from, split),
+                         word(entry.concept_entry, Piece::whole, entry.form, split, raw.to)},
+                        1);
+                }
+            }
         }
     }
     // An attaching word joined to a word of a category it accepts: 每GB,

@@ -1,0 +1,28 @@
+合约 Payments
+参与方 我方
+
+物件 Payment
+  金额 港元
+  directors 列表 真人 最多 5
+
+可 disburse 由 我方
+  超过 1_000_000 须由 directors 2人审批 本人确认 7天内
+  正常 -> disbursed
+
+测试 "two directors approve a large payment"
+  我方 创建 附带 金额 = 港元 2_000_000, directors = (alice, bob, carol)
+  我方 disburse 由 dave 本人确认 -> 待批准
+  我方 批准 由 alice 本人确认 -> 待批准
+  我方 批准 由 alice 本人确认 -> 被拒绝 "bo:approved disburse"
+  我方 批准 由 erin 本人确认 -> 被拒绝 "bo:approver disburse"
+  我方 批准 由 bob -> 被拒绝 "bo:in-person disburse"
+  我方 批准 由 bob 本人确认 -> disbursed
+
+测试 "a small payment needs nobody"
+  我方 创建 附带 金额 = 港元 500, directors = (alice, bob, carol)
+  我方 disburse -> disbursed
+
+测试 "approvals lapse"
+  我方 创建 附带 金额 = 港元 2_000_000, directors = (alice, bob, carol) 时间 2027-01-04
+  我方 disburse 由 alice 本人确认 -> 待批准
+  我方 批准 由 bob 本人确认 时间 2027-01-12 -> 被拒绝 "bo:lapsed disburse"

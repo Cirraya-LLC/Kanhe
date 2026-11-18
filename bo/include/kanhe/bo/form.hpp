@@ -37,8 +37,8 @@
 /// order) stays text, and `read_sheet` says where.
 ///
 /// An action's block is written in one order: plain requirements, consents,
-/// presence (always, then above a threshold), what AI agents may do, the
-/// state change, the fields set, the requests. A rule's and a rule for
+/// presence (always, then above a threshold), approvals, what AI agents may
+/// do, the state change, the fields set, the requests. A rule's and a rule for
 /// answers' block: the state change, the fields set, the requests.
 namespace kanhe::bo::form {
 
@@ -87,6 +87,19 @@ struct Effects {
     friend bool operator==(const Effects&, const Effects&) = default;
 };
 
+/// `[GUARD] requires N approvals [by PEOPLE] [in person] WITHIN`: the call
+/// waits for N approvals by people of the home.
+struct Approval {
+    std::uint64_t count = 0;
+    std::optional<Text> by;
+    bool in_person = false;
+    /// The time for approving as written, its word included: `within 7
+    /// days`, `7日內`.
+    Text within;
+    std::optional<Text> guard;
+    friend bool operator==(const Approval&, const Approval&) = default;
+};
+
 struct Action {
     Text action;
     std::optional<Text> by;
@@ -99,8 +112,13 @@ struct Action {
     bool in_person = false;
     /// `GUARD requires in person`: the guard as written (`over 5_000_000`).
     std::optional<Text> in_person_over;
+    /// Requirements of approvals, in order.
+    std::vector<Approval> approvals;
     /// `AI agent can propose`.
     bool agents_propose = false;
+    /// `AI agent can approve`: an AI agent's approval counts where a line
+    /// asks no presence.
+    bool agents_approve = false;
     Effects effects;
 
     friend bool operator==(const Action&, const Action&) = default;

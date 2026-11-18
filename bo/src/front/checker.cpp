@@ -89,6 +89,7 @@ constexpr std::string_view rule_whole_times = "R32";
 constexpr std::string_view rule_expired = "R33";
 constexpr std::string_view rule_service_bill = "R34";
 constexpr std::string_view rule_service_paid = "R35";
+constexpr std::string_view rule_approvals = "R36";
 
 /// The fields the standard terms may add to an instance (R20), in the order
 /// R20 adds them: those their packs mark as added (Concept::flags; parties
@@ -478,6 +479,13 @@ void each_expression(Statement& s, const F& f) {
                 for (auto& w : node.with) {
                     one(w.value);
                 }
+            } else if constexpr (std::is_same_v<N, ast::Approvals>) {
+                for (auto* part :
+                     {&node.guard, &node.count, &node.by, &node.in_person, &node.within}) {
+                    if (*part) {
+                        one(**part);
+                    }
+                }
             } else if constexpr (std::is_same_v<N, ast::Expect>) {
                 if (node.outcome) {
                     one(*node.outcome);
@@ -626,6 +634,14 @@ void respan(std::vector<m::Statement>& list, const Span& at) {
                         respan(w.target, at);
                         respan(w.value, at);
                     }
+                } else if constexpr (std::is_same_v<N, m::Approvals>) {
+                    respan(node.within, at);
+                    if (node.by) {
+                        respan(*node.by, at);
+                    }
+                    if (node.guard) {
+                        respan(*node.guard, at);
+                    }
                 }
             },
             s.node);
@@ -760,6 +776,8 @@ private:
     void check_when(const ast::When& w);
     void check_answer(const ast::AnswerRule& r);
     m::Request request_statement(const ast::Request& r);
+    m::Approvals approvals_statement(const ast::Approvals& a);
+    void check_approvals(m::Action& a);
     // notify PARTY, a request (R10); the requests and the bills Bo adds
     // to a service (R10, R34, R35).
     m::Request notify_request(const ast::Do& d);
@@ -792,6 +810,9 @@ private:
     void test_fields(const ast::Expect& e, m::Step& step);
     std::optional<m::TestParty> test_party(const ast::Expr& e);
     m::Expr test_parties(const ast::Expr& e, const Type& type);
+    /// A person only tests name, or a list of them (R36), for a field or an
+    /// input that holds people.
+    m::Expr test_persons(const ast::Expr& e, const Type& type);
     [[nodiscard]] std::string creation_word() const {
         return is(model_.kind, "kind.asset") ? "act.issue" : "act.create";
     }
@@ -845,6 +866,9 @@ private:
     bool billing_ = false;
     Span billing_span_;
     std::vector<const ast::Test*> tests_;
+    /// The party of the current test's first step: the home, whose steps
+    /// may name the person who calls (`by alice`).
+    std::string test_home_;
     std::vector<const ast::Clause*> clauses_;
     std::deque<ast::Can> synthetic_;
     std::set<std::size_t> rule_only_;
@@ -905,6 +929,11 @@ private:
 
     // While checking a block.
     Place place_ = Place::declaration;
+    /// How deep in `if`, `otherwise`, and `each` blocks the statements being
+    /// read are (0: the top of the block).
+    std::size_t nesting_ = 0;
+    /// Where the action being read says `AI agent can approve`.
+    Span approve_permit_;
     m::Action* action_ = nullptr;
     std::string action_key_;
     std::vector<m::Consent>* consents_ = nullptr;
@@ -975,6 +1004,10 @@ std::optional<Declared> Checker::as_type(const ast::Expr& e) {
         }
         if (is(c, "type.yes_no")) {
             return Declared{of(TypeKind::yes_no), {}};
+        }
+        if (is(c, "actor.person")) {
+            // A person of the home (R36): an actor id.
+            return Declared{of(TypeKind::person), {}};
         }
         if (c->category == Category::currency) {
             return Declared{money(c), {}};
@@ -1870,6 +1903,14 @@ void Checker::mentions(const std::vector<ast::Statement>& list,
                                mentions(w.value, out);
                            }
                        },
+                       [&](const ast::Approvals& a) {
+                           if (a.guard) {
+                               mentions(*a.guard, out);
+                           }
+                           if (a.by) {
+                               mentions(*a.by, out);
+                           }
+                       },
                    },
                    s.node);
     }
@@ -2364,6 +2405,7 @@ void Checker::check_can(const ast::Can& c, std::size_t index) {
     if (!a.agents_propose) {
         a.agents_rule = rule_agents;
     }
+    check_approvals(a);
     // R34: subscribing to a service, or renewing it, bills one period.
     if (a.terms && (is(a.word, "act.subscribe") || is(a.word, "act.renew"))) {
         add_billing(a, c.action.span);
@@ -2472,6 +2514,9 @@ void Checker::check_when(const ast::When& w) {
             error(d->span, "check.when-action", {{"action", m::key(a->word, a->name)}});
         } else if (asks_presence(a->body)) {
             error(d->span, "check.when-person", {{"text", written(d->span)}});
+        } else if (!m::approvals_of(*a).empty()) {
+            // R36: nobody approves a keeper's call.
+            error(d->span, "check.when-approvals", {{"text", written(d->span)}});
         }
     }
     frames_.pop_back();
@@ -2969,6 +3014,12 @@ std::vector<m::Statement> Checker::statements(const std::vector<ast::Statement>&
                     } else if (word_is(p.who, "actor.ai_agent") &&
                                word_is(p.action, "act.propose")) {
                         action_->agents_propose = true;
+                    } else if (word_is(p.who, "actor.ai_agent") &&
+                               word_is(p.action, "act.approve")) {
+                        // R36: an agent's approval counts where no presence
+                        // is asked.
+                        action_->agents_approve = true;
+                        approve_permit_ = p.span;
                     } else {
                         error(p.span, "check.permit", {{"text", written(p.span)}});
                     }
@@ -2977,8 +3028,10 @@ std::vector<m::Statement> Checker::statements(const std::vector<ast::Statement>&
                     m::If node;
                     node.span = i.span;
                     node.condition = condition(i.condition);
+                    ++nesting_;
                     node.then = statements(i.then);
                     node.otherwise = statements(i.otherwise);
+                    --nesting_;
                     out.push_back(m::Statement{std::move(node)});
                 },
                 [&](const ast::Each& e) {
@@ -3000,7 +3053,9 @@ std::vector<m::Statement> Checker::statements(const std::vector<ast::Statement>&
                     }
                     frames_.emplace_back();
                     frames_.back().emplace(node.name, Local{Refers::item, item});
+                    ++nesting_;
                     node.body = statements(e.body);
+                    --nesting_;
                     frames_.pop_back();
                     // Once per item: no state change, no action done,
                     // no request (a call makes at most 16).
@@ -3046,10 +3101,103 @@ std::vector<m::Statement> Checker::statements(const std::vector<ast::Statement>&
                 },
                 [&](const ast::Expect&) {},
                 [&](const ast::Request& r) { out.push_back(m::Statement{request_statement(r)}); },
+                [&](const ast::Approvals& a) {
+                    out.push_back(m::Statement{approvals_statement(a)});
+                },
             },
             s.node);
     }
     return out;
+}
+
+m::Approvals Checker::approvals_statement(const ast::Approvals& a) {
+    // R36: N approvals by people of the home, within a time: at the top of
+    // an action's block, never a time rule's (a keeper calls it) or a rule
+    // for answers'.
+    m::Approvals out;
+    out.span = a.span;
+    out.rule = rule_approvals;
+    if (place_ == Place::rule || place_ == Place::event) {
+        error(a.span, "check.when-approvals", {{"text", written(a.span)}});
+    } else if (place_ == Place::answer) {
+        error(a.span, "check.answer-line", {{"text", written(a.span)}});
+    } else if (place_ != Place::action || action_ == nullptr || nesting_ > 0) {
+        error(a.span, "check.approvals", {{"text", written(a.span)}});
+    }
+    if (a.guard) {
+        out.guard = condition(*a.guard);
+        // Its guard reads the call and the instance, never presence: the
+        // proposer's and the approvers' are the lines' own.
+        const auto presence = [](const m::Expr& e, const auto& self) -> bool {
+            return (e.kind == ExprKind::word && is(e.concept_entry, "cond.in_person")) ||
+                   std::ranges::any_of(e.operands, [&](const m::Expr& o) { return self(o, self); });
+        };
+        if (presence(*out.guard, presence)) {
+            error(a.guard->span, "check.approvals", {{"text", written(a.span)}});
+        }
+    }
+    // The count: a whole number, 1 to 16.
+    if (a.count && a.count->kind == ExprKind::literal &&
+        a.count->literal.kind == ast::LiteralKind::number && !a.count->literal.number.negative) {
+        const Exact n = exact(a.count->literal.number, 1);
+        if (n.whole && n.value >= 1 && n.value <= m::max_approvals) {
+            out.count = n.value;
+        }
+    }
+    if (out.count == 0) {
+        error(a.count ? a.count->span : a.span, "check.approvals", {{"text", written(a.span)}});
+    }
+    // Who counts: a person, or a list of people.
+    if (a.by) {
+        out.by = value(*a.by);
+        const Type& t = out.by->type;
+        const bool people =
+            t.kind == TypeKind::person || (t.kind == TypeKind::list && t.element.size() == 1 &&
+                                           t.element[0].kind == TypeKind::person);
+        if (known(t) && !people) {
+            error(a.by->span, "check.approvals-by", {{"text", written(a.by->span)}});
+        }
+    }
+    out.in_person = a.in_person.has_value();
+    // Within a duration written out, 1 day to 366 days (12 months), as a
+    // request's deadline.
+    const ast::Expr* duration =
+        a.within && a.within->operands.size() == 1 ? &a.within->operands[0] : nullptr;
+    std::optional<std::int64_t> amount;
+    if (duration != nullptr && duration->kind == ExprKind::literal &&
+        duration->literal.kind == ast::LiteralKind::duration) {
+        amount = literal_value(duration->literal, model_.utc_offset_ms);
+    }
+    constexpr std::int64_t day_ms = 86'400'000;
+    if (!amount) {
+        error(a.within ? a.within->span : a.span, "check.approvals",
+              {{"text", written(a.within ? a.within->span : a.span)}});
+    } else {
+        out.within = value(*duration);
+        const bool calendar = out.within.type.calendar;
+        if (*amount < (calendar ? 1 : day_ms) || *amount > (calendar ? 12 : m::max_request_ms)) {
+            error(a.within->span, "check.approvals", {{"text", written(a.within->span)}});
+        }
+    }
+    return out;
+}
+
+void Checker::check_approvals(m::Action& a) {
+    // R36: an action's approvals lines ask at most 32 approvals together;
+    // `AI agent can approve` needs one.
+    std::uint64_t total = 0;
+    for (const m::Statement& st : a.body) {
+        if (const auto* line = std::get_if<m::Approvals>(&st.node)) {
+            total += line->count;
+            if (total > m::max_action_approvals) {
+                error(line->span, "check.approvals", {{"text", written(line->span)}});
+            }
+        }
+    }
+    if (a.agents_approve && m::approvals_of(a).empty()) {
+        error(approve_permit_, "check.permit", {{"text", written(approve_permit_)}});
+        a.agents_approve = false;
+    }
 }
 
 m::Set Checker::set_statement(const ast::Set& s) {
@@ -3388,6 +3536,36 @@ std::optional<m::TestParty> Checker::test_party(const ast::Expr& e) {
     return std::nullopt;
 }
 
+m::Expr Checker::test_persons(const ast::Expr& e, const Type& type) {
+    // R36: a person only tests name (its actor id derives from the name), or
+    // a list of them; never a name the contract declares.
+    const auto one = [&](const ast::Expr& item) {
+        m::Expr out = plain(item);
+        out.type = of(TypeKind::person);
+        if (item.kind != ExprKind::name || declared(item.name)) {
+            error(item.span, "check.test-value", {{"text", written(item.span)}});
+            out.type = of(TypeKind::unknown);
+        }
+        return out;
+    };
+    if (type.kind == TypeKind::person) {
+        return one(e);
+    }
+    m::Expr out = plain(e);
+    out.kind = ExprKind::list;
+    out.operands.clear();
+    const std::vector<ast::Expr> single{e};
+    // R29: one person where a list is needed is a list of one.
+    for (const ast::Expr& item : e.kind == ExprKind::list ? e.operands : single) {
+        out.operands.push_back(one(item));
+    }
+    out.type = type;
+    if (out.operands.size() > type.bound) {
+        error(e.span, "check.test-value", {{"text", written(e.span)}});
+    }
+    return out;
+}
+
 m::Expr Checker::test_parties(const ast::Expr& e, const Type& type) {
     // A party (a role, or a ledger only tests name), or a list of them: each
     // item keeps its word or name, and refers to a party if it is a role.
@@ -3444,7 +3622,15 @@ void Checker::check_tests() {
                 test_expect(*e, test.steps.back());
                 open = false;
             } else if (const auto* d = std::get_if<ast::Do>(&s.node)) {
-                test.steps.push_back(test_step(*d, test.steps.empty(), clock));
+                const bool first = test.steps.empty();
+                if (first) {
+                    test_home_.clear();
+                }
+                test.steps.push_back(test_step(*d, first, clock));
+                if (first) {
+                    test_home_ =
+                        m::key(test.steps.back().subject.word, test.steps.back().subject.name);
+                }
                 open = true;
             }
         }
@@ -3628,10 +3814,15 @@ m::Step Checker::test_step(const ast::Do& d, const bool first, std::optional<std
         }
     }
 
-    // Who signs: by AI agent, or in person; and when.
+    // Who signs: by AI agent, or in person; and when. A step of the home
+    // may name the person who calls (R36: `we approve by alice in person`),
+    // a person only tests name.
     if (d.by && !step.keeper) {
+        const bool home = first || m::key(step.subject.word, step.subject.name) == test_home_;
         if (word_is(*d.by, "actor.ai_agent")) {
             step.agent = true;
+        } else if (d.by->kind == ExprKind::name && !this->declared(d.by->name) && home) {
+            step.person = d.by->name;
         } else {
             error(d.by->span, "check.test-signer", {{"text", written(d.by->span)}});
         }
@@ -3727,10 +3918,19 @@ void Checker::test_with(const ast::Do& d, m::Step& step, const m::Action* action
                                                   (field->type.kind == TypeKind::list &&
                                                    field->type.element.size() == 1 &&
                                                    field->type.element[0].kind == TypeKind::party));
+        const bool persons =
+            field != nullptr &&
+            (field->type.kind == TypeKind::person ||
+             (field->type.kind == TypeKind::list && field->type.element.size() == 1 &&
+              field->type.element[0].kind == TypeKind::person));
         if (parties) {
             // Parties (a split's recipients): the test's ledgers, by name.
             item.target.type = field->type;
             item.value = test_parties(s.value, field->type);
+        } else if (persons) {
+            // People (R36): persons only tests name.
+            item.target.type = field->type;
+            item.value = test_persons(s.value, field->type);
         } else if (!test_value(s.value)) {
             error(s.value.span, "check.test-value", {{"text", written(s.value.span)}});
             item.value = plain(s.value);
@@ -3802,12 +4002,17 @@ void Checker::test_fields(const ast::Expect& e, m::Step& step) {
         const bool parties = field.type.kind == TypeKind::party ||
                              (field.type.kind == TypeKind::list && field.type.element.size() == 1 &&
                               field.type.element[0].kind == TypeKind::party);
+        const bool persons = field.type.kind == TypeKind::person ||
+                             (field.type.kind == TypeKind::list && field.type.element.size() == 1 &&
+                              field.type.element[0].kind == TypeKind::person);
         if (field.type.kind == TypeKind::party && word_is(s.value, "val.none")) {
             // A party field that holds no party.
             item.value = plain(s.value);
             item.value.type = field.type;
         } else if (parties) {
             item.value = test_parties(s.value, field.type);
+        } else if (persons) {
+            item.value = test_persons(s.value, field.type);
         } else if (!test_value(s.value)) {
             error(s.value.span, "check.test-value", {{"text", written(s.value.span)}});
             continue;
@@ -3842,7 +4047,10 @@ void Checker::test_outcome(const ast::Expect& e, m::Step& step) {
             }
         }
         step.expect = m::Expectation::proposed;
-        if (proposed == nullptr || !proposed->agents_propose || !step.agent) {
+        // Or a call kept, or still waiting, for approvals (R36).
+        const bool approvals = (proposed != nullptr && !m::approvals_of(*proposed).empty()) ||
+                               (step.approve && m::has_approvals(model_));
+        if (!approvals && (proposed == nullptr || !proposed->agents_propose || !step.agent)) {
             error(e.span, "check.test-proposal", {{"action", m::key(step.word, step.name)}});
         }
         return;

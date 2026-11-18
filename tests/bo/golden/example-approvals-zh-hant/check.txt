@@ -1,0 +1,32 @@
+edition 1
+contract Payments
+party role.we bound=creation{R3}
+kind kind.thing Payment
+field field.amount instance money cur.HKD
+field directors instance list 5 person
+state state.active first{R4}
+state disbursed{R5}
+can disburse own by=role.we agents=delegation{R14}
+  approvals 2 by=directors in_person within=(duration time.day 7) guard=(cond.over (money cur.HKD 1000000){R6}){R36}
+  transition state.active -> disbursed
+test "two directors approve a large payment"
+  step role.we act.create creation expect=accepted
+    set field.amount (money cur.HKD 2000000)
+    set directors (list alice bob carol)
+  step role.we disburse in_person person=dave expect=proposed
+  step role.we act.approve in_person person=alice expect=proposed
+  step role.we act.approve in_person person=alice expect=refused "bo:approved disburse"
+  step role.we act.approve in_person person=erin expect=refused "bo:approver disburse"
+  step role.we act.approve person=bob expect=refused "bo:in-person disburse"
+  step role.we act.approve in_person person=bob expect=state disbursed
+test "a small payment needs nobody"
+  step role.we act.create creation expect=accepted
+    set field.amount (money cur.HKD 500)
+    set directors (list alice bob carol)
+  step role.we disburse expect=state disbursed
+test "approvals lapse"
+  step role.we act.create creation at=2027-01-04 expect=accepted
+    set field.amount (money cur.HKD 2000000)
+    set directors (list alice bob carol)
+  step role.we disburse in_person person=alice expect=proposed
+  step role.we act.approve at=2027-01-12 in_person person=bob expect=refused "bo:lapsed disburse"

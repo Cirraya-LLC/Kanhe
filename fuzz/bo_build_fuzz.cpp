@@ -289,6 +289,9 @@ struct GAction {
     bool open_to = false;
     /// AI agents may only propose it.
     bool proposes = false;
+    /// It has a line of approvals: its calls are kept until people of the
+    /// home approve them.
+    bool approvals = false;
     /// The standard library's split: its parts and
     /// recipients, given by each step.
     bool split = false;
@@ -1175,6 +1178,22 @@ std::vector<std::pair<int, Line>> Generator::contract() {
             out.push_back({2, {word("actor.ai_agent"), word("kw.can"), word("act.propose")}});
             actions_.back().proposes = true;
         }
+        if (c_.one_in(5)) {
+            // N approvals by people of the home, within a time: in person,
+            // or with AI agents counting.
+            Line l{word("kw.requires"), raw(std::to_string(c_.between(1, 3))),
+                   word("cond.approval")};
+            const bool presence = c_.one_in(2);
+            if (presence) {
+                l.push_back(word("cond.in_person"));
+            }
+            l.push_back(apply("cond.within", {raw(std::format("{} days", c_.between(1, 30)))}));
+            out.push_back({2, l});
+            if (!presence && c_.one_in(2)) {
+                out.push_back({2, {word("actor.ai_agent"), word("kw.can"), word("act.approve")}});
+            }
+            actions_.back().approvals = true;
+        }
         in_action_ = true;
         statements(2, 2, out);
         if (c_.one_in(3)) {
@@ -1706,8 +1725,10 @@ void Generator::tests(std::vector<std::pair<int, Line>>& out) {
         out.push_back({2, create});
         int month = static_cast<int>(c_.below(12));
         int day = 1 + static_cast<int>(c_.below(28));
-        const bool proposals =
-            std::ranges::any_of(actions_, [](const GAction& a) { return a.proposes; });
+        const bool proposals = std::ranges::any_of(
+            actions_, [](const GAction& a) { return a.proposes || a.approvals; });
+        const bool approvals =
+            std::ranges::any_of(actions_, [](const GAction& a) { return a.approvals; });
         for (std::uint32_t k = 0, n = 1 + c_.below(6); k < n; ++k) {
             if (!keeper_.empty() && c_.one_in(3)) {
                 // The keeper calls a time rule, by the action it does.
@@ -1738,8 +1759,14 @@ void Generator::tests(std::vector<std::pair<int, Line>>& out) {
                 continue;
             }
             if (proposals && c_.one_in(4)) {
-                // A person approves the first proposal kept.
-                Line approve{test_party(), word("act.approve")};
+                // A person approves the first proposal kept: with approvals
+                // lines, often a person of the home the step names.
+                Line approve{approvals && c_.one_in(2) ? home : test_party(), word("act.approve")};
+                if (approvals && approve.front().concept_id == home.concept_id &&
+                    approve.front().text == home.text && c_.one_in(2)) {
+                    approve.push_back(word("kw.by"));
+                    approve.push_back(raw(std::format("p{}", c_.below(4))));
+                }
                 if (c_.one_in(2)) {
                     approve.push_back(word("cond.in_person"));
                 }

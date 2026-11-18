@@ -1,0 +1,35 @@
+测试 “two directors approve a large payment”：通过
+  第 1 步（第 13 行）通过：we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+    结果：调用被接受，实例现为正常。
+  第 2 步（第 14 行）通过：we disburse by dave in person -> pending approval
+    结果：调用保留为 disburse 的提议，正在等待真人批准；实例保持不变。
+  第 3 步（第 15 行）通过：we approve by alice in person -> pending approval
+    结果：已记录 disburse 的一项审批；提议仍在等待更多审批。
+  第 4 步（第 16 行）通过：we approve by alice in person -> refused "bo:approved disburse"
+    结果：调用被拒绝，因为此人已审批 disburse 的提议（bo:approved disburse）。
+    合约条款 4.1.2：要求 1：如果金额超过港元 1,000,000，须由 directors 其中 2 人在提议后 7 天内各自本人确认审批，提议人如属其中一人也计算在内；在此之前，调用保留为提议。
+  第 5 步（第 17 行）通过：we approve by erin in person -> refused "bo:approver disburse"
+    结果：调用被拒绝，因为调用者并非 disburse 适用审批要求所计算的审批人（bo:approver disburse）。
+    合约条款 4.1.2：要求 1：如果金额超过港元 1,000,000，须由 directors 其中 2 人在提议后 7 天内各自本人确认审批，提议人如属其中一人也计算在内；在此之前，调用保留为提议。
+  第 6 步（第 18 行）通过：we approve by bob -> refused "bo:in-person disburse"
+    结果：调用被拒绝，因为 disburse 需要本人以通行密钥或硬件密钥证明本人在场（bo:in-person disburse）。
+    合约条款 4.1.2：要求 1：如果金额超过港元 1,000,000，须由 directors 其中 2 人在提议后 7 天内各自本人确认审批，提议人如属其中一人也计算在内；在此之前，调用保留为提议。
+  第 7 步（第 19 行）通过：we approve by bob in person -> disbursed
+    结果：调用被接受，实例现为 disbursed；这是最终状态，实例不再接受调用。
+
+测试 “a small payment needs nobody”：通过
+  第 1 步（第 22 行）通过：we create with amount = HKD 500, directors = (alice, bob, carol)
+    结果：调用被接受，实例现为正常。
+  第 2 步（第 23 行）通过：we disburse -> disbursed
+    结果：调用被接受，实例现为 disbursed；这是最终状态，实例不再接受调用。
+
+测试 “approvals lapse”：通过
+  第 1 步（第 26 行）通过：we create with amount = HKD 2_000_000, directors = (alice, bob, carol) at 2027-01-04
+    结果：调用被接受，实例现为正常。
+  第 2 步（第 27 行）通过：we disburse by alice in person -> pending approval
+    结果：调用保留为 disburse 的提议，正在等待真人批准；实例保持不变。
+  第 3 步（第 28 行）通过：we approve by bob in person at 2027-01-12 -> refused "bo:lapsed disburse"
+    结果：调用被拒绝，因为审批 disburse 提议的时限已过（bo:lapsed disburse）。
+    合约条款 4.1.2：要求 1：如果金额超过港元 1,000,000，须由 directors 其中 2 人在提议后 7 天内各自本人确认审批，提议人如属其中一人也计算在内；在此之前，调用保留为提议。
+
+共 3 个测试：3 个通过，0 个失败。

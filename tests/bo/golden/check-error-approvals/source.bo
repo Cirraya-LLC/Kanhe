@@ -1,0 +1,46 @@
+contract Errors
+parties we, partner
+
+thing Payment
+  amount HKD
+  due date
+  chair person
+  directors list person at most 3
+
+can pay_zero by we
+  requires 0 approvals within 7 days
+can pay_many by we
+  requires 17 approvals within 7 days
+can pay_half by we
+  requires 2.5 approvals within 7 days
+can pay_total by we
+  requires 16 approvals within 7 days
+  over 1_000 requires 16 approvals within 7 days
+  over 2_000 requires 1 approval within 7 days
+can pay_open by we
+  requires 2 approvals by directors
+can pay_soon by we
+  requires 1 approval within 0 days
+can pay_late by we
+  requires 1 approval within 367 days
+can pay_months by we
+  requires 1 approval within 13 months
+can pay_nested by we
+  if amount > HKD 5
+    requires 1 approval within 7 days
+can pay_presence by we
+  in person requires 1 approval within 7 days
+can pay_party by we
+  requires 1 approval by partner within 7 days
+can pay_number by we
+  requires 1 approval by 5 within 7 days
+can close_out by we
+  requires 1 approval by chair within 7 days
+  active -> closed
+can ask by we
+  request sync within 1 day
+when due
+  requires 1 approval within 7 days
+when due + 1 day close_out
+when sync done
+  requires 1 approval within 7 days

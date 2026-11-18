@@ -233,14 +233,15 @@ TEST_CASE("the official vocabulary packs are files, their concepts the edition's
     CHECK(find_vocabulary_pack("finance")->concepts.size() == 24);
     CHECK(find_vocabulary_pack("commerce")->concepts.size() == 23);
     CHECK(find_vocabulary_pack("services")->concepts.size() == 14);
-    // The core's words are its own: 81, besides the keywords.
+    // The core's words are its own: 85, besides the keywords.
     std::size_t core = 0;
     for (const Concept* c : concepts()) {
         core += c->owner == nullptr && !c->retired && c->category != Category::keyword ? 1 : 0;
     }
-    CHECK(core == 84);
+    CHECK(core == 85);
     // Each release reads with its own versions.
     CHECK(vocabulary_packs(Officials::current).front()->version == 3);
+    CHECK(vocabulary_packs(Officials::before_approvals).front()->version == 3);
     CHECK(vocabulary_packs(Officials::before_billing).front()->version == 2);
     CHECK(vocabulary_packs(Officials::before_requests).front()->version == 2);
     CHECK(vocabulary_packs(Officials::before_pack_files).front()->version == 1);

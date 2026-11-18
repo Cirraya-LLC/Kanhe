@@ -174,7 +174,8 @@ def check_bundle(bundle: bytes, source: str, packs: dict, version: int) -> None:
         for pack_id, pack_version, digest in value[6]:
             # The official vocabulary packs' version of the release: 1 with
             # the language packs version 2 and 3, 2 with versions 4 and 5;
-            # with version 6, commerce and services 3, finance 2.
+            # with versions 6 and 7 (approvals), commerce and services 3,
+            # finance 2.
             want = 1 if version < 4 else 2 if version < 6 or pack_id == "finance" else 3
             assert pack_version == want, f"vocabulary {pack_id} version"
             assert packs[(pack_id, pack_version)] == digest.hex(), f"vocabulary {pack_id}"

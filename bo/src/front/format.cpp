@@ -260,6 +260,9 @@ struct Atom {
     bool operand = false;
     /// A full-width mark (，、（）): it carries its own space.
     bool wide = false;
+    /// The word that counts approvals after its number (2 approvals,
+    /// 2人批核): joined to it where the language joins a unit.
+    bool counter = false;
 };
 
 Atom symbol_atom(Symbol s) {
@@ -495,6 +498,10 @@ private:
             out.back().operand = t.kind == TokenKind::word && t.piece == Piece::whole &&
                                  t.concept_entry->category != Category::keyword &&
                                  t.concept_entry->category != Category::action;
+            if (counted(n.first)) {
+                out.back().text = counter(t, tokens_[n.first - 1]);
+                out.back().counter = true;
+            }
             return;
         }
         case Node::Kind::group:
@@ -585,6 +592,33 @@ private:
     [[nodiscard]] static bool symbol_unit(const Token& t, std::string_view as_written) {
         const std::string_view symbol = unit_symbol(t.concept_entry);
         return !symbol.empty() && (as_written == symbol || as_written == "\u2103");
+    }
+
+    /// True for the word that counts approvals right after its number.
+    [[nodiscard]] bool counted(std::size_t i) const {
+        const Token& t = tokens_[i];
+        return i > first_ && t.kind == TokenKind::word && t.piece == Piece::whole &&
+               t.concept_entry->id == "cond.approval" && tokens_[i - 1].kind == TokenKind::number;
+    }
+
+    /// The word that counts approvals in the target language: as written if
+    /// it spells it so, else its plural after a number other than 1, else
+    /// its first spelling.
+    [[nodiscard]] std::string counter(const Token& t, const Token& number) const {
+        std::string as_written = written(t.span);
+        if (language_ == nullptr) {
+            return as_written;
+        }
+        const Word* w = target(t.concept_entry);
+        if (w == nullptr || spells(*w, as_written)) {
+            return as_written;
+        }
+        if (number.number != Decimal{1, 0}) {
+            if (const auto it = w->forms.find("plural"); it != w->forms.end()) {
+                return it->second;
+            }
+        }
+        return w->spellings.front();
     }
 
     /// A unit, time unit, or currency in the target language.
@@ -809,6 +843,11 @@ private:
                          !wide;
             if (space && compact_ && !p.symbol && !a.symbol && east_asian(last_point(p.text)) &&
                 east_asian(first_point(a.text)) && joins(run, a.text)) {
+                space = false;
+            }
+            // 2人批核: a count joins its word as a number does its unit.
+            if (space && compact_ && a.counter && !p.symbol && east_asian(first_point(a.text)) &&
+                joins(run, a.text)) {
                 space = false;
             }
             if (space) {

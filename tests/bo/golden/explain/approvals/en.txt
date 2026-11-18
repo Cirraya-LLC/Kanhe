@@ -1,0 +1,38 @@
+Contract Payments
+
+Bo wrote this text from the contract's source (Bo edition 1). A clause marked with a rule, such as [R3], states what Bo inferred by that rule instead of reading it in the source; the last section explains each rule.
+
+1. Parties
+1.1 we: bound to a ledger when an instance is created. [R3]
+
+2. Each instance
+2.1 Each instance is a thing named Payment.
+2.2 amount: money in HKD, given when an instance is created.
+2.3 directors: a list of at most 5 items, each a person of the home ledger, given when an instance is created.
+2.4 Creating an instance (function create) names the ledgers of the parties bound at creation and sets the fields given at creation. It needs no party's consent: the parties agree through the actions below.
+
+3. States
+3.1 An instance starts in the state active. [R4]
+3.2 Its states are active and disbursed. [R5]
+3.3 The state disbursed is final: no action can start from it, so an instance in it takes no more calls.
+3.4 Each change of state, the first state included, is recorded as an event.
+
+4. Actions
+A call that does not meet one of an action's requirements is refused, and the instance does not change. A missing consent is not a refusal: the call waits for it.
+
+4.1 disburse
+  4.1.1 Started by us, whose agreement it needs.
+  4.1.2 Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal. [R6, R36]
+  4.1.3 If the instance is active, it becomes disbursed; otherwise the call is refused.
+  4.1.4 An AI agent may start it within its delegation. [R14]
+
+4.2 approve
+  4.2.1 approve (function approve), for requirements of approvals: a person of the home ledger approves a proposal kept for approvals, naming its function and arguments; each approval is a call of its own, recorded with the proposal. Approvals come within the proposal's time: the shortest time of the requirements of approvals that apply, from the proposal. The approval that meets every requirement of approvals that applies (each read again then, with its condition) runs the proposal as its action does, with every requirement checked; the call may still wait for consents. A person approves a proposal once. An instance keeps at most 16 proposals, and a call that keeps a new one first drops those whose time has passed. [R36]
+
+5. Rules Bo applied
+[R3] A role the contract first names as an action's counterparty (after to) is bound to a ledger by that action, with its consent; every other role is bound to a ledger when an instance is created.
+[R4] An instance starts in the one state that no state change leads to; if there is none, in the state active.
+[R5] The states of an instance are those its state changes name.
+[R6] Over N compares N with the action's one amount (its one input of money or a quantity, else the instance's amount); a bare number N is in that amount's unit.
+[R14] An AI agent may start an action within its delegation, unless the action says AI agent can propose; then the agent only proposes, and a person approves.
+[R36] A requirement of approvals (requires N approvals) keeps a call of the action as a proposal until N different people of the home approve it, each approval a call of approve within the requirement's time of the proposal, in person where it says so; the person who proposes it counts when they qualify; an AI agent counts only where the action says AI agent can approve, and only for a requirement that asks no presence.

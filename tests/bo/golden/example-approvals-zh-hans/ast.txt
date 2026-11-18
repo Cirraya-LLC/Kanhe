@@ -1,0 +1,39 @@
+edition 1
+contract Payments
+parties role.we
+block kind.thing Payment
+  field field.amount cur.HKD
+  field directors (phrase type.list actor.person (expr.at_most 5))
+can disburse by=role.we
+  approvals count=2 by=directors in_person within=(cond.within (duration time.day 7)) guard=(cond.over 1000000)
+  transition state.active -> disbursed
+test "two directors approve a large payment"
+  do subject=role.we act.create
+    set field.amount (money cur.HKD 2000000)
+    set directors (list alice bob carol)
+  do subject=role.we disburse cond.in_person by=dave
+  expect val.pending_approval
+  do subject=role.we act.approve cond.in_person by=alice
+  expect val.pending_approval
+  do subject=role.we act.approve cond.in_person by=alice
+  expect val.refused "bo:approved disburse"
+  do subject=role.we act.approve cond.in_person by=erin
+  expect val.refused "bo:approver disburse"
+  do subject=role.we act.approve by=bob
+  expect val.refused "bo:in-person disburse"
+  do subject=role.we act.approve cond.in_person by=bob
+  expect disbursed
+test "a small payment needs nobody"
+  do subject=role.we act.create
+    set field.amount (money cur.HKD 500)
+    set directors (list alice bob carol)
+  do subject=role.we disburse
+  expect disbursed
+test "approvals lapse"
+  do subject=role.we act.create (time.at 2027-01-04)
+    set field.amount (money cur.HKD 2000000)
+    set directors (list alice bob carol)
+  do subject=role.we disburse cond.in_person by=alice
+  expect val.pending_approval
+  do subject=role.we act.approve cond.in_person (time.at 2027-01-12) by=bob
+  expect val.refused "bo:lapsed disburse"

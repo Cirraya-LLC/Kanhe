@@ -1,0 +1,28 @@
+合約 Payments
+parties 我方
+
+thing Payment
+  金額 HKD
+  directors list 真人 at most 5
+
+可 disburse by we
+  超过 1_000_000 requires 2人批核 by directors in person 7天内
+  active -> disbursed
+
+test "two directors approve a large payment"
+  we 建立 with amount = 港元 2_000_000, directors = (alice, bob, carol)
+  我方 disburse by dave 親身確認 -> pending approval
+  we 批准 由 alice in person -> 待批准
+  we approve by alice 本人确认 -> refused "bo:approved disburse"
+  我方 approve 由 erin in person -> 被拒絕 "bo:approver disburse"
+  we 批准 by bob -> refused "bo:in-person disburse"
+  我方 approve by bob 親身確認 -> disbursed
+
+测试 "a small payment needs nobody"
+  we create with 金额 = HKD 500, directors = (alice, bob, carol)
+  我方 disburse -> disbursed
+
+test "approvals lapse"
+  我方 create 連同 amount = HKD 2_000_000, directors = (alice, bob, carol) at 2027-01-04
+  we disburse 由 alice in person -> 待批准
+  we 批准 by bob 本人确认 时间 2027-01-12 -> refused "bo:lapsed disburse"

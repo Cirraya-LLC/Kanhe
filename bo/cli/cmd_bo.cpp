@@ -976,6 +976,13 @@ int explain_deploy_file(const Args& args, const std::string& file,
             fields.push_back({{"field", v.field}, {"value", v.value}});
         }
         j["instance"] = {{"state_text", values->state}, {"fields", std::move(fields)}};
+        if (!values->proposals.empty()) {
+            Json proposals = Json::array();
+            for (const bo::ExplainedProposal& p : values->proposals) {
+                proposals.push_back({{"action", p.action}, {"text", p.text}});
+            }
+            j["instance"]["proposals"] = std::move(proposals);
+        }
     }
     if (!text.explained) {
         // The parties confirm the text of the code that runs: a source that
@@ -1006,6 +1013,9 @@ int explain_deploy_file(const Args& args, const std::string& file,
         for (std::size_t i = 0; i < values->fields.size(); ++i) {
             std::println("{}{}: {}", i == 0 ? "fields:    " : "           ",
                          values->fields[i].field, values->fields[i].value);
+        }
+        for (std::size_t i = 0; i < values->proposals.size(); ++i) {
+            std::println("{}{}", i == 0 ? "proposals: " : "           ", values->proposals[i].text);
         }
     }
     std::println("");
@@ -1495,6 +1505,13 @@ int cmd_bo_calls(const Args& args) {
                 fields.push_back({{"field", v.field}, {"value", v.value}});
             }
             out["state"] = {{"state", state->state}, {"fields", std::move(fields)}};
+            if (!state->proposals.empty()) {
+                Json proposals = Json::array();
+                for (const bo::ExplainedProposal& p : state->proposals) {
+                    proposals.push_back({{"action", p.action}, {"text", p.text}});
+                }
+                out["state"]["proposals"] = std::move(proposals);
+            }
         }
         print_json(out);
         return exit_ok;
@@ -1513,6 +1530,9 @@ int cmd_bo_calls(const Args& args) {
         std::println("state: {}", state->state);
         for (const bo::ExplainedValue& v : state->fields) {
             std::println("  {}: {}", v.field, v.value);
+        }
+        for (const bo::ExplainedProposal& p : state->proposals) {
+            std::println("  {}", p.text);
         }
     }
     return exit_ok;

@@ -1,0 +1,35 @@
+Test "two directors approve a large payment": passed
+  Step 1 (line 13) passed: we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+    Result: accepted, and the instance is active.
+  Step 2 (line 14) passed: we disburse by dave in person -> pending approval
+    Result: kept as a proposal of disburse, which waits for a person's approval; the instance does not change.
+  Step 3 (line 15) passed: we approve by alice in person -> pending approval
+    Result: an approval of disburse is recorded; the proposal waits for more approvals.
+  Step 4 (line 16) passed: we approve by alice in person -> refused "bo:approved disburse"
+    Result: refused, since this person has approved the proposal of disburse already (bo:approved disburse).
+    The contract text, 4.1.2: Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 5 (line 17) passed: we approve by erin in person -> refused "bo:approver disburse"
+    Result: refused, since the caller is not one whose approval counts for a requirement of approvals of disburse that applies (bo:approver disburse).
+    The contract text, 4.1.2: Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 6 (line 18) passed: we approve by bob -> refused "bo:in-person disburse"
+    Result: refused, since disburse needs a person who proves presence (a passkey or a hardware key) (bo:in-person disburse).
+    The contract text, 4.1.2: Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 7 (line 19) passed: we approve by bob in person -> disbursed
+    Result: accepted, and the instance is disbursed; it is final and takes no more calls.
+
+Test "a small payment needs nobody": passed
+  Step 1 (line 22) passed: we create with amount = HKD 500, directors = (alice, bob, carol)
+    Result: accepted, and the instance is active.
+  Step 2 (line 23) passed: we disburse -> disbursed
+    Result: accepted, and the instance is disbursed; it is final and takes no more calls.
+
+Test "approvals lapse": passed
+  Step 1 (line 26) passed: we create with amount = HKD 2_000_000, directors = (alice, bob, carol) at 2027-01-04
+    Result: accepted, and the instance is active.
+  Step 2 (line 27) passed: we disburse by alice in person -> pending approval
+    Result: kept as a proposal of disburse, which waits for a person's approval; the instance does not change.
+  Step 3 (line 28) passed: we approve by bob in person at 2027-01-12 -> refused "bo:lapsed disburse"
+    Result: refused, since the time for approving the proposal of disburse has passed (bo:lapsed disburse).
+    The contract text, 4.1.2: Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+
+3 tests: 3 passed, 0 failed.

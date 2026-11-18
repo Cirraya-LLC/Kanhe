@@ -1,0 +1,18 @@
+contract Payments
+parties we
+
+thing Payment
+  amount HKD
+  directors list person at most 5
+
+can disburse by we
+  over 1_000_000 requires 2 approvals by directors in person within 7 days
+  active -> disbursed
+
+test "two directors approve a large payment"
+  we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+  we disburse in person by dave -> pending approval
+  we approve in person by alice -> pending approval
+  we approve in person by erin -> refused "bo:approver disburse"
+  we approve by bob -> refused "bo:in-person disburse"
+  we approve in person by bob -> disbursed

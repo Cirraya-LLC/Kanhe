@@ -1,0 +1,58 @@
+test "the one who proposes counts, and alone may be enough" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 7027
+  step 2 passed 2026-01-01 accepted signed event=signed; fuel 10496
+test "presence is the line's" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 7027
+  step 2 passed 2026-01-01 accepted active event=propose:sign; fuel 11256
+  step 3 passed 2026-01-01 refused "bo:approver sign"; fuel 11040
+  step 4 passed 2026-01-01 accepted signed event=approval:sign event=approve:sign event=signed; fuel 14318
+test "AI agents count where no presence is asked" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 7027
+  step 2 passed 2026-01-01 accepted signed event=signed; fuel 10496
+  step 3 passed 2026-01-01 accepted signed event=propose:ship event=approval:ship; fuel 11699
+  step 4 passed 2026-01-01 refused "bo:approved ship"; fuel 11692
+  step 5 passed 2026-01-01 refused "bo:approver ship"; fuel 11377
+  step 6 passed 2026-01-01 accepted shipped event=approval:ship event=approve:ship event=shipped; fuel 13988
+  step 7 passed 2026-01-01 accepted shipped event=propose:audit; fuel 11055
+  step 8 passed 2026-01-01 refused "bo:approver audit"; fuel 11369
+  step 9 passed 2026-01-01 refused "bo:in-person audit"; fuel 11503
+  step 10 passed 2026-01-01 accepted shipped event=approval:audit event=approve:audit; fuel 13925
+test "an AI agent's proposal waits for a person in person" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 6931
+  step 2 passed 2026-01-01 accepted signed event=signed; fuel 10400
+  step 3 passed 2026-01-01 accepted shipped event=shipped; fuel 9745
+  step 4 passed 2026-01-01 accepted shipped event=propose:reimburse; fuel 11084
+  step 5 passed 2026-01-01 refused "bo:approve reimburse"; fuel 11534
+  step 6 passed 2026-01-01 accepted reimbursed event=approval:reimburse event=approve:reimburse event=reimbursed; fuel 14013
+test "a guard that does not hold, and the requirements after the line" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 6597
+  step 2 passed 2026-01-01 accepted signed event=signed; fuel 10066
+  step 3 passed 2026-01-01 refused "bo:requires ship 2"; fuel 8034
+test "another party's people approve on its own ledger" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 6864
+  step 2 passed 2026-01-01 refused "bo:approvals return_order"; fuel 8146
+test "lapsed proposals go when a new one is kept" passed home=role.we
+  step 1 passed 2027-01-01 accepted active event=active; fuel 6717
+  step 2 passed 2027-01-01 accepted active event=propose:note_it event=approval:note_it; fuel 11394
+  step 3 passed 2027-01-20 accepted active event=lapse:note_it event=propose:note_it event=approval:note_it; fuel 13797
+  step 4 passed 2027-01-20 accepted active event=approval:note_it event=approve:note_it; fuel 13582
+test "an instance keeps at most 16 proposals" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 6717
+  step 2 passed 2026-01-01 accepted active event=propose:note_it; fuel 10620
+  step 3 passed 2026-01-01 accepted active event=propose:note_it; fuel 12444
+  step 4 passed 2026-01-01 accepted active event=propose:note_it; fuel 14241
+  step 5 passed 2026-01-01 accepted active event=propose:note_it; fuel 16038
+  step 6 passed 2026-01-01 accepted active event=propose:note_it; fuel 17835
+  step 7 passed 2026-01-01 accepted active event=propose:note_it; fuel 19632
+  step 8 passed 2026-01-01 accepted active event=propose:note_it; fuel 21428
+  step 9 passed 2026-01-01 accepted active event=propose:note_it; fuel 23225
+  step 10 passed 2026-01-01 accepted active event=propose:note_it; fuel 25022
+  step 11 passed 2026-01-01 accepted active event=propose:note_it; fuel 26819
+  step 12 passed 2026-01-01 accepted active event=propose:note_it; fuel 28615
+  step 13 passed 2026-01-01 accepted active event=propose:note_it; fuel 30412
+  step 14 passed 2026-01-01 accepted active event=propose:note_it; fuel 32209
+  step 15 passed 2026-01-01 accepted active event=propose:note_it; fuel 34006
+  step 16 passed 2026-01-01 accepted active event=propose:note_it; fuel 35803
+  step 17 passed 2026-01-01 accepted active event=propose:note_it; fuel 37599
+  step 18 passed 2026-01-01 refused "bo:pending"; fuel 36028
+8 tests: 8 passed, 0 failed

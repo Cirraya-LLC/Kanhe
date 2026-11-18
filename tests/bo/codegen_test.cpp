@@ -241,10 +241,12 @@ public:
     }
 
     /// A call: the function ("" for the creation), its arguments in
-    /// diagnostic notation, and the consents it cites.
+    /// diagnostic notation, and the consents it cites; made by the home's
+    /// acting actor, or by `actor` (a person who approves, R36).
     Outcome call(std::string label, std::string function, std::string_view arguments,
                  std::vector<std::pair<Id, ContractSigner>> consents, std::int64_t time,
-                 const ContractSigner& caller = organization) {
+                 const ContractSigner& caller = organization,
+                 const std::optional<Id>& actor = std::nullopt) {
         protocol::ContractInput input;
         input.function = function.empty() ? creation_ : function;
         input.arguments = value(arguments);
@@ -254,7 +256,7 @@ public:
             REQUIRE(instance_.has_value());
             input.instance = *instance_;
         }
-        input.caller = ledger(0xAC);
+        input.caller = actor.value_or(ledger(0xAC));
         input.caller_signer = caller;
         input.time = static_cast<protocol::Timestamp>(time);
         input.consents = std::move(consents);
@@ -862,6 +864,148 @@ Home split_scenario() {
 }
 
 /// Every scenario, in a fixed order.
+/// Approvals (R36): a payment two of its directors approve in person within
+/// a week, notes anyone two approve, and an action another party starts.
+constexpr std::string_view approvals_source = R"(contract Approvals
+parties we, partner
+
+thing Order
+  amount HKD
+  directors list person at most 5
+
+can disburse by we with note text
+  over 1_000_000 requires 2 approvals by directors in person within 7 days
+  active -> disbursed
+can note_it by we
+  requires 2 approvals within 7 days
+can hand_back by partner
+  requires 1 approval within 7 days
+)";
+
+const Id alice = ledger(0xA1);
+const Id bob = ledger(0xA2);
+const Id carol = ledger(0xA3);
+const Id dave = ledger(0xD4);
+const Id partner = ledger(0x55);
+
+/// The pending entries of an accepted call's state.
+cbor::Array pending_of(const Outcome& o) {
+    REQUIRE(o.accepted() != nullptr);
+    const cbor::Value state = o.accepted()->state.value();
+    const cbor::Value* pending = state.find("pending");
+    REQUIRE(pending != nullptr);
+    REQUIRE(pending->as_array() != nullptr);
+    return *pending->as_array();
+}
+
+/// An accepted call's events, as name and data in diagnostic notation.
+std::vector<std::string> events_of(const Outcome& o) {
+    REQUIRE(o.accepted() != nullptr);
+    std::vector<std::string> out;
+    for (const protocol::ContractEvent& e : o.accepted()->events) {
+        out.push_back(e.name + " " + cbor::diagnostic(e.data));
+    }
+    return out;
+}
+
+/// The approval event of `who`.
+std::string approval_event(const Id& who, std::string_view action, bool in_person) {
+    return std::format(R"(approval {{"by": {}, "action": "{}", "in_person": {}}})", h(who), action,
+                       in_person ? "true" : "false");
+}
+
+Home approvals_scenario() {
+    Home home("approvals-calls", build_text(approvals_source), we);
+    home.source("en", std::string(approvals_source));
+    home.name(partner, "partner");
+    const Outcome created = home.create(
+        "1 create",
+        std::format(R"({{"fields": {{"amount": 200000000, "directors": [{}, {}, {}]}}, )"
+                    R"("parties": {{"partner": {}, "we": {}}}}})",
+                    h(alice), h(bob), h(carol), h(partner), h(we)),
+        t0);
+    REQUIRE(created.accepted() != nullptr);
+    // A director's approval only: the proposal waits; dave proposes, but
+    // is none of the directors.
+    const Outcome proposed =
+        home.call("2 disburse, kept", "disburse", R"({"note": "first"})", {}, t0, present, dave);
+    CHECK(events_of(proposed) == std::vector<std::string>{R"(propose "disburse")"});
+    {
+        const cbor::Array pending = pending_of(proposed);
+        REQUIRE(pending.size() == 1);
+        const cbor::Array* entry = pending[0].as_array();
+        REQUIRE(entry != nullptr);
+        REQUIRE(entry->size() == 5);
+        CHECK(cbor::diagnostic((*entry)[0]) == "\"disburse\"");
+        CHECK(cbor::diagnostic((*entry)[1]) == R"({"note": "first"})");
+        CHECK((*entry)[2].as_int64() == t0);
+        CHECK(cbor::diagnostic((*entry)[3]) == std::format("[{}, 1, true]", h(dave)));
+        CHECK(cbor::diagnostic((*entry)[4]) == "[]");
+    }
+    // The role partner is no person: the call changes nothing else.
+    CHECK(proposed.accepted()->status == "active");
+    const std::string approve_first = R"({"function": "disburse", "arguments": {"note": "first"}})";
+    const Outcome first =
+        home.call("3 approve, alice", "approve", approve_first, {}, t0, present, alice);
+    CHECK(events_of(first) == std::vector<std::string>{approval_event(alice, "disburse", true)});
+    {
+        const cbor::Array pending = pending_of(first);
+        REQUIRE(pending.size() == 1);
+        CHECK(cbor::diagnostic((*pending[0].as_array())[4]) ==
+              std::format("[[{}, 1, true]]", h(alice)));
+    }
+    CHECK(home.call("4 approve, alice again", "approve", approve_first, {}, t0, present, alice)
+              .refused("bo:approved disburse"));
+    CHECK(home.call("5 approve, dave", "approve", approve_first, {}, t0, present, dave)
+              .refused("bo:approver disburse"));
+    CHECK(
+        home.call("6 approve, bob without presence", "approve", approve_first, {}, t0, person, bob)
+            .refused("bo:in-person disburse"));
+    CHECK(home.call("7 approve, an AI agent", "approve", approve_first, {}, t0, agent, bob)
+              .refused("bo:approver disburse"));
+    CHECK(home.call("8 approve, the organization", "approve", approve_first, {}, t0)
+              .refused("bo:approver disburse"));
+    CHECK(home.call("9 approve, no such proposal", "approve",
+                    R"({"function": "disburse", "arguments": {"note": "other"}})", {}, t0, present,
+                    bob)
+              .refused("bo:proposal"));
+    // Notes: anyone of the home counts, the proposer too.
+    const Outcome noted =
+        home.call("10 note_it, dave", "note_it", "null", {}, t0 + day, person, dave);
+    CHECK(events_of(noted) ==
+          std::vector<std::string>{R"(propose "note_it")", approval_event(dave, "note_it", false)});
+    {
+        const cbor::Array pending = pending_of(noted);
+        REQUIRE(pending.size() == 2);
+        const cbor::Array& entry = *pending[1].as_array();
+        CHECK(cbor::diagnostic(entry[3]) == std::format("[{}, 1, false]", h(dave)));
+        CHECK(cbor::diagnostic(entry[4]) == std::format("[[{}, 1, false]]", h(dave)));
+    }
+    // A week and more later, bob's approval comes too late.
+    CHECK(
+        home.call("11 approve, too late", "approve", approve_first, {}, t0 + 8 * day, present, bob)
+            .refused("bo:lapsed disburse"));
+    // A new proposal drops the lapsed ones first, each with its event.
+    const Outcome again =
+        home.call("12 note_it, bob", "note_it", "null", {}, t0 + 9 * day, person, bob);
+    CHECK(events_of(again) == std::vector<std::string>{R"(lapse "disburse")", R"(lapse "note_it")",
+                                                       R"(propose "note_it")",
+                                                       approval_event(bob, "note_it", false)});
+    REQUIRE(pending_of(again).size() == 1);
+    // The second approval completes it: approval, then approve.
+    const Outcome done =
+        home.call("13 approve note_it, carol", "approve",
+                  R"({"function": "note_it", "arguments": null})", {}, t0 + 9 * day, person, carol);
+    CHECK(events_of(done) == std::vector<std::string>{approval_event(carol, "note_it", false),
+                                                      R"(approve "note_it")"});
+    CHECK(pending_of(done).empty());
+    // The partner's people approve on the partner's ledger, never here: an
+    // action it starts whose line applies is refused.
+    CHECK(home.call("14 hand_back, started by the partner", "hand_back", "null", {}, t0 + 9 * day)
+              .refused("bo:approvals hand_back"));
+    return home;
+}
+
 std::vector<Home> scenarios() {
     std::vector<Home> out;
     out.push_back(agreement_scenario());
@@ -870,6 +1014,7 @@ std::vector<Home> scenarios() {
     out.push_back(values_scenario());
     out.push_back(split_scenario());
     out.push_back(defaults_scenario());
+    out.push_back(approvals_scenario());
     return out;
 }
 
@@ -1248,6 +1393,33 @@ TEST_CASE("bo build: splitting into 16 parts at depth 7 stays within a call's fu
     CHECK(read_text(path) == text);
 }
 
+TEST_CASE("bo build: approvals keep proposals of five parts, and count each approval",
+          "[bo][build]") {
+    // R36: approve is in the interface; every call within its bound.
+    const Home home = approvals_scenario();
+    CHECK(home.bounded() > 0);
+    const bo::Build build = build_text(approvals_source);
+    REQUIRE(build.interface.contains("approve"));
+    CHECK(build.interface.at("approve") == protocol::FunctionKind::call);
+    for (const auto& [function, bound] : build.bounds) {
+        INFO(function);
+        CHECK(bound.fuel <= vm::fuel_limit);
+    }
+    // A contract without approvals lines keeps its proposals as before:
+    // [function, arguments].
+    Home ai("ai-proposals",
+            build_text("contract P\nparties we\nthing T\n  n number\ncan go by we\n"
+                       "  AI agent can propose\n  active -> gone\n"),
+            we);
+    REQUIRE(ai.create("create", R"({"fields": {"n": 1}, "parties": {"we": )" + h(we) + "}}", t0)
+                .accepted() != nullptr);
+    const Outcome kept = ai.call("go, an agent", "go", "null", {}, t0, agent);
+    const cbor::Array pending = pending_of(kept);
+    REQUIRE(pending.size() == 1);
+    REQUIRE(pending[0].as_array() != nullptr);
+    CHECK(pending[0].as_array()->size() == 2);
+}
+
 TEST_CASE("bo build: the spec's VAT, every way it can be written, on both sides of its rate change",
           "[bo][build]") {
     std::string golden;
@@ -1385,6 +1557,11 @@ TEST_CASE("bo build: refusals of arguments, and their texts in three languages",
           "requirement 2 of sign is not met");
     CHECK(bo::render_reason("bo:state pledge", pack("zh-Hant-HK")) == "實例目前的狀態不容許 質押");
     CHECK(bo::render_reason("bo:party bank", pack("zh-Hans-CN")) == "银行 尚未确定账本");
+    // Approvals (R36), whose scenario's refusals are among those above.
+    CHECK(bo::render_reason("bo:lapsed disburse", pack("en")) ==
+          "the time for approving the proposal of disburse has passed");
+    CHECK(bo::render_reason("bo:approved disburse", pack("en")) ==
+          "this person has approved the proposal of disburse already");
     CHECK(!bo::render_reason("too late", pack("en")).has_value());
     CHECK(!bo::render_reason("bo:unknown", pack("en")).has_value());
     CHECK(!bo::render_reason("bo:requires sign", pack("en")).has_value());
@@ -1704,7 +1881,10 @@ TEST_CASE("bo build: write the runs for the Python reference", "[.codegen-refere
              {"services", golden_dir / "check-services" / "source.bo"},
              // A time rule's action on the next line of its block, and
              // the final states it leaves.
-             {"rule-block", golden_dir / "test" / "rule-block" / "source.bo"}}) {
+             {"rule-block", golden_dir / "test" / "rule-block" / "source.bo"},
+             // Approvals: the spec's payment and its tests, and more.
+             {"example-approvals", golden_dir / "example-approvals-en" / "source.bo"},
+             {"approvals", golden_dir / "test" / "approvals" / "source.bo"}}) {
         const std::string text = read_text(file);
         const bo::Compiled compiled = bo::compile(text, *bo::make_pack_set({}).set);
         REQUIRE(compiled.build.has_value());
@@ -1748,7 +1928,8 @@ TEST_CASE("bo build: write the runs for the Python reference", "[.codegen-refere
         }
     }
     // The spec's examples, each in four spellings that build to one code.
-    for (const std::string_view example : {"receivable", "ip-pool", "split", "tax", "vps"}) {
+    for (const std::string_view example :
+         {"receivable", "ip-pool", "split", "tax", "vps", "approvals"}) {
         const std::string name = "example-" + std::string(example);
         nlohmann::ordered_json texts = nlohmann::ordered_json::array();
         for (const auto& [language, dir] :

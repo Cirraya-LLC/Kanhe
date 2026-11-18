@@ -101,7 +101,7 @@ std::vector<Case> cases() {
     out.push_back({"agreement", spellings(golden_dir / "build", "agreement")});
     out.push_back(
         {"supply-agreement", {source_dir / "examples/supply-agreement/supply-agreement.bo"}});
-    for (const std::string_view e : {"receivable", "vps", "ip-pool", "split", "tax"}) {
+    for (const std::string_view e : {"receivable", "vps", "ip-pool", "split", "tax", "approvals"}) {
         out.push_back({std::string(e), spellings(golden_dir, "example-" + std::string(e))});
     }
     out.push_back({"check-agreement", {golden_dir / "check-agreement/source.bo"}});
@@ -186,7 +186,7 @@ TEST_CASE("the contract text's goldens, the same from every spelling", "[bo][exp
             }
         }
     }
-    CHECK(texts == 66);
+    CHECK(texts == 69);
 }
 
 TEST_CASE("the contract text says what compiled code decides", "[bo][explain]") {
@@ -245,6 +245,66 @@ TEST_CASE("the contract text says what compiled code decides", "[bo][explain]") 
     CHECK(in_person->rules == std::vector<std::string_view>{"R6", "R13"});
     CHECK(model::action_amount(agreement, agreement.actions[1]) == "field.amount");
     CHECK(model::action_amount(agreement, agreement.actions[0]) == "new_amount");
+}
+
+TEST_CASE("approvals: each line a requirement, and the function that approves", "[bo][explain]") {
+    const model::Model payments = model_of(golden_dir / "example-approvals-en/source.bo");
+    const Explained e = explain(payments, nullptr);
+    // The line is requirement 1 of disburse, as bo:requires numbers it,
+    // marked with the threshold's rule and its own.
+    const std::vector<const ExplainedClause*> lines = clauses_of(e, "approvals");
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0]->function == "disburse");
+    CHECK(lines[0]->requirement == 1);
+    CHECK(lines[0]->rules == std::vector<std::string_view>{"R6", "R36"});
+    CHECK(lines[0]->text.starts_with(
+        "Requirement 1: if the amount is over HKD 1,000,000, 2 of directors"));
+    CHECK(contains(lines[0]->text, "each in person"));
+    CHECK(contains(lines[0]->text, "of its proposal"));
+    // approve, for the proposals kept for approvals (no AI agent proposes).
+    const std::vector<const ExplainedClause*> approve = clauses_of(e, "approve");
+    REQUIRE(approve.size() == 1);
+    CHECK(approve[0]->rules == std::vector<std::string_view>{"R36"});
+    CHECK(
+        approve[0]->text.starts_with("approve (function approve), for requirements of approvals"));
+    // The same clauses in each language.
+    for (const std::string_view id : {"zh-Hant-HK", "zh-Hans-CN"}) {
+        INFO(id);
+        const Explained other = explain(payments, language(id));
+        REQUIRE(clauses_of(other, "approvals").size() == 1);
+        CHECK(clauses_of(other, "approvals")[0]->requirement == 1);
+        CHECK(clauses_of(other, "approve").size() == 1);
+    }
+    // A requires line after it is requirement 2; AI agents that approve
+    // have a clause of their own; an AI agent's proposals keep R14's.
+    const auto text_of = [](std::string_view source) {
+        const Lexed lexed = lex(source, official());
+        const Parsed parsed = parse(source, lexed);
+        INFO(source);
+        REQUIRE(parsed.diagnostics.empty());
+        Checked checked = check(source, parsed.file);
+        REQUIRE(!has_errors(checked.diagnostics));
+        return explain(checked.model, nullptr);
+    };
+    const Explained both = text_of("contract C\nparties we\nthing T\n  amount HKD\n"
+                                   "can disburse by we\n  requires 2 approvals within 30 days\n"
+                                   "  requires amount > HKD 0\n  AI agent can approve\n"
+                                   "  active -> handed\n"
+                                   "can relay by we\n  AI agent can propose\n  active -> mailed\n");
+    std::vector<std::pair<std::string, std::uint32_t>> numbers;
+    for (const std::string_view kind : {"approvals", "requirement"}) {
+        for (const ExplainedClause* c : clauses_of(both, kind)) {
+            numbers.emplace_back(c->function, c->requirement);
+        }
+    }
+    CHECK(numbers ==
+          std::vector<std::pair<std::string, std::uint32_t>>{{"disburse", 1}, {"disburse", 2}});
+    std::size_t approving = 0;
+    for (const ExplainedClause* c : clauses_of(both, "agents")) {
+        approving += c->text.starts_with("An AI agent's approval counts") ? 1U : 0U;
+    }
+    CHECK(approving == 1);
+    CHECK(clauses_of(both, "approve").size() == 2);
 }
 
 TEST_CASE("every inferred clause is marked, and every rule used explained", "[bo][explain]") {

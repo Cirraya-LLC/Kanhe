@@ -160,6 +160,21 @@ struct Reader {
             }
             return cbor::Value::bytes(*bytes);
         }
+        case m::TypeKind::person: {
+            // A person of the home (R36): its actor id.
+            const auto* text = std::get_if<std::string>(&v.value);
+            std::optional<Bytes> bytes;
+            if (text != nullptr) {
+                if (auto decoded = from_hex(*text)) {
+                    bytes = std::move(*decoded);
+                }
+            }
+            if (!bytes || bytes->size() != 32) {
+                problem(name, "actor", type, "a person's actor id: 64 hexadecimal digits");
+                return std::nullopt;
+            }
+            return cbor::Value::bytes(*bytes);
+        }
         case m::TypeKind::list: {
             const auto* items = std::get_if<std::vector<Value>>(&v.value);
             if (items == nullptr || type.element.size() != 1) {

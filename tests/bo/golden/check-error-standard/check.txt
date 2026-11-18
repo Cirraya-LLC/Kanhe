@@ -47,4 +47,4 @@ test "steps"
 17:5 error check.standard-field: the standard terms of redeem use the field quantity, which each instance must hold and actions may change: declare it in the kind's block, with its type
 18:5 error check.standard-unreachable: dispute can never start: under its standard terms it starts only from paid, which no instance of this contract ever reaches
 22:12 error check.test-needs-to: transfer takes its counterparty from each call: write to PARTY (supplier transfer to factor1)
-23:44 error check.test-proposal: -> pending approval: only a call by AI agent to an action an AI agent may only propose (AI agent can propose) is kept as a proposal, and transfer is not such an action
+23:44 error check.test-proposal: -> pending approval: only a call by AI agent to an action an AI agent may only propose (AI agent can propose), or a call of an action with a requirement of approvals (or an approval of one), is kept as a proposal, and transfer is not such an action

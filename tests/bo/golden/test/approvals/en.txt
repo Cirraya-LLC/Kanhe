@@ -1,0 +1,122 @@
+Test "the one who proposes counts, and alone may be enough": passed
+  Step 1 (line 39) passed: we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 40) passed: we sign by alice in person -> signed
+    Result: accepted, and the instance is signed.
+
+Test "presence is the line's": passed
+  Step 1 (line 43) passed: we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 44) passed: we sign by alice -> pending approval
+    Result: kept as a proposal of sign, which waits for a person's approval; the instance does not change.
+  Step 3 (line 45) passed: we approve by AI agent -> refused "bo:approver sign"
+    Result: refused, since the caller is not one whose approval counts for a requirement of approvals of sign that applies (bo:approver sign).
+    The contract text, 4.1.2: Requirement 1: 1 of directors (people of us) must approve it, each in person, within 30 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 4 (line 46) passed: we approve by bob in person -> signed
+    Result: accepted, and the instance is signed.
+
+Test "AI agents count where no presence is asked": passed
+  Step 1 (line 49) passed: we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 50) passed: we sign by alice in person -> signed
+    Result: accepted, and the instance is signed.
+  Step 3 (line 51) passed: we ship by dave -> pending approval
+    Result: kept as a proposal of ship, which waits for a person's approval; the instance does not change.
+  Step 4 (line 52) passed: we approve by dave -> refused "bo:approved ship"
+    Result: refused, since this person has approved the proposal of ship already (bo:approved ship).
+    The contract text, 4.2.2: Requirement 1: if the amount is over HKD 10,000, 2 of the people of us whose delegations let them call approve must approve it, within 7 days of its proposal, the person who proposes it counting; until then the call is kept as a proposal.
+  Step 5 (line 53) passed: we approve -> refused "bo:approver ship"
+    Result: refused, since the caller is not one whose approval counts for a requirement of approvals of ship that applies (bo:approver ship).
+    The contract text, 4.2.2: Requirement 1: if the amount is over HKD 10,000, 2 of the people of us whose delegations let them call approve must approve it, within 7 days of its proposal, the person who proposes it counting; until then the call is kept as a proposal.
+  Step 6 (line 54) passed: we approve by AI agent -> shipped
+    Result: accepted, and the instance is shipped.
+  Step 7 (line 55) passed: we audit by AI agent -> pending approval
+    Result: kept as a proposal of audit, which waits for a person's approval; the instance does not change.
+  Step 8 (line 56) passed: we approve by AI agent -> refused "bo:approver audit"
+    Result: refused, since the caller is not one whose approval counts for a requirement of approvals of audit that applies (bo:approver audit).
+    The contract text, 4.4.2: Requirement 1: 1 of chair (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 9 (line 57) passed: we approve by carol -> refused "bo:in-person audit"
+    Result: refused, since audit needs a person who proves presence (a passkey or a hardware key) (bo:in-person audit).
+    The contract text, 4.4.2: Requirement 1: 1 of chair (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal.
+  Step 10 (line 58) passed: we approve by carol in person
+    Result: accepted, and the instance is shipped.
+
+Test "an AI agent's proposal waits for a person in person": passed
+  Step 1 (line 61) passed: we create with amount = HKD 500, directors = (alice, bob), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 62) passed: we sign by alice in person -> signed
+    Result: accepted, and the instance is signed.
+  Step 3 (line 63) passed: we ship -> shipped
+    Result: accepted, and the instance is shipped.
+  Step 4 (line 64) passed: we reimburse by AI agent -> pending approval
+    Result: kept as a proposal of reimburse, which waits for a person's approval; the instance does not change.
+  Step 5 (line 65) passed: we approve by alice -> refused "bo:approve reimburse"
+    Result: refused, since reimburse was proposed by an AI agent: a person who proves presence must approve it (bo:approve reimburse).
+  Step 6 (line 66) passed: we approve by bob in person -> reimbursed
+    Result: accepted, and the instance is reimbursed.
+
+Test "a guard that does not hold, and the requirements after the line": passed
+  Step 1 (line 69) passed: we create with amount = HKD 0, directors = (alice), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 70) passed: we sign by alice in person -> signed
+    Result: accepted, and the instance is signed.
+  Step 3 (line 71) passed: we ship -> refused "bo:requires ship 2"
+    Result: refused, since requirement 2 of ship is not met (bo:requires ship 2).
+    The contract text, 4.2.3: Requirement 2: the amount is more than HKD 0.
+
+Test "another party's people approve on its own ledger": passed
+  Step 1 (line 74) passed: we create with amount = HKD 50_000, directors = (alice), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 75) passed: partner return_order -> refused "bo:approvals return_order"
+    Result: refused, since return_order needs approvals by the people of the home ledger: another party cannot start it while a requirement of approvals applies (bo:approvals return_order).
+    The contract text, 4.6.2: Requirement 1: 1 of the people of partner whose delegations let them call approve must approve it, within 7 days of its proposal, the person who proposes it counting; until then the call is kept as a proposal.
+
+Test "lapsed proposals go when a new one is kept": passed
+  Step 1 (line 78) passed: we create with amount = HKD 1, directors = (alice), chair = carol at 2027-01-01
+    Result: accepted, and the instance is active.
+  Step 2 (line 79) passed: we note_it by dave -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 3 (line 80) passed: we note_it by erin at 2027-01-20 -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 4 (line 81) passed: we approve by frank
+    Result: accepted, and the instance is active.
+
+Test "an instance keeps at most 16 proposals": passed
+  Step 1 (line 84) passed: we create with amount = HKD 1, directors = (alice), chair = carol
+    Result: accepted, and the instance is active.
+  Step 2 (line 85) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 3 (line 86) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 4 (line 87) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 5 (line 88) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 6 (line 89) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 7 (line 90) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 8 (line 91) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 9 (line 92) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 10 (line 93) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 11 (line 94) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 12 (line 95) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 13 (line 96) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 14 (line 97) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 15 (line 98) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 16 (line 99) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 17 (line 100) passed: we note_it -> pending approval
+    Result: kept as a proposal of note_it, which waits for a person's approval; the instance does not change.
+  Step 18 (line 101) passed: we note_it -> refused "bo:pending"
+    Result: refused, since the instance already keeps 16 proposals awaiting approval (bo:pending).
+
+8 tests: 8 passed, 0 failed.

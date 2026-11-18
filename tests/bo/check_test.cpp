@@ -179,8 +179,8 @@ TEST_CASE("the checker's goldens", "[bo][check]") {
 }
 
 TEST_CASE("each example, in each language or mixed, gives the same model", "[bo][check]") {
-    for (const std::string group :
-         {"example-receivable", "example-ip-pool", "example-vps", "example-split", "example-tax"}) {
+    for (const std::string group : {"example-receivable", "example-ip-pool", "example-vps",
+                                    "example-split", "example-tax", "example-approvals"}) {
         const std::string first = read_text(golden_dir / (group + "-en") / "source.bo");
         const Checked english = check_text(first);
         CHECK(!has_errors(english.diagnostics));
@@ -198,6 +198,7 @@ TEST_CASE("each example, in each language or mixed, gives the same model", "[bo]
     CHECK(check_codes(read_text(golden_dir / "example-split-en" / "source.bo")).empty());
     CHECK(check_codes(read_text(golden_dir / "example-vps-en" / "source.bo")).empty());
     CHECK(check_codes(read_text(golden_dir / "example-tax-en" / "source.bo")).empty());
+    CHECK(check_codes(read_text(golden_dir / "example-approvals-en" / "source.bo")).empty());
 }
 
 TEST_CASE("every check has an error golden, and every rule is seen", "[bo][check]") {
@@ -230,7 +231,7 @@ TEST_CASE("every check has an error golden, and every rule is seen", "[bo][check
         CHECK(find_rule(models.substr(at + 1, end - at - 1)) != nullptr);
         at = end;
     }
-    CHECK(rule_specs().size() == 35);
+    CHECK(rule_specs().size() == 36);
     CHECK(rule_specs().front().id == "R1");
 }
 
@@ -532,6 +533,104 @@ TEST_CASE("consents, presence, agents, and thresholds", "[bo][check]") {
     // consent of names a party.
     CHECK(check_codes("use finance\ncontract C\nparties we\nasset A\n  amount HKD\ncan ship by we\n"
                       "  requires consent of amount\n") == "check.type");
+}
+
+TEST_CASE("approvals: the line, the person type, and their checks", "[bo][check]") {
+    // R36: the line as the model holds it, the people a type, and the
+    // permit for AI agents.
+    const std::string head = "contract C\nparties we, partner\nthing T\n  amount HKD\n"
+                             "  due date\n  chair person\n  directors list person at most 3\n";
+    const std::string dumped = model_of(
+        head + "can go by we with treasurer person\n"
+               "  over 1_000_000 requires 2 approvals by directors in person within 7 days\n"
+               "  requires 1 approval by (chair, treasurer) within 1 month\n"
+               "  AI agent can approve\n"
+               "  active -> gone\n");
+    CHECK(dumped.find("field chair instance person\n") != std::string::npos);
+    CHECK(dumped.find("field directors instance list 3 person\n") != std::string::npos);
+    CHECK(dumped.find("can go own by=role.we agents=delegation{R14} agents=approve\n") !=
+          std::string::npos);
+    CHECK(dumped.find("  input treasurer instance person\n") != std::string::npos);
+    CHECK(dumped.find("  approvals 2 by=directors in_person within=(duration time.day 7) "
+                      "guard=(cond.over (money cur.HKD 1000000){R6}){R36}\n") != std::string::npos);
+    CHECK(dumped.find("  approvals 1 by=(list chair treasurer) "
+                      "within=(duration time.month 1){R36}\n") != std::string::npos);
+    // People compare with = and in.
+    CHECK(check_codes(head + "can go by we with who person\n  requires who = chair\n"
+                             "  requires who in directors\n")
+              .empty());
+    CHECK(check_codes(head + "can go by we with who person\n  requires who = partner\n") ==
+          "check.operands");
+    const auto line = [&](std::string_view text) {
+        return check_codes(head + "can go by we\n" + std::string(text));
+    };
+    // check.approvals: the count, the total, within, the place, the guard.
+    CHECK(line("  requires 0 approvals within 7 days\n") == "check.approvals");
+    CHECK(line("  requires 17 approvals within 7 days\n") == "check.approvals");
+    CHECK(line("  requires 2.5 approvals within 7 days\n") == "check.approvals");
+    CHECK(line("  requires 16 approvals within 7 days\n"
+               "  over 1_000 requires 16 approvals within 7 days\n") == "");
+    CHECK(line("  requires 16 approvals within 7 days\n"
+               "  over 1_000 requires 16 approvals within 7 days\n"
+               "  over 2_000 requires 1 approval within 7 days\n") == "check.approvals");
+    CHECK(line("  requires 2 approvals by directors\n") == "check.approvals");
+    CHECK(line("  requires 1 approval within 0 days\n") == "check.approvals");
+    CHECK(line("  requires 1 approval within 366 days\n") == "");
+    CHECK(line("  requires 1 approval within 367 days\n") == "check.approvals");
+    CHECK(line("  requires 1 approval within 12 months\n") == "");
+    CHECK(line("  requires 1 approval within 13 months\n") == "check.approvals");
+    CHECK(line("  if amount > HKD 5\n    requires 1 approval within 7 days\n") ==
+          "check.approvals");
+    CHECK(line("  each d in directors\n    requires 1 approval within 7 days\n") ==
+          "check.approvals");
+    CHECK(line("  in person requires 1 approval within 7 days\n") == "check.approvals");
+    // check.approvals-by: people only.
+    CHECK(line("  requires 1 approval by partner within 7 days\n") == "check.approvals-by");
+    CHECK(line("  requires 1 approval by 5 within 7 days\n") == "check.approvals-by");
+    CHECK(line("  requires 1 approval by amount within 7 days\n") == "check.approvals-by");
+    // check.when-approvals: a keeper calls a time rule, and nobody approves.
+    CHECK(check_codes(head + "when due\n  requires 1 approval within 7 days\n") ==
+          "check.when-approvals");
+    CHECK(check_codes(head + "can go by we\n  requires 1 approval within 7 days\n"
+                             "  active -> gone\nwhen due go\n") == "check.when-approvals");
+    // A rule for answers refuses nothing, and waits for nobody.
+    CHECK(check_codes(head + "can ask by we\n  request sync within 1 day\n"
+                             "when sync done\n  requires 1 approval within 7 days\n") ==
+          "check.answer-line");
+    // AI agent can approve needs a line of approvals.
+    CHECK(line("  AI agent can approve\n") == "check.permit");
+    {
+        const std::string source = head + "can go by we\n  AI agent can approve\n";
+        const Checked checked = check_text(source);
+        REQUIRE(checked.diagnostics.size() == 1);
+        CHECK(checked.diagnostics[0].span.line == 9);
+        CHECK(checked.diagnostics[0].span.column == 3);
+        CHECK(dump(checked.model).find("agents=approve") == std::string::npos);
+    }
+    // Tests: the home's steps name the person who calls; persons are names
+    // only tests use.
+    const std::string go = head + "can go by we\n  requires 1 approval by chair within 7 days\n"
+                                  "  active -> gone\n";
+    const auto steps = [&](std::string_view text) {
+        return check_codes(go +
+                           "test\n  we create with amount = HKD 1, due = 2027-01-01, "
+                           "chair = alice, directors = (bob, carol)\n" +
+                           std::string(text));
+    };
+    CHECK(steps("  we go by alice in person -> gone\n  we approve by bob -> pending approval\n")
+              .empty());
+    CHECK(steps("  we go -> pending approval\n").empty());
+    CHECK(model_of(go + "test\n  we create with amount = HKD 1, due = 2027-01-01, chair = alice, "
+                        "directors = (bob, carol)\n  we go by dave in person -> pending approval\n")
+              .find("  step role.we go in_person person=dave expect=proposed\n") !=
+          std::string::npos);
+    CHECK(steps("  partner go by bob\n") == "check.test-signer");
+    CHECK(steps("  we go by partner\n") == "check.test-signer");
+    CHECK(steps("  we go by go\n") == "check.test-signer");
+    CHECK(check_codes(go + "test\n  we create with amount = HKD 1, due = 2027-01-01, "
+                           "chair = \"alice\", directors = (bob)\n") == "check.test-value");
+    CHECK(check_codes(go + "test\n  we create with amount = HKD 1, due = 2027-01-01, "
+                           "chair = alice, directors = (a, b, c, d)\n") == "check.test-value");
 }
 
 TEST_CASE("time rules: events, duties, and what is due", "[bo][check]") {

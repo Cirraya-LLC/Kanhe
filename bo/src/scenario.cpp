@@ -40,6 +40,9 @@ constexpr std::string_view ledger_prefix = "kanhe-bo-test ledger ";
 constexpr std::string_view contract_seed = "kanhe-bo-test contract";
 constexpr std::string_view actor_seed = "kanhe-bo-test actor";
 constexpr std::string_view instance_seed = "kanhe-bo-test instance";
+/// A person only tests name (R36: `by alice`): its actor id is the SHA-256
+/// of this prefix and the name.
+constexpr std::string_view person_prefix = "kanhe-bo-test person ";
 /// A call's statement id, which request ids derive from: this prefix,
 /// the instance's id in hex, a space, and its head before the call.
 constexpr std::string_view call_prefix = "kanhe-bo-test call ";
@@ -111,6 +114,10 @@ ContractSigner signer_of(const m::Step& step) {
     if (step.in_person) {
         return ContractSigner{1, protocol::PresenceMethod::webauthn, std::nullopt};
     }
+    if (!step.person.empty()) {
+        // A person of the home who signs without presence (R36).
+        return ContractSigner{1, std::nullopt, std::nullopt};
+    }
     if (step.agent) {
         return ContractSigner{2, std::nullopt, std::string("bo-test-agent")};
     }
@@ -149,10 +156,14 @@ first_proposal(const std::optional<protocol::ContractInstanceView>& instance) {
     if (list == nullptr || list->empty()) {
         return std::nullopt;
     }
+    // [function, arguments], or with approvals lines (R36) [function,
+    // arguments, time, proposer, approvals]: its function and arguments.
     const cbor::Array* entry = list->front().as_array();
-    return entry != nullptr && entry->size() == 2 && entry->front().as_text() != nullptr
-               ? std::optional(*entry)
-               : std::nullopt;
+    if (entry == nullptr || (entry->size() != 2 && entry->size() != 5) ||
+        entry->front().as_text() == nullptr) {
+        return std::nullopt;
+    }
+    return cbor::Array{(*entry)[0], (*entry)[1]};
 }
 
 /// A request an instance made that no answer has closed.
@@ -327,7 +338,22 @@ cbor::Value Runner::arguments(const m::Step& step, const m::Action* action, cons
 
 cbor::Value Runner::given_value(const m::Expr& e, const Ledger& l) {
     // A party is its ledger (a role's, bound or its own; a ledger only tests
-    // name); a list of parties, theirs.
+    // name); a list of parties, theirs. A person only tests name (R36) is
+    // its actor id; a list of people, theirs.
+    const auto person = [&](const m::Expr& p) {
+        return cbor::Value::bytes(hash_of(std::string(person_prefix) + p.name, provider_).bytes());
+    };
+    if (e.type.kind == m::TypeKind::person) {
+        return person(e);
+    }
+    if (e.type.kind == m::TypeKind::list && e.type.element.size() == 1 &&
+        e.type.element[0].kind == m::TypeKind::person) {
+        cbor::Array items;
+        for (const m::Expr& o : e.operands) {
+            items.push_back(person(o));
+        }
+        return cbor::Value::array(std::move(items));
+    }
     const auto party = [&](const m::Expr& p) {
         const m::TestParty who{p.span, p.concept_entry, p.name, p.refers == m::Refers::party};
         return cbor::Value::bytes(ledger_of(who, l).bytes());
@@ -466,9 +492,20 @@ void Runner::accept(const m::Step& step, const protocol::ContractAccept& a, Ledg
                                " late=" + std::to_string(*late->as_int64()));
             continue;
         }
+        // An approval (R36): {"by": ACTOR, "action": ACTION, "in_person": BOOL}.
+        if (const cbor::Value* approved = e.data.find("action");
+            e.name == "approval" && approved != nullptr && approved->as_text() != nullptr) {
+            r.events.push_back(e.name + ":" + *approved->as_text());
+            r.approved = *approved->as_text();
+            continue;
+        }
         r.events.push_back(action != nullptr ? e.name + ":" + *action : e.name);
         if (e.name == "propose" && action != nullptr) {
             r.proposed = *action;
+        }
+        if (e.name == "approve") {
+            // The proposal completed: no approval waits.
+            r.approved.clear();
         }
         if (std::string made = bill_text(e.data); !made.empty()) {
             r.bill = std::move(made);
@@ -684,7 +721,10 @@ void Runner::run_step(const m::Step& step, Ledger& l, StepResult& r) {
         if (!step.creation) {
             input.instance = l.instance;
         }
-        input.caller = actor_;
+        // The home's acting actor, or the person the step names (R36).
+        input.caller = step.person.empty()
+                           ? actor_
+                           : hash_of(std::string(person_prefix) + step.person, provider_);
         // The home's party signs the call; anyone else's call is made by the
         // home's registrar, and the subject signs its consent.
         input.caller_signer = subject == l.home ? own : organization;
@@ -766,7 +806,9 @@ bool passes(const m::Step& step, const StepResult& r) {
     case m::Expectation::waits:
         return r.happened == Happened::waits && r.waits == r.expected_waits;
     case m::Expectation::proposed:
-        return r.happened == Happened::accepted && !r.proposed.empty();
+        // Kept as a proposal, or an approval recorded while the proposal
+        // waits for more (R36).
+        return r.happened == Happened::accepted && (!r.proposed.empty() || !r.approved.empty());
     }
     return false;
 }
@@ -1243,6 +1285,12 @@ std::string outcome_text(const StepResult& result, const TestResults& results,
                        {{"action", c != nullptr ? spell(c->id, language) : result.proposed}},
                        language);
         }
+        if (!result.approved.empty()) {
+            const Concept* c = find_concept("act." + result.approved);
+            return say("outcome-approval",
+                       {{"action", c != nullptr ? spell(c->id, language) : result.approved}},
+                       language);
+        }
         const std::string state = state_word(result.state, language);
         std::string out = result.consents.empty()
                               ? say("outcome-accepted", {{"state", state}}, language)
@@ -1336,6 +1384,12 @@ const ExplainedClause* refusal_clause(const Explained& text, const m::Model& mod
                 return &c;
             }
             if (code == "state" && c.function == action && c.kind == "transition") {
+                return &c;
+            }
+            // Approvals (R36): the action's first approvals line.
+            if ((code == "approvals" || code == "approved" || code == "approver" ||
+                 code == "lapsed" || code == "in-person") &&
+                c.function == action && c.kind == "approvals") {
                 return &c;
             }
             // A part too deep to split; parts and recipients that differ.

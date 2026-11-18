@@ -63,6 +63,7 @@ struct Known {
     const Concept* in_person;
     const Concept* request;
     const Concept* within;
+    const Concept* approval;
 };
 
 const Concept* concept_of(std::string_view id) noexcept {
@@ -81,7 +82,7 @@ const Known& known() {
         concept_of("kw.reject"),     concept_of("kw.test"),        concept_of("kw.use"),
         concept_of("charge.charge"), concept_of("charge.tax"),     concept_of("charge.applies_to"),
         concept_of("time.at"),       concept_of("cond.in_person"), concept_of("kw.request"),
-        concept_of("cond.within"),
+        concept_of("cond.within"),   concept_of("cond.approval"),
     };
     return k;
 }
@@ -479,6 +480,10 @@ private:
     void answer_rule(std::vector<ast::Clause>& out);
     void test(std::vector<ast::Clause>& out);
     bool request(std::vector<Statement>& out);
+    /// True if the rest of the line holds the word that counts approvals:
+    /// its `requires` is a requirement of approvals.
+    [[nodiscard]] bool approvals_ahead() const;
+    bool approvals(std::vector<Statement>& out, std::size_t first, std::optional<Expr> guard);
     std::optional<ast::Field> field(bool input);
     std::optional<ast::Set> set_item();
     std::optional<ast::Do> action(bool step);
@@ -1278,6 +1283,75 @@ bool Parser::request(std::vector<Statement>& out) {
     return true;
 }
 
+bool Parser::approvals_ahead() const {
+    for (std::size_t i = pos_; i < tokens_.size(); ++i) {
+        const Token& t = tokens_[i];
+        if (t.kind == TokenKind::newline || t.kind == TokenKind::end ||
+            t.kind == TokenKind::indent || t.kind == TokenKind::dedent) {
+            return false;
+        }
+        if (is_kw(t, known().approval)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// `requires N approvals [by PEOPLE] [in person] within DURATION` (R36), the
+/// parts after `requires` in any order, each once: `requires` is taken, and
+/// `guard` is what came before it.
+bool Parser::approvals(std::vector<Statement>& out, const std::size_t first,
+                       std::optional<Expr> guard) {
+    const Known& k = known();
+    ast::Approvals a;
+    a.guard = std::move(guard);
+    while (!at_line_end()) {
+        const Token& t = peek();
+        if (t.kind == TokenKind::number && is_kw(peek(1), k.approval)) {
+            // 2 approvals, 2人批核: the number, then the word.
+            if (a.count) {
+                return fail(t.span, "parse.duplicate", {{"word", written(peek(1))}});
+            }
+            a.count = token_expr(take());
+            take();
+        } else if (is_kw(t, k.approval)) {
+            return fail(t.span, "parse.approvals", {{"found", written(t)}});
+        } else if (is_kw(t, k.by)) {
+            const Token& keyword = take();
+            if (a.by) {
+                return fail(keyword.span, "parse.duplicate", {{"word", written(keyword)}});
+            }
+            a.by = required_operand("parse.expected-value");
+            if (!a.by) {
+                return false;
+            }
+        } else if (is_kw(t, k.in_person) && t.piece == Piece::whole) {
+            if (a.in_person) {
+                return fail(t.span, "parse.duplicate", {{"word", written(t)}});
+            }
+            a.in_person = token_expr(take());
+        } else if (starts_value()) {
+            const Token& at_start = peek();
+            std::optional<Expr> deadline = operand();
+            if (!deadline) {
+                return false;
+            }
+            if (deadline->kind != ExprKind::apply || deadline->concept_entry != k.within) {
+                return fail(deadline->span, "parse.approvals", {{"found", written(at_start)}});
+            }
+            if (a.within) {
+                return fail(at_start.span, "parse.duplicate", {{"word", written(at_start)}});
+            }
+            a.within = std::move(*deadline);
+        } else {
+            return fail_found("parse.trailing");
+        }
+    }
+    a.span = span_from(first);
+    out.push_back(Statement{std::move(a)});
+    return true;
+}
+
 void Parser::test(std::vector<ast::Clause>& out) {
     const std::size_t first = pos_;
     const Token& keyword = take();
@@ -1524,6 +1598,9 @@ bool Parser::simple(std::vector<Statement>& out) {
     const Token& t = peek();
     if (is_kw(t, k.requires_)) {
         take();
+        if (approvals_ahead()) {
+            return approvals(out, first, std::nullopt);
+        }
         std::optional<Expr> cond = required_condition();
         if (!cond) {
             return false;
@@ -1588,6 +1665,9 @@ bool Parser::simple(std::vector<Statement>& out) {
     if (at_kw(k.requires_)) {
         // GUARD requires CONDITION: over 5_000_000 requires in person.
         take();
+        if (approvals_ahead()) {
+            return approvals(out, first, std::move(*e));
+        }
         std::optional<Expr> cond = required_condition();
         if (!cond) {
             return false;
@@ -1933,6 +2013,25 @@ void statement(std::string& out, const Statement& s, std::size_t depth) {
                 for (const ast::Set& w : r.with) {
                     add_line(out, depth + 1, set_text(w));
                 }
+            },
+            [&](const ast::Approvals& a) {
+                std::string text = "approvals";
+                if (a.count) {
+                    text += " count=" + dump(*a.count);
+                }
+                if (a.by) {
+                    text += " by=" + dump(*a.by);
+                }
+                if (a.in_person) {
+                    text += " in_person";
+                }
+                if (a.within) {
+                    text += " within=" + dump(*a.within);
+                }
+                if (a.guard) {
+                    text += " guard=" + dump(*a.guard);
+                }
+                add_line(out, depth, text);
             },
             [&](const ast::Expect& e) {
                 std::string text = "expect";

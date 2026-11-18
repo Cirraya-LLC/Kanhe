@@ -321,11 +321,11 @@ TEST_CASE("another compiler's output is reported as such", "[bo][build]") {
     newer.compiler = other_codegen();
     auto bundle = decode_source_bundle(*deploy.source);
     REQUIRE(bundle.has_value());
-    bundle->packs[2].version = 7;
+    bundle->packs[2].version = 8;
     newer.source = *encode_source_bundle(*bundle);
     r = rebuilt(newer);
     CHECK(r.status == RebuildStatus::other_compiler);
-    CHECK(mentions(r, "zh-Hant-HK version 7; this compiler carries version 6"));
+    CHECK(mentions(r, "zh-Hant-HK version 8; this compiler carries version 7"));
     // A vocabulary pack version this compiler does not carry.
     bundle = decode_source_bundle(*deploy.source);
     REQUIRE(bundle->vocabulary.size() == 1);
@@ -490,6 +490,25 @@ TEST_CASE("a deploy made before vocabulary packs still rebuilds", "[bo][build]")
     with_use.source = "use commerce\n" + old_source;
     edited.source = *encode_source_bundle(with_use);
     CHECK(rebuilt(edited).status == RebuildStatus::malformed);
+}
+
+TEST_CASE("a deploy made before approvals still rebuilds, its names as they were", "[bo][build]") {
+    // Read with the official packs version 6, `approvals` and 須由 are names
+    // of the contract's own; today's packs read them as approvals.
+    const std::string old_source = "contract Votes\nparties we\nthing T\n  approvals number\n"
+                                   "can 須由 by we\n  approvals = approvals + 1\n";
+    PackSetRead then = make_pack_set({}, Officials::before_approvals);
+    REQUIRE(then.set.has_value());
+    const protocol::ContractDeployBody old_deploy = deploy_of(old_source, *then.set);
+    const auto bundle = decode_source_bundle(*old_deploy.source);
+    REQUIRE(bundle.has_value());
+    CHECK(bundle->packs.front().version == 6);
+    CHECK(rebuilt(old_deploy).status == RebuildStatus::rebuilds);
+    CHECK(old_deploy.interface.contains("須由"));
+    CHECK(!compile(old_source, official_set()).build.has_value());
+    // A contract of before approvals builds to the same code with today's
+    // packs: the agreement's deploys rebuild as they were.
+    CHECK(deploy_of(agreement(), *then.set).code == deploy_of(agreement()).code);
 }
 
 TEST_CASE("a deploy's use lines are its bundle's vocabulary packs", "[bo][build]") {

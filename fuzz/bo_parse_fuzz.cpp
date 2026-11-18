@@ -183,6 +183,15 @@ public:
                            expr(p.who, depth + 1);
                            expr(p.action, depth + 1);
                        },
+                       [&](const bo::ast::Approvals& a) {
+                           place(a.span);
+                           for (const auto* part :
+                                {&a.guard, &a.count, &a.by, &a.in_person, &a.within}) {
+                               if (*part) {
+                                   expr(**part, depth + 1);
+                               }
+                           }
+                       },
                        [&](const bo::ast::If& i) {
                            place(i.span);
                            expr(i.condition, depth + 1);

@@ -1,0 +1,24 @@
+edition 1
+contract Payments
+parties role.we
+block kind.thing Payment
+  field field.amount cur.HKD
+  field directors (phrase type.list actor.person (expr.at_most 5))
+  field chair actor.person
+can disburse by=role.we
+  with treasurer actor.person
+  approvals count=2 by=directors in_person within=(cond.within (duration time.day 7)) guard=(cond.over 1000000)
+  approvals count=1 within=(cond.within (duration time.month 1))
+  approvals count=3 by=(list chair treasurer) within=(cond.within (duration time.day 30))
+  permit actor.ai_agent act.approve
+  transition state.active -> disbursed
+test
+  do subject=role.we act.create
+    set field.amount (money cur.HKD 2000000)
+    set directors (list alice bob)
+    set chair carol
+  do subject=role.we disburse cond.in_person by=alice
+    set treasurer dave
+  expect val.pending_approval
+  do subject=role.we act.approve by=bob
+  expect val.pending_approval

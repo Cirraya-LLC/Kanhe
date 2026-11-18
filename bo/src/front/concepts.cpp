@@ -80,6 +80,10 @@ constexpr Concept unsorted_concepts[] = {
     {"cond.overdue", condition, 0},
     {"cond.before_due", condition, 1},
     {"cond.within", condition, 1},
+    // A requirement of approvals (language packs version 7): `requires 2
+    // approvals by directors in person within 7 days`, a count written as a
+    // number and this word (2人批核, 2人审批).
+    {"cond.approval", condition, 0},
     // Time.
     {"time.day", time, 0},
     {"time.week", time, 0},
@@ -206,9 +210,9 @@ constexpr std::size_t words_of(Vocab pack) {
 }
 
 // An 80-word core and three official vocabulary packs; temperatures added
-// a unit to the core, and requests the executor and an answer's result and
-// reason.
-static_assert(words_of(Vocab::core) == 84, "the core has 84 words");
+// a unit to the core, requests the executor and an answer's result and
+// reason, and approvals their word.
+static_assert(words_of(Vocab::core) == 85, "the core has 85 words");
 static_assert(std::ranges::all_of(unsorted_concepts,
                                   [](const Concept& c) {
                                       return (c.category == field) == !c.type.empty() || c.retired;
@@ -341,6 +345,8 @@ constexpr MessageSpec unsorted_messages[] = {
     {"parse.when", Severity::error, ""},
     // `request KIND [to PARTY] [with NAME = VALUE, ...] within DURATION`.
     {"parse.request", Severity::error, "found"},
+    // `requires N approvals [by PEOPLE] [in person] within DURATION`.
+    {"parse.approvals", Severity::error, "found"},
     {"parse.each", Severity::error, ""},
     {"parse.bare-condition", Severity::error, ""},
     // Expressions.
@@ -395,6 +401,10 @@ constexpr MessageSpec unsorted_messages[] = {
     {"check.needs-by", Severity::error, "action"},
     {"check.recursion", Severity::error, "action"},
     {"check.permit", Severity::error, "text"},
+    // Approvals inside contracts (R36).
+    {"check.approvals", Severity::error, "text"},
+    {"check.approvals-by", Severity::error, "text"},
+    {"check.when-approvals", Severity::error, "text"},
     {"check.subject", Severity::error, "text"},
     {"check.threshold-amount", Severity::error, "text action"},
     // Checking: built-in actions and their standard terms.
@@ -504,6 +514,11 @@ constexpr MessageSpec unsorted_messages[] = {
     {"run.pending", Severity::error, ""},
     {"run.proposal", Severity::error, ""},
     {"run.approve", Severity::error, "action"},
+    // Approvals (R36).
+    {"run.approvals", Severity::error, "action"},
+    {"run.approved", Severity::error, "action"},
+    {"run.approver", Severity::error, "action"},
+    {"run.lapsed", Severity::error, "action"},
     {"run.when", Severity::error, "rule"},
     {"run.fired", Severity::error, "rule"},
     {"run.depth", Severity::error, "action"},
@@ -596,6 +611,12 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"requirement-if", "number guard need"},
     {"need-consent", "party"},
     {"need-in-person", "party"},
+    // Approvals (R36): COUNT of PEOPLE, or COUNT people of the home whom
+    // its delegations let approve, within DURATION of the proposal.
+    {"need-approvals", "count people party duration"},
+    {"need-approvals-in-person", "count people party duration"},
+    {"need-approvals-any", "count party duration"},
+    {"need-approvals-any-in-person", "count party duration"},
     {"starter", ""},
     {"if", "condition"},
     {"otherwise", ""},
@@ -619,7 +640,9 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"action-with", "action inputs"},
     {"agents-delegation", ""},
     {"agents-propose", ""},
+    {"agents-approve", ""},
     {"approve", "function"},
+    {"approve-approvals", "function"},
     {"action-executor", ""},
     // Time rules.
     {"due-field", "field"},
@@ -731,6 +754,7 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"type-text", ""},
     {"type-yes-no", ""},
     {"type-party", ""},
+    {"type-person", ""},
     {"type-state", ""},
     {"type-list", "element limit"},
     {"type-any-list", ""},
@@ -770,6 +794,7 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"outcome-too-many-requests", ""},
     {"outcome-broken", "detail"},
     {"outcome-proposed", "action"},
+    {"outcome-approval", "action"},
     {"outcome-no-part", "party"},
     {"outcome-no-part-step", ""},
     {"expect-accepted", ""},
@@ -783,6 +808,16 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"expect-fields", "what fields"},
     {"outcome-fields", "what fields"},
     {"field-is", "field value"},
+    // The proposals an instance keeps (explain_state): with approvals
+    // (R36), when and by whom proposed, and each approval given.
+    {"state-proposal", "action time by approvals"},
+    {"state-proposal-kept", "action"},
+    {"state-approved", "approvals"},
+    {"state-not-approved", ""},
+    {"state-by-person", "actor"},
+    {"state-by-in-person", "actor"},
+    {"state-by-agent", "actor"},
+    {"state-by-other", "actor kind"},
     // The standard library (bo stdlib).
     {"stdlib-starter", "party"},
     {"stdlib-home", ""},
@@ -826,6 +861,7 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"rule-R33", ""},
     {"rule-R34", ""},
     {"rule-R35", ""},
+    {"rule-R36", ""},
 };
 
 constexpr auto sorted_sentences = [] {
@@ -877,6 +913,7 @@ constexpr RuleSpec rules[] = {
     {"R33", "expired-fails"}, // an expired request is a failed one, unless a rule says otherwise
     {"R34", "service-bill", Vocab::services}, // each period billed: invoice, then collect
     {"R35", "service-paid", Vocab::services}, // a collection done pays a period, resumes
+    {"R36", "approvals"}, // N approvals by people of the home, within a time, as calls
 };
 
 template <class T, std::size_t N, class Key>

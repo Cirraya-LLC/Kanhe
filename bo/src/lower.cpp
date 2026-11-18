@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -95,6 +96,8 @@ Rep rep_of(const m::Type& t) noexcept {
     case TypeKind::text:
         return Rep::text;
     case TypeKind::party:
+    case TypeKind::person:
+        // A person (R36) is an actor id, 32 bytes as a ledger id is.
         return Rep::ledger;
     case TypeKind::list:
         return element_rep(t) != Rep::none ? Rep::list : Rep::none;
@@ -247,6 +250,9 @@ struct FieldSlot {
     /// A party field that may hold no party (its ledger's address is 0
     /// then, and the state holds null).
     bool optional = false;
+    /// A field that holds a party (reported among the instance's parties);
+    /// a person's field (R36) holds 32 bytes too, but is no party.
+    bool party = false;
     /// R20: not given at creation; each instance starts with none.
     bool empty_at_start = false;
     /// A date field that may hold no date (R20: a service's paid until and
@@ -284,7 +290,22 @@ struct ActionInfo {
     bool rule_only = false;
     /// It issues parts (R30): a part at depth 8 cannot do it.
     bool parts = false;
+    /// Its approvals lines (R36), in order.
+    std::vector<const m::Approvals*> lines;
+    /// Its function reads the call and runs `core`, which `approve` runs
+    /// too: AI agents may only propose it, or it has approvals lines.
+    bool split = false;
+    /// With approvals lines: [arguments, time proposed] -> [the time its
+    /// approvals are due by], for dropping lapsed proposals.
+    wasm::Func deadline{};
 };
+
+/// The events a call of the action reports beside its state changes, at
+/// most: an approval's (approve), and with approvals lines an approval's
+/// own (approval); a call that keeps a proposal reports no state change.
+std::size_t events_beside(const ActionInfo& a) {
+    return !a.lines.empty() ? 2U : a.action->agents_propose ? 1U : 0U;
+}
 
 /// A field each part gets as `with` sets it (R30): its value, computed on
 /// the instance that issues the parts, and whether this call gave it.
@@ -496,6 +517,34 @@ private:
     void emit_action(const ActionInfo& action);
     void emit_core(const ActionInfo& action);
     void emit_approve(wasm::Func f);
+    // --- Approvals (R36), in a contract with approvals lines.
+    void emit_approvals_core(const ActionInfo& action);
+    void emit_approvals_approve(wasm::Func f);
+    void emit_deadline(const ActionInfo& action);
+    /// The action's inputs from its arguments' map (Ctx::args), as
+    /// `arguments` reads them, without the role it binds: a kept proposal's.
+    void read_inputs(Ctx& c);
+    /// [] -> [flags]: bit i set for each approvals line whose guard holds.
+    void applying_lines(Ctx& c, Local applies);
+    /// [] -> [i64]: `at` plus the shortest within of the lines that apply,
+    /// or the largest time if none does.
+    void line_deadline(Ctx& c, Local applies, Local at);
+    /// [] -> [flag]: the person whose actor id is at `actor` is one `people`
+    /// names (a person, or a list of people).
+    void person_in(Ctx& c, const m::Expr& people, Local actor);
+    /// [] -> [flag]: an approval [actor, kind, presence] counts for `line`.
+    void counts_for(Ctx& c, const m::Approvals& line, Local actor, Local kind, Local presence);
+    /// Keeps the call as a proposal: drops the lapsed ones, then adds it,
+    /// with the proposer's approval if `counted`; writes the accept and
+    /// returns.
+    void keep_proposal(Ctx& c, std::optional<Local> was_bound, Local actor, Local kind,
+                       Local presence, std::optional<Local> counted);
+    void drop_lapsed(Ctx& c);
+    void write_pending_approvals(FunctionBuilder& b);
+    void write_approval_events(FunctionBuilder& b);
+    /// [] -> []: an approval [actor, kind, presence], from globals.
+    void write_triple(FunctionBuilder& b, wasm::Global actor, wasm::Global kind,
+                      wasm::Global presence);
     void emit_rule(const RuleInfo& rule);
     void emit_reply(wasm::Func f);
     /// The rules for answers, each where its kind and outcome match.
@@ -598,6 +647,9 @@ private:
     bool previous_used_ = false;
     bool proposals_ = false;
     wasm::Func approve_function_{};
+    /// Some action has approvals lines (R36): each proposal is [function,
+    /// arguments, time, proposer, approvals].
+    bool approvals_ = false;
     /// The time rules with code; whether the instance keeps the time it
     /// last changed state (`within`, a state held N).
     std::vector<RuleInfo> rules_;
@@ -652,6 +704,24 @@ private:
     wasm::Global event_kind_{};
     wasm::Global event_name_{};
     wasm::Global event_length_{};
+    /// Approvals (R36): a new proposal's time (i64) and proposer [actor's
+    /// address, kind, presence], and whether its approval counts; the
+    /// proposals dropped as lapsed (bit k for the k-th); the one an approval
+    /// is recorded in (its index plus 1, or 0); the one `approve` names (its
+    /// index and its item); an approval's event, and who approved.
+    wasm::Global add_at_{};
+    wasm::Global add_actor_{};
+    wasm::Global add_kind_{};
+    wasm::Global add_presence_{};
+    wasm::Global add_counted_{};
+    wasm::Global lapsed_{};
+    wasm::Global update_{};
+    wasm::Global proposal_index_{};
+    wasm::Global proposal_entry_{};
+    wasm::Global approval_event_{};
+    wasm::Global approval_actor_{};
+    wasm::Global approval_kind_{};
+    wasm::Global approval_presence_{};
     /// When the instance last changed state (i64); a time rule's event: 1
     /// once it applies (i32), its function's name, its time, how late.
     wasm::Global since_{};
@@ -719,7 +789,8 @@ void Lowering::plan_fields() {
         slot.wire = wire_name(f.word, f.name);
         slot.key = text_cbor(slot.wire);
         slot.rep = rep_of(f.type);
-        slot.optional = f.optional && slot.rep == Rep::ledger;
+        slot.party = slot.rep == Rep::ledger && f.type.kind == TypeKind::party;
+        slot.optional = f.optional && slot.party;
         slot.dated = f.optional && slot.rep == Rep::i64 && f.type.kind == TypeKind::date;
         slot.empty_at_start = f.empty_at_start && (slot.rep == Rep::ledger || slot.dated);
         if (slot.rep == Rep::none) {
@@ -754,7 +825,7 @@ void Lowering::plan_roles() {
     // The parties the output reports: the roles and the fields holding one.
     std::size_t parties = roles_.size();
     for (FieldSlot& slot : fields_) {
-        if (slot.rep != Rep::ledger) {
+        if (!slot.party) {
             continue;
         }
         ++parties;
@@ -1103,6 +1174,16 @@ void Lowering::support(ActionInfo& action, const std::vector<m::Statement>& list
                         unsupported(d.span, key);
                     }
                 },
+                [&](const m::Approvals& ap) {
+                    // R36: its guard and its people, read by the action's
+                    // code and by `approve`.
+                    if (ap.guard) {
+                        check(*ap.guard, false);
+                    }
+                    if (ap.by) {
+                        check(*ap.by, false);
+                    }
+                },
                 [&](const m::Request& r) {
                     // A request, its party, and its values.
                     requests_used_ = true;
@@ -1128,6 +1209,7 @@ void Lowering::plan_actions() {
         names.emplace(m::reply_function);
     }
     proposals_ = m::has_proposals(model_);
+    approvals_ = m::has_approvals(model_);
     if (proposals_) {
         names.emplace(m::approve_function);
     }
@@ -1137,6 +1219,8 @@ void Lowering::plan_actions() {
         info.key = m::key(a.word, a.name);
         info.wire = wire_name(a.word, a.name);
         info.rule_only = a.rule_only;
+        info.lines = m::approvals_of(a);
+        info.split = a.agents_propose || !info.lines.empty();
         if (a.executor && !a.terms) {
             error(a.span, "build.executor", {{"action", info.key}});
         } else if (a.word != nullptr && !a.terms) {
@@ -1185,8 +1269,9 @@ void Lowering::plan_actions() {
             check(c.party);
         }
         support(info, a.body);
-        // An approval reports one more event: approve.
-        if (info.transitions + (a.agents_propose ? 1 : 0) > max_build_events) {
+        // An approval reports one more event: approve (and, with approvals
+        // lines, the approval's).
+        if (info.transitions + events_beside(info) > max_build_events) {
             error(a.span, "build.too-many-events",
                   {{"action", info.key}, {"limit", std::to_string(max_build_events)}});
         }
@@ -1394,8 +1479,7 @@ void Lowering::plan() {
     // more than 64 (spec section 15).
     if (bill_slot_) {
         for (const ActionInfo& a : actions_) {
-            if (a.transitions + (a.action->agents_propose ? 1U : 0U) == max_build_events &&
-                sets_bill(a.action->body)) {
+            if (a.transitions + events_beside(a) == max_build_events && sets_bill(a.action->body)) {
                 error(a.action->span, "build.too-many-events",
                       {{"action", a.key}, {"limit", std::to_string(max_build_events)}});
             }
@@ -1436,6 +1520,7 @@ void Lowering::plan() {
         globals += (pair_rep(slot.rep) ? 2U : 1U) + (slot.dated ? 1U : 0U);
     }
     globals += (previous_used_ ? 1U : 0U) + (proposals_ ? 8U : 0U) + (since_used_ ? 1U : 0U);
+    globals += approvals_ ? 13U : 0U;
     globals += rules_.empty() ? 0 : 2 * rules_.size() + 5;
     globals += requests_used_ ? 6U : 0U;
     globals += records_ ? 3U : 0U;
@@ -2383,7 +2468,7 @@ wasm::Func Lowering::load_instance() {
     const std::size_t parties_count = [&] {
         std::size_t count = roles_.size();
         for (const FieldSlot& slot : fields_) {
-            count += slot.rep == Rep::ledger ? 1 : 0;
+            count += slot.party ? 1 : 0;
         }
         return count;
     }();
@@ -2620,7 +2705,7 @@ wasm::Func Lowering::write_accept() {
     b.get(index).load(i32_load8_u, final_table_).set(final);
     std::size_t party_fields = 0;
     for (const FieldSlot& slot : fields_) {
-        party_fields += slot.rep == Rep::ledger && !slot.optional ? 1 : 0;
+        party_fields += slot.party && !slot.optional ? 1 : 0;
     }
     const auto count_parties = [&] {
         b.u32(static_cast<std::uint32_t>(party_fields)).set(parties);
@@ -2644,6 +2729,11 @@ wasm::Func Lowering::write_accept() {
     if (proposals_) {
         // A proposal or an approval: one more event.
         b.global_get(event_kind_).op(i32_eqz).op(i32_eqz).get(events).op(i32_add).set(events);
+    }
+    if (approvals_) {
+        // R36: each lapsed proposal dropped, and an approval given.
+        b.global_get(lapsed_).op(i32_popcnt).get(events).op(i32_add).set(events);
+        b.global_get(approval_event_).get(events).op(i32_add).set(events);
     }
     if (!rules_.empty()) {
         // A time rule applied: one more event.
@@ -2750,7 +2840,11 @@ wasm::Func Lowering::write_accept() {
         }
         if (proposals_) {
             out_key(b, text_cbor("pending"));
-            write_pending(b);
+            if (approvals_) {
+                write_pending_approvals(b);
+            } else {
+                write_pending(b);
+            }
         }
         if (previous_used_) {
             out_key(b, text_cbor("previous"));
@@ -2789,7 +2883,7 @@ wasm::Func Lowering::write_accept() {
                 entries.push_back({&role.key, {role.ledger, true}});
             }
             for (const FieldSlot& slot : fields_) {
-                if (slot.rep == Rep::ledger) {
+                if (slot.party) {
                     entries.push_back({&slot.key, {slot.first, slot.optional}});
                 }
             }
@@ -2820,7 +2914,9 @@ wasm::Func Lowering::write_accept() {
         const Label some = b.if_();
         b.i64(4).call(out_int);
         b.i32(4).get(events).op(i64_extend_i32_u).call(head);
-        if (proposals_) {
+        if (approvals_) {
+            write_approval_events(b);
+        } else if (proposals_) {
             write_event(b);
         }
         if (!rules_.empty()) {
@@ -2925,6 +3021,10 @@ wasm::Func Lowering::write_accept() {
             for (const wasm::Global g : {pending_, drop_, add_args_}) {
                 b.i32(0).global_set(g);
             }
+        }
+        if (approvals_) {
+            // Nor any proposal dropped (R36).
+            b.i32(0).global_set(lapsed_);
         }
         if (previous_used_) {
             b.i32(0).global_set(previous_);
@@ -3518,13 +3618,20 @@ void Lowering::issue_parts(Ctx& c, const m::Do& d) {
 void Lowering::emit_action(const ActionInfo& info) {
     FunctionBuilder b = module_.begin(info.function);
     const m::Action& a = *info.action;
-    if (a.agents_propose) {
+    if (info.split) {
         // The call's arguments, run as a call (not an approval).
         b.call(load_instance());
         call_item(b, 2);
         b.i32(0).call(info.core);
         module_.define(std::move(b));
-        emit_core(info);
+        if (approvals_) {
+            emit_approvals_core(info);
+            if (!info.lines.empty()) {
+                emit_deadline(info);
+            }
+        } else {
+            emit_core(info);
+        }
         return;
     }
     Ctx c;
@@ -3744,6 +3851,868 @@ void Lowering::emit_approve(const wasm::Func f) {
     module_.define(std::move(b));
 }
 
+// ---------------------------------------------------------------------------
+// Approvals (R36), in a contract with approvals lines. Each proposal is
+// [function, arguments, time, proposer, approvals], the proposer and each
+// approval [actor, kind, presence]: who called, its signer's kind, and
+// whether it proved presence (spec/bo.md 12.5).
+
+void Lowering::read_inputs(Ctx& c) {
+    // As `arguments` reads them; the role the action binds stays as it is.
+    FunctionBuilder& b = *c.b;
+    const m::Action& a = *c.action->action;
+    // Routines are emitted in the order of first use (runtime.hpp).
+    static_cast<void>(rt_.get(Routine::map_get));
+    const std::uint64_t entries = a.inputs.size() + (c.action->binds ? 1 : 0);
+    for (const m::Field& input : a.inputs) {
+        const std::string wire = wire_name(input.word, input.name);
+        const Rep rep = rep_of(input.type);
+        const Local v = b.local(rep == Rep::i64 ? I64 : I32);
+        const Local length = pair_rep(rep) ? b.local(I32) : v;
+        b.get(*c.args);
+        lookup(b, text_cbor(wire), entries);
+        read_value(b, input.type, "bo:argument " + wire);
+        if (pair_rep(rep)) {
+            b.set(length);
+        }
+        b.set(v);
+        c.inputs.emplace(m::key(input.word, input.name), std::pair{v, length});
+    }
+}
+
+void Lowering::applying_lines(Ctx& c, const Local applies) {
+    // Bit i for each line whose guard holds (at most 32 lines: each asks
+    // one approval or more, 32 in all).
+    FunctionBuilder& b = *c.b;
+    const std::vector<const m::Approvals*>& lines = c.action->lines;
+    b.i32(0).set(applies);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        const std::uint32_t bit = std::uint32_t{1} << i;
+        if (lines[i]->guard) {
+            value(c, *lines[i]->guard);
+            const Label holds = b.if_();
+            b.get(applies).u32(bit).op(i32_or).set(applies);
+            b.end(holds);
+        } else {
+            b.get(applies).u32(bit).op(i32_or).set(applies);
+        }
+    }
+}
+
+void Lowering::line_deadline(Ctx& c, const Local applies, const Local at) {
+    // The shortest within of the lines that apply, from the time proposed
+    // (months by the calendar, at the contract's offset).
+    FunctionBuilder& b = *c.b;
+    const std::vector<const m::Approvals*>& lines = c.action->lines;
+    const Local best = b.local(I64);
+    const Local due_at = b.local(I64);
+    b.i64(std::numeric_limits<std::int64_t>::max()).set(best);
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        b.get(applies).u32(std::uint32_t{1} << i).op(i32_and);
+        const Label holds = b.if_();
+        b.get(at);
+        shift(c, lines[i]->within, false);
+        b.tee(due_at).get(best).op(i64_lt_s);
+        {
+            const Label sooner = b.if_();
+            b.get(due_at).set(best);
+            b.end(sooner);
+        }
+        b.end(holds);
+    }
+    b.get(best);
+}
+
+void Lowering::person_in(Ctx& c, const m::Expr& people, const Local actor) {
+    // The actor id at `actor` against a person, or each person of a list.
+    FunctionBuilder& b = *c.b;
+    if (people.type.kind == TypeKind::list) {
+        if (const m::Expr* items = literal_items(people)) {
+            if (items->operands.empty()) {
+                b.i32(0);
+                return;
+            }
+            for (std::size_t i = 0; i < items->operands.size(); ++i) {
+                value(c, items->operands[i]);
+                b.i32(32).get(actor).i32(32);
+                equal_bytes(b, 32);
+                if (i > 0) {
+                    b.op(i32_or);
+                }
+            }
+            return;
+        }
+        value(c, people);
+        b.op(drop).get(actor);
+        b.call(list_has(Rep::ledger), {people.type.bound, max_value_size});
+        return;
+    }
+    value(c, people);
+    b.i32(32).get(actor).i32(32);
+    equal_bytes(b, 32);
+}
+
+void Lowering::counts_for(Ctx& c, const m::Approvals& line, const Local actor, const Local kind,
+                          const Local presence) {
+    // A person (kind 1), or an AI agent (kind 2) where the action says AI
+    // agent can approve and the line asks no presence; with presence if the
+    // line asks it; one the line names, if it names people.
+    FunctionBuilder& b = *c.b;
+    b.get(kind).i32(1).op(i32_eq);
+    if (c.action->action->agents_approve && !line.in_person) {
+        b.get(kind).i32(2).op(i32_eq).op(i32_or);
+    }
+    if (line.in_person) {
+        b.get(presence).op(i32_and);
+    }
+    if (line.by) {
+        person_in(c, *line.by, actor);
+        b.op(i32_and);
+    }
+}
+
+void Lowering::drop_lapsed(Ctx& c) {
+    // Each kept proposal whose approvals were due before this call goes,
+    // its time read as `approve` reads it: the lines of its action that
+    // apply now, on its arguments.
+    FunctionBuilder& b = *c.b;
+    const Local q = b.local(I32);
+    const Local n = b.local(I32);
+    const Local k = b.local(I32);
+    const Local fn = b.local(I32);
+    const Local args = b.local(I32);
+    const Local at = b.local(I64);
+    const wasm::Func head_arg = rt_.get(Routine::head_arg);
+    const wasm::Func content = rt_.get(Routine::content);
+    const wasm::Func item_end = rt_.get(Routine::item_end);
+    static_cast<void>(rt_.get(Routine::bytes_eq));
+    const std::string_view input = rt::text_of(rt::Reason::input);
+    b.global_get(pending_).call(head_arg).op(i32_wrap_i64).set(n);
+    b.global_get(pending_).call(content).set(q);
+    const Label done = b.block();
+    const Label next = b.loop({rt::max_needs + 1});
+    b.get(k).get(n).op(i32_ge_u).br_if(done);
+    b.get(q).call(content).set(fn);
+    for (const ActionInfo& other : actions_) {
+        if (other.lines.empty() || other.rule_only) {
+            continue;
+        }
+        b.get(fn).call(content).get(fn).call(head_arg).op(i32_wrap_i64);
+        b.u32(intern(other.wire)).u32(static_cast<std::uint32_t>(other.wire.size()));
+        equal_bytes(b, other.wire.size());
+        const Label same = b.if_();
+        // [function, arguments, time, ...]
+        b.get(fn).call(item_end).tee(args).call(item_end);
+        expect(b, Rep::i64, input);
+        b.set(at);
+        now(c);
+        b.get(args).get(at).call(other.deadline);
+        b.op(i64_gt_s);
+        {
+            const Label late = b.if_();
+            b.i32(1).get(k).op(i32_shl).global_get(lapsed_).op(i32_or).global_set(lapsed_);
+            b.end(late);
+        }
+        b.end(same);
+    }
+    b.get(q).call(item_end).set(q);
+    b.get(k).i32(1).op(i32_add).set(k).br(next);
+    b.end(next);
+    b.end(done);
+}
+
+void Lowering::keep_proposal(Ctx& c, const std::optional<Local> was_bound, const Local actor,
+                             const Local kind, const Local presence,
+                             const std::optional<Local> counted) {
+    // The call is kept: the lapsed proposals go first, then at most 16
+    // remain (bo:pending). It changes nothing but the proposals: the role it
+    // binds is bound when it is approved.
+    FunctionBuilder& b = *c.b;
+    const ActionInfo& info = *c.action;
+    drop_lapsed(c);
+    b.global_get(pending_).call(rt_.get(Routine::head_arg)).op(i32_wrap_i64);
+    b.global_get(lapsed_).op(i32_popcnt).op(i32_sub);
+    b.u32(rt::max_needs).op(i32_ge_u);
+    {
+        const Label full = b.if_();
+        refuse(b, "bo:pending");
+        b.end(full);
+    }
+    b.u32(intern(info.wire)).global_set(add_name_);
+    b.u32(static_cast<std::uint32_t>(info.wire.size())).global_set(add_length_);
+    b.get(*c.args).global_set(add_args_);
+    now(c);
+    b.global_set(add_at_);
+    b.get(actor).global_set(add_actor_);
+    b.get(kind).global_set(add_kind_);
+    b.get(presence).global_set(add_presence_);
+    b.i32(1).global_set(event_kind_);
+    if (counted) {
+        // The proposer's approval, where it counts for a line that applies.
+        b.get(*counted).global_set(add_counted_);
+        b.get(*counted).global_set(approval_event_);
+        b.get(actor).global_set(approval_actor_);
+        b.get(kind).global_set(approval_kind_);
+        b.get(presence).global_set(approval_presence_);
+    }
+    if (was_bound) {
+        b.get(*was_bound).global_set(roles_[*info.binds].ledger);
+    }
+    b.call(write_accept()).return_();
+}
+
+void Lowering::emit_deadline(const ActionInfo& info) {
+    // [arguments, time proposed] -> [the time a kept proposal's approvals
+    // are due by]: the shortest within of its lines that apply now.
+    FunctionBuilder b = module_.begin(info.deadline);
+    Ctx c;
+    c.b = &b;
+    c.action = &info;
+    c.wire = info.wire;
+    c.args = b.param(0);
+    const Local at = b.param(1);
+    c.signer = b.local(I32);
+    c.t32 = b.local(I32);
+    c.t64 = b.local(I64);
+    c.t64b = b.local(I64);
+    read_inputs(c);
+    const Local applies = b.local(I32);
+    applying_lines(c, applies);
+    line_deadline(c, applies, at);
+    module_.define(std::move(b));
+}
+
+void Lowering::emit_approvals_core(const ActionInfo& info) {
+    // A call of the action whose approvals lines apply is kept as a
+    // proposal until enough people of the home approve it; `approve` runs
+    // this again for each approval (`approving`), with the proposal's
+    // arguments. An AI agent's call of an action AI agents may only propose
+    // is kept too, and approved as 6.9 says.
+    FunctionBuilder b = module_.begin(info.core);
+    Ctx c;
+    c.b = &b;
+    c.action = &info;
+    c.wire = info.wire;
+    c.args = b.param(0);
+    const Local approving = b.param(1);
+    c.signer = b.local(I32);
+    c.t32 = b.local(I32);
+    c.t64 = b.local(I64);
+    c.t64b = b.local(I64);
+    const m::Action& a = *info.action;
+    const wasm::Func head_arg = rt_.get(Routine::head_arg);
+    const wasm::Func content = rt_.get(Routine::content);
+    const wasm::Func item_end = rt_.get(Routine::item_end);
+    const std::string_view input = rt::text_of(rt::Reason::input);
+    const std::uint8_t key_kind[] = {0x01};
+    entry_check(c);
+    if (info.parts) {
+        depth_check(c);
+    }
+    std::optional<Local> was_bound;
+    if (info.binds) {
+        was_bound = b.local(I32);
+        b.global_get(roles_[*info.binds].ledger).set(*was_bound);
+    }
+    arguments(c);
+    // The starter agrees through the call (the home) or its consent. A
+    // built-in action without one is the home's own word.
+    const wasm::Func consent = rt_.get(Routine::consent);
+    const Local starter = b.local(I32);
+    if (a.by) {
+        value(c, *a.by);
+    } else {
+        call_item(b, 3);
+        b.call(content);
+    }
+    b.tee(starter).call(consent).set(c.signer);
+    b.u32(intern(info.wire)).global_set(event_name_);
+    b.u32(static_cast<std::uint32_t>(info.wire.size())).global_set(event_length_);
+    // The caller (input key 6, [actor, signer]): its actor id, its
+    // signer's kind, and whether it proved presence.
+    const Local actor = b.local(I32);
+    const Local kind = b.local(I32);
+    const Local presence = b.local(I32);
+    {
+        const Local caller = b.local(I32);
+        call_item(b, 6);
+        b.call(content).tee(caller);
+        expect(b, Rep::ledger, input);
+        b.set(actor);
+        b.get(caller).call(item_end).set(caller);
+        b.get(caller).u32(intern(ByteView(key_kind))).i32(1);
+        b.call(rt_.get(Routine::map_get), {signer_keys, 1}).tee(c.t32);
+        {
+            const Label known = b.if_(I32);
+            b.get(c.t32).load(i32_load8_u);
+            b.else_(known);
+            b.i32(0);
+            b.end(known);
+        }
+        b.set(kind);
+        b.get(caller).call(rt_.get(Routine::in_person)).set(presence);
+    }
+    const Local applies = b.local(I32);
+    std::optional<Label> apply;
+    if (!info.lines.empty()) {
+        applying_lines(c, applies);
+        b.get(applies);
+        apply = b.if_();
+        // Approvals are the home's people's: another party's approve
+        // through their own ledger's rules on their consents.
+        b.get(starter).i32(32);
+        call_item(b, 3);
+        b.call(content).i32(32);
+        equal_bytes(b, 32);
+        b.op(i32_eqz);
+        {
+            const Label other = b.if_();
+            refuse(b, "bo:approvals " + info.wire);
+            b.end(other);
+        }
+        const Local q = b.local(I32);
+        const Local n = b.local(I32);
+        const Local fits = b.local(I32);
+        b.get(approving);
+        const Label approval = b.if_();
+        {
+            // An approval: the proposal's time, its proposer, and the
+            // approvals it holds.
+            const Local p = b.local(I32);
+            const Local at = b.local(I64);
+            const Local by = b.local(I32);
+            const Local list = b.local(I32);
+            const Local without = b.local(I32);
+            const Local all = b.local(I32);
+            const Local tally = b.local(I32);
+            const Local t_actor = b.local(I32);
+            const Local t_kind = b.local(I32);
+            const Local t_presence = b.local(I32);
+            b.global_get(proposal_entry_).call(content).call(item_end).call(item_end).tee(p);
+            expect(b, Rep::i64, input);
+            b.set(at);
+            b.get(p).call(item_end).tee(by).call(item_end).set(list);
+            // Within the shortest within of the lines that apply.
+            now(c);
+            line_deadline(c, applies, at);
+            b.op(i64_gt_s);
+            {
+                const Label late = b.if_();
+                refuse(b, "bo:lapsed " + info.wire);
+                b.end(late);
+            }
+            // A person, or an AI agent the action lets approve.
+            b.get(kind).i32(1).op(i32_eq);
+            if (a.agents_approve) {
+                b.get(kind).i32(2).op(i32_eq).op(i32_or);
+            }
+            b.op(i32_eqz);
+            {
+                const Label other = b.if_();
+                refuse(b, "bo:approver " + info.wire);
+                b.end(other);
+            }
+            // Once for each person.
+            b.get(list).call(head_arg).op(i32_wrap_i64).set(n);
+            b.get(list).call(content).set(q);
+            {
+                const Label done = b.block();
+                const Label next = b.loop({m::max_action_approvals + 1});
+                b.get(n).op(i32_eqz).br_if(done);
+                b.get(q).call(content).i32(2).op(i32_add).i32(32).get(actor).i32(32);
+                equal_bytes(b, 32);
+                {
+                    const Label twice = b.if_();
+                    refuse(b, "bo:approved " + info.wire);
+                    b.end(twice);
+                }
+                b.get(q).call(item_end).set(q);
+                b.get(n).i32(1).op(i32_sub).set(n).br(next);
+                b.end(next);
+                b.end(done);
+            }
+            // One whom a line that applies counts; one it would count with
+            // presence is refused for that.
+            for (std::size_t i = 0; i < info.lines.size(); ++i) {
+                const m::Approvals& line = *info.lines[i];
+                b.get(applies).u32(std::uint32_t{1} << i).op(i32_and);
+                const Label holds = b.if_();
+                counts_for(c, line, actor, kind, presence);
+                b.get(fits).op(i32_or).set(fits);
+                if (line.in_person) {
+                    b.get(kind).i32(1).op(i32_eq);
+                    if (line.by) {
+                        person_in(c, *line.by, actor);
+                        b.op(i32_and);
+                    }
+                    b.get(without).op(i32_or).set(without);
+                }
+                b.end(holds);
+            }
+            b.get(fits).op(i32_eqz);
+            {
+                const Label none = b.if_();
+                b.get(without);
+                const Label unproved = b.if_();
+                refuse(b, "bo:in-person " + info.wire);
+                b.else_(unproved);
+                refuse(b, "bo:approver " + info.wire);
+                b.end(unproved);
+                b.end(none);
+            }
+            // At most 32 approvals a proposal.
+            b.get(list).call(head_arg).i64(static_cast<std::int64_t>(m::max_action_approvals));
+            b.op(i64_ge_u);
+            {
+                const Label full = b.if_();
+                refuse(b, "bo:pending");
+                b.end(full);
+            }
+            // Each line that applies: the approvals recorded and this one
+            // that it counts, as it reads now.
+            b.i32(1).set(all);
+            for (std::size_t i = 0; i < info.lines.size(); ++i) {
+                const m::Approvals& line = *info.lines[i];
+                b.get(applies).u32(std::uint32_t{1} << i).op(i32_and);
+                const Label holds = b.if_();
+                counts_for(c, line, actor, kind, presence);
+                b.set(tally);
+                b.get(list).call(head_arg).op(i32_wrap_i64).set(n);
+                b.get(list).call(content).set(q);
+                {
+                    const Label done = b.block();
+                    const Label next = b.loop({m::max_action_approvals + 1});
+                    b.get(n).op(i32_eqz).br_if(done);
+                    // [actor, kind, presence]
+                    b.get(q).call(content).tee(t_actor).call(item_end).tee(t_kind);
+                    b.call(item_end).load(i32_load8_u).u32(0xF5).op(i32_eq).set(t_presence);
+                    b.get(t_kind).load(i32_load8_u).set(t_kind);
+                    b.get(t_actor).i32(2).op(i32_add).set(t_actor);
+                    counts_for(c, line, t_actor, t_kind, t_presence);
+                    b.get(tally).op(i32_add).set(tally);
+                    b.get(q).call(item_end).set(q);
+                    b.get(n).i32(1).op(i32_sub).set(n).br(next);
+                    b.end(next);
+                    b.end(done);
+                }
+                b.get(tally).u32(static_cast<std::uint32_t>(line.count)).op(i32_lt_u);
+                {
+                    const Label fewer = b.if_();
+                    b.i32(0).set(all);
+                    b.end(fewer);
+                }
+                b.end(holds);
+            }
+            if (a.agents_propose) {
+                // An AI agent's proposal needs a person in person among the
+                // approvals that complete it (6.9): an approval that would
+                // complete it without one is refused, so that its approver
+                // can give it in person.
+                const Local person = b.local(I32);
+                b.get(by).call(content).call(item_end).load(i32_load8_u).i32(2).op(i32_eq);
+                const Label agents = b.if_();
+                b.get(kind).i32(1).op(i32_eq).get(presence).op(i32_and).set(person);
+                b.get(list).call(head_arg).op(i32_wrap_i64).set(n);
+                b.get(list).call(content).set(q);
+                {
+                    const Label done = b.block();
+                    const Label next = b.loop({m::max_action_approvals + 1});
+                    b.get(n).op(i32_eqz).br_if(done);
+                    b.get(q).call(content).call(item_end).tee(t_kind).load(i32_load8_u);
+                    b.i32(1).op(i32_eq);
+                    b.get(t_kind).call(item_end).load(i32_load8_u).u32(0xF5).op(i32_eq);
+                    b.op(i32_and).get(person).op(i32_or).set(person);
+                    b.get(q).call(item_end).set(q);
+                    b.get(n).i32(1).op(i32_sub).set(n).br(next);
+                    b.end(next);
+                    b.end(done);
+                }
+                b.get(person).op(i32_eqz).get(all).op(i32_and);
+                {
+                    const Label none = b.if_();
+                    refuse(b, "bo:approve " + info.wire);
+                    b.end(none);
+                }
+                b.end(agents);
+            }
+            // The approval's event; then the proposal completes, or keeps
+            // the approval and waits for more.
+            b.i32(1).global_set(approval_event_);
+            b.get(actor).global_set(approval_actor_);
+            b.get(kind).global_set(approval_kind_);
+            b.get(presence).global_set(approval_presence_);
+            b.get(all);
+            const Label complete = b.if_();
+            b.global_get(proposal_index_).i32(1).op(i32_add).global_set(drop_);
+            b.i32(2).global_set(event_kind_);
+            b.else_(complete);
+            b.global_get(proposal_index_).i32(1).op(i32_add).global_set(update_);
+            if (was_bound) {
+                b.get(*was_bound).global_set(roles_[*info.binds].ledger);
+            }
+            b.call(write_accept()).return_();
+            b.end(complete);
+        }
+        b.else_(approval);
+        {
+            // A call: its caller proposes, and alone may meet every line
+            // that applies (each asking one approval, which it gives).
+            const Local alone = b.local(I32);
+            const Local counted = b.local(I32);
+            b.i32(1).set(alone);
+            for (std::size_t i = 0; i < info.lines.size(); ++i) {
+                const m::Approvals& line = *info.lines[i];
+                b.get(applies).u32(std::uint32_t{1} << i).op(i32_and);
+                const Label holds = b.if_();
+                counts_for(c, line, actor, kind, presence);
+                b.tee(fits).get(counted).op(i32_or).set(counted);
+                if (line.count != 1) {
+                    b.i32(0).set(alone);
+                } else {
+                    b.get(fits).op(i32_eqz);
+                    const Label not_it = b.if_();
+                    b.i32(0).set(alone);
+                    b.end(not_it);
+                }
+                b.end(holds);
+            }
+            if (a.agents_propose) {
+                // An AI agent only proposes it (6.9): a person approves.
+                b.get(kind).i32(2).op(i32_eq);
+                const Label agent = b.if_();
+                b.i32(0).set(alone);
+                b.end(agent);
+            }
+            b.get(alone).op(i32_eqz);
+            const Label kept = b.if_();
+            keep_proposal(c, was_bound, actor, kind, presence, counted);
+            b.end(kept);
+        }
+        b.end(approval);
+        b.else_(*apply);
+    }
+    // No line applies: an action AI agents may only propose, as 6.9 says.
+    b.get(approving);
+    {
+        const Label approval = b.if_();
+        // An approval's starter must be a person who proves presence; a
+        // missing consent leaves the approval waiting for it.
+        b.get(c.signer);
+        {
+            const Label known = b.if_();
+            b.get(c.signer).call(rt_.get(Routine::in_person)).op(i32_eqz);
+            const Label absent = b.if_();
+            refuse(b, "bo:approve " + info.wire);
+            b.end(absent);
+            b.end(known);
+        }
+        b.global_get(proposal_index_).i32(1).op(i32_add).global_set(drop_);
+        b.i32(2).global_set(event_kind_);
+        if (a.agents_propose) {
+            b.else_(approval);
+            // An AI agent's signer (kind 2): the call becomes a proposal.
+            b.get(c.signer);
+            const Label known = b.if_();
+            b.get(c.signer).u32(intern(ByteView(key_kind))).i32(1);
+            b.call(rt_.get(Routine::map_get), {signer_keys, 1}).tee(c.t32);
+            b.op(i32_eqz).op(i32_eqz);
+            {
+                const Label signed_kind = b.if_(I32);
+                b.get(c.t32).load(i32_load8_u).i32(2).op(i32_eq);
+                b.else_(signed_kind);
+                b.i32(0);
+                b.end(signed_kind);
+            }
+            const Label agent = b.if_();
+            keep_proposal(c, was_bound, actor, kind, presence, std::nullopt);
+            b.end(agent);
+            b.end(known);
+        }
+        b.end(approval);
+    }
+    if (apply) {
+        b.end(*apply);
+    }
+    for (const m::Consent& k : a.consents) {
+        consent_of(c, k.party);
+    }
+    statements(c, a.body);
+    finish(b);
+    module_.define(std::move(b));
+}
+
+void Lowering::emit_approvals_approve(const wasm::Func f) {
+    // approve {"function": NAME, "arguments": ARGS}: the first proposal with
+    // that function and those arguments, approved by the caller; its
+    // action's core counts the approval, and runs the action once the
+    // approvals it needs are given.
+    FunctionBuilder b = module_.begin(f);
+    const Local args = b.local(I32);
+    const Local name = b.local(I32);
+    const Local length = b.local(I32);
+    const Local given = b.local(I32);
+    const Local q = b.local(I32);
+    const Local n = b.local(I32);
+    const Local k = b.local(I32);
+    const Local x = b.local(I32);
+    // Routines are emitted in the order of first use (runtime.hpp).
+    static_cast<void>(rt_.get(Routine::map_get));
+    const wasm::Func item_end = rt_.get(Routine::item_end);
+    const wasm::Func content = rt_.get(Routine::content);
+    const wasm::Func head_arg = rt_.get(Routine::head_arg);
+    static_cast<void>(rt_.get(Routine::bytes_eq));
+    b.call(load_instance());
+    call_item(b, 2);
+    b.tee(args).load(i32_load8_u).u32(0xE0).op(i32_and).u32(0xA0).op(i32_ne);
+    b.get(args).call(head_arg).i64(2).op(i64_ne).op(i32_or);
+    {
+        const Label other = b.if_();
+        refuse(b, "bo:arguments");
+        b.end(other);
+    }
+    b.get(args);
+    lookup(b, text_cbor("function"), 2);
+    expect(b, Rep::text, "bo:argument function");
+    b.set(length).set(name);
+    b.get(args);
+    lookup(b, text_cbor("arguments"), 2);
+    b.tee(given).op(i32_eqz);
+    {
+        const Label missing = b.if_();
+        refuse(b, "bo:argument arguments");
+        b.end(missing);
+    }
+    b.global_get(pending_).call(head_arg).op(i32_wrap_i64).set(n);
+    b.global_get(pending_).call(content).set(q);
+    {
+        // At most 16 proposals, all within the state; a function's name is
+        // at most 64 bytes, and arguments are compared only with as many.
+        const Label found = b.block();
+        const Label next = b.loop({rt::max_needs + 1, max_state_size});
+        b.get(k).get(n).op(i32_ge_u);
+        {
+            const Label none = b.if_();
+            refuse(b, "bo:proposal");
+            b.end(none);
+        }
+        // [function, arguments, ...]: the same function, and the same bytes.
+        b.get(q).call(content).tee(x).call(content);
+        b.get(x).call(head_arg).op(i32_wrap_i64).get(name).get(length);
+        equal_bytes(b, max_build_name);
+        {
+            const Label same = b.if_();
+            b.get(x).call(item_end).tee(x);
+            b.get(x).call(item_end).get(x).op(i32_sub);
+            b.get(given).get(given).call(item_end).get(given).op(i32_sub);
+            equal_bytes(b, b.item_size(next));
+            b.br_if(found);
+            b.end(same);
+        }
+        b.get(q).call(item_end).set(q);
+        b.get(k).i32(1).op(i32_add).set(k).br(next);
+        b.end(next);
+        b.end(found);
+    }
+    b.get(k).global_set(proposal_index_);
+    b.get(q).global_set(proposal_entry_);
+    for (const ActionInfo& a : actions_) {
+        if (!a.split || a.rule_only) {
+            continue;
+        }
+        b.get(name).get(length).u32(intern(a.wire)).u32(static_cast<std::uint32_t>(a.wire.size()));
+        equal_bytes(b, a.wire.size());
+        const Label same = b.if_();
+        b.get(given).i32(1).call(a.core).return_();
+        b.end(same);
+    }
+    refuse(b, "bo:proposal");
+    module_.define(std::move(b));
+}
+
+void Lowering::write_triple(FunctionBuilder& b, const wasm::Global actor, const wasm::Global kind,
+                            const wasm::Global presence) {
+    // [actor, kind, presence]: an approval, or a proposer.
+    b.i32(4).i64(3).call(rt_.get(Routine::out_head));
+    b.global_get(actor);
+    out_value(b, Rep::ledger);
+    b.global_get(kind).op(i64_extend_i32_u).call(rt_.get(Routine::out_int));
+    b.global_get(presence).call(rt_.get(Routine::out_bool));
+}
+
+void Lowering::write_pending_approvals(FunctionBuilder& b) {
+    // The proposals kept, each [function, arguments, time, proposer,
+    // approvals], but the one an approval completed and those dropped as
+    // lapsed; the one an approval was recorded in, with it; then the one a
+    // call keeps.
+    const Local q = b.local(I32);
+    const Local n = b.local(I32);
+    const Local k = b.local(I32);
+    const Local next = b.local(I32);
+    const Local p = b.local(I32);
+    const Local list = b.local(I32);
+    const wasm::Func head = rt_.get(Routine::out_head);
+    const wasm::Func item_end = rt_.get(Routine::item_end);
+    const wasm::Func head_arg = rt_.get(Routine::head_arg);
+    const wasm::Func content = rt_.get(Routine::content);
+    static_cast<void>(rt_.get(Routine::out_raw));
+    b.global_get(pending_);
+    {
+        const Label some = b.if_(I32);
+        b.global_get(pending_).call(head_arg).op(i32_wrap_i64);
+        b.else_(some);
+        b.i32(0);
+        b.end(some);
+    }
+    b.set(n);
+    b.i32(4).get(n);
+    b.global_get(drop_).op(i32_eqz).op(i32_eqz).op(i32_sub);
+    b.global_get(lapsed_).op(i32_popcnt).op(i32_sub);
+    b.global_get(add_args_).op(i32_eqz).op(i32_eqz).op(i32_add);
+    b.op(i64_extend_i32_u).call(head);
+    b.get(n);
+    {
+        const Label some = b.if_();
+        b.global_get(pending_).call(content).set(q);
+        // At most 16 proposals, all of them within the state.
+        const Label done = b.block();
+        const Label loop = b.loop({rt::max_needs + 1, max_state_size});
+        b.get(k).get(n).op(i32_ge_u).br_if(done);
+        b.get(q).call(item_end).set(next);
+        b.get(k).i32(1).op(i32_add).global_get(drop_).op(i32_eq);
+        b.global_get(lapsed_).get(k).op(i32_shr_u).i32(1).op(i32_and).op(i32_or);
+        b.op(i32_eqz);
+        {
+            const Label kept = b.if_();
+            b.get(k).i32(1).op(i32_add).global_get(update_).op(i32_eq);
+            const Label updated = b.if_();
+            // [function, arguments, time, proposer, approvals and this one]
+            b.i32(4).i64(5).call(head);
+            b.get(q).call(content).tee(p);
+            b.call(item_end).call(item_end).call(item_end).call(item_end).set(list);
+            b.get(p).get(list).get(p).op(i32_sub);
+            out_raw(b, b.item_size(loop));
+            b.i32(4).get(list).call(head_arg).i64(1).op(i64_add).call(head);
+            b.get(list).call(content);
+            b.get(list).call(item_end).get(list).call(content).op(i32_sub);
+            out_raw(b, b.item_size(loop));
+            write_triple(b, approval_actor_, approval_kind_, approval_presence_);
+            b.else_(updated);
+            b.get(q).get(next).get(q).op(i32_sub);
+            out_raw(b, b.item_size(loop));
+            b.end(updated);
+            b.end(kept);
+        }
+        b.get(next).set(q);
+        b.get(k).i32(1).op(i32_add).set(k).br(loop);
+        b.end(loop);
+        b.end(done);
+        b.end(some);
+    }
+    b.global_get(add_args_);
+    {
+        const Label added = b.if_();
+        // [function, arguments, time, proposer, [its approval, if it counts]]
+        b.i32(4).i64(5).call(head);
+        b.global_get(add_name_).global_get(add_length_);
+        out_text(b, max_build_name);
+        b.global_get(add_args_);
+        b.global_get(add_args_).call(item_end).global_get(add_args_).op(i32_sub);
+        out_raw(b, max_value_size);
+        b.global_get(add_at_).call(rt_.get(Routine::out_int));
+        write_triple(b, add_actor_, add_kind_, add_presence_);
+        b.i32(4).global_get(add_counted_).op(i64_extend_i32_u).call(head);
+        b.global_get(add_counted_);
+        {
+            const Label counted = b.if_();
+            write_triple(b, add_actor_, add_kind_, add_presence_);
+            b.end(counted);
+        }
+        b.end(added);
+    }
+}
+
+void Lowering::write_approval_events(FunctionBuilder& b) {
+    // Before the state changes, in the order they happen: [lapse, FUNCTION]
+    // for each proposal dropped, in the order they were kept; [propose,
+    // ACTION]; [approval, {"by": ACTOR, "action": ACTION, "in_person":
+    // BOOL}]; [approve, ACTION].
+    const wasm::Func head = rt_.get(Routine::out_head);
+    const wasm::Func content = rt_.get(Routine::content);
+    const wasm::Func head_arg = rt_.get(Routine::head_arg);
+    const wasm::Func item_end = rt_.get(Routine::item_end);
+    static_cast<void>(rt_.get(Routine::out_text));
+    const Local q = b.local(I32);
+    const Local n = b.local(I32);
+    const Local k = b.local(I32);
+    const Local fn = b.local(I32);
+    b.global_get(lapsed_);
+    {
+        const Label some = b.if_();
+        b.global_get(pending_).call(head_arg).op(i32_wrap_i64).set(n);
+        b.global_get(pending_).call(content).set(q);
+        const Label done = b.block();
+        const Label next = b.loop({rt::max_needs + 1});
+        b.get(k).get(n).op(i32_ge_u).br_if(done);
+        b.global_get(lapsed_).get(k).op(i32_shr_u).i32(1).op(i32_and);
+        {
+            const Label late = b.if_();
+            constexpr std::string_view lapse_event = "lapse";
+            b.i32(4).i64(2).call(head);
+            b.u32(intern(lapse_event)).u32(static_cast<std::uint32_t>(lapse_event.size()));
+            out_text(b, lapse_event.size());
+            b.get(q).call(content).tee(fn).call(content);
+            b.get(fn).call(head_arg).op(i32_wrap_i64);
+            out_text(b, max_build_name);
+            b.end(late);
+        }
+        b.get(q).call(item_end).set(q);
+        b.get(k).i32(1).op(i32_add).set(k).br(next);
+        b.end(next);
+        b.end(done);
+        b.end(some);
+    }
+    b.global_get(event_kind_).i32(1).op(i32_eq);
+    {
+        const Label proposed = b.if_();
+        constexpr std::string_view propose_event = "propose";
+        b.i32(4).i64(2).call(head);
+        b.u32(intern(propose_event)).u32(static_cast<std::uint32_t>(propose_event.size()));
+        out_text(b, propose_event.size());
+        b.global_get(event_name_).global_get(event_length_);
+        out_text(b, max_build_name);
+        b.end(proposed);
+    }
+    b.global_get(approval_event_);
+    {
+        const Label approved = b.if_();
+        constexpr std::string_view approval_name = "approval";
+        b.i32(4).i64(2).call(head);
+        b.u32(intern(approval_name)).u32(static_cast<std::uint32_t>(approval_name.size()));
+        out_text(b, approval_name.size());
+        b.i32(5).i64(3).call(head);
+        out_key(b, text_cbor("by"));
+        b.global_get(approval_actor_);
+        out_value(b, Rep::ledger);
+        out_key(b, text_cbor("action"));
+        b.global_get(event_name_).global_get(event_length_);
+        out_text(b, max_build_name);
+        out_key(b, text_cbor("in_person"));
+        b.global_get(approval_presence_).call(rt_.get(Routine::out_bool));
+        b.end(approved);
+    }
+    b.global_get(event_kind_).i32(2).op(i32_eq);
+    {
+        const Label completed = b.if_();
+        b.i32(4).i64(2).call(head);
+        b.u32(intern(m::approve_function))
+            .u32(static_cast<std::uint32_t>(m::approve_function.size()));
+        out_text(b, m::approve_function.size());
+        b.global_get(event_name_).global_get(event_length_);
+        out_text(b, max_build_name);
+        b.end(completed);
+    }
+}
+
 void Lowering::statements(Ctx& c, const std::vector<m::Statement>& list) {
     FunctionBuilder& b = *c.b;
     for (const m::Statement& s : list) {
@@ -3804,6 +4773,9 @@ void Lowering::statements(Ctx& c, const std::vector<m::Statement>& list) {
                     }
                 },
                 [&](const m::Request& r) { request(c, r); },
+                // R36: met before the block runs (emit_approvals_core); it
+                // is numbered with the requirements.
+                [&](const m::Approvals&) { ++c.requires_count; },
             },
             s.node);
     }
@@ -5058,6 +6030,14 @@ void Lowering::emit() {
             *g = module_.add_global(I32, 0);
         }
     }
+    if (approvals_) {
+        add_at_ = module_.add_global(I64, 0);
+        for (wasm::Global* g : {&add_actor_, &add_kind_, &add_presence_, &add_counted_, &lapsed_,
+                                &update_, &proposal_index_, &proposal_entry_, &approval_event_,
+                                &approval_actor_, &approval_kind_, &approval_presence_}) {
+            *g = module_.add_global(I32, 0);
+        }
+    }
     if (since_used_) {
         since_ = module_.add_global(I64, 0);
     }
@@ -5140,8 +6120,11 @@ void Lowering::emit() {
             continue;
         }
         a.function = module_.declare({});
-        if (a.action->agents_propose) {
+        if (a.split) {
             a.core = module_.declare({{I32, I32}, {}});
+        }
+        if (!a.lines.empty()) {
+            a.deadline = module_.declare({{I32, I64}, {I64}});
         }
     }
     if (proposals_) {
@@ -5160,7 +6143,9 @@ void Lowering::emit() {
             emit_action(a);
         }
     }
-    if (proposals_) {
+    if (approvals_) {
+        emit_approvals_approve(approve_function_);
+    } else if (proposals_) {
         emit_approve(approve_function_);
     }
     for (const RuleInfo& r : rules_) {
@@ -5258,10 +6243,11 @@ Shape Lowering::creation_shape() const {
 }
 
 Shape Lowering::proposal_shape() const {
-    // The arguments of an action AI agents may propose (the most of any).
+    // The arguments of an action AI agents may propose, or one with
+    // approvals lines (the most of any).
     Shape most;
     for (const ActionInfo& a : actions_) {
-        if (!a.rule_only && a.action->agents_propose) {
+        if (!a.rule_only && a.split) {
             const Shape s = arguments_shape(a);
             most = {std::max(most.items, s.items), std::max(most.keys, s.keys)};
         }
@@ -5281,7 +6267,12 @@ Shape Lowering::state_shape() const {
     for (const FieldSlot& slot : fields_) {
         out += value_shape(slot.field->type);
     }
-    if (proposals_) {
+    if (approvals_) {
+        // At most 16 proposals, each [function, arguments, time, [actor,
+        // kind, presence], approvals], with at most 32 approvals (R36).
+        out += Shape{1, 0} + rt::max_needs * (Shape{8, 0} + m::max_action_approvals * Shape{4, 0} +
+                                              proposal_shape());
+    } else if (proposals_) {
         // At most 16 proposals, each [function, arguments].
         out += Shape{1, 0} + rt::max_needs * (Shape{2, 0} + proposal_shape());
     }
@@ -5313,7 +6304,7 @@ Shape Lowering::rest_shape() const {
     // {1: kind, 2: presence, 3: model}.
     std::uint64_t parties = roles_.size();
     for (const FieldSlot& slot : fields_) {
-        parties += slot.rep == Rep::ledger ? 1 : 0;
+        parties += slot.party ? 1 : 0;
     }
     const Shape signer = map_shape(signer_keys) + Shape{signer_keys, 0};
     Shape out = map_shape(8) + Shape{4, 0};
@@ -5371,7 +6362,7 @@ void Lowering::bounds(Build& build) {
     bool proposed_bill = false;
     for (const ActionInfo& a : actions_) {
         const bool bill = sets_bill(a.action->body);
-        if (a.action->agents_propose) {
+        if (a.split) {
             proposed_parts = proposed_parts || a.parts;
             proposed_bill = proposed_bill || bill;
         }

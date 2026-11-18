@@ -1,0 +1,19 @@
+合约 Payments
+参与方 我方
+
+物件 Payment
+  金额 港元
+  directors 列表 真人 最多 5
+  chair 真人
+
+可 disburse 由 我方 附带 treasurer 真人
+  超过 1_000_000 须由 directors 2人审批 本人确认 7天内
+  须 1人审批 1个月内
+  须 30天内 3人审批 由 (chair, treasurer)
+  AI 代理 可批准
+  正常 -> disbursed
+
+测试
+  我方 创建 附带 金额 = 港元 2_000_000, directors = (alice, bob), chair = carol
+  我方 disburse 附带 treasurer = dave 由 alice 本人确认 -> 待批准
+  我方 批准 由 bob -> 待批准

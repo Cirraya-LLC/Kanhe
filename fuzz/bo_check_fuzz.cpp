@@ -147,6 +147,16 @@ public:
                                statements(e.body, depth + 1);
                            },
                            [&](const m::Reject& r) { place(r.span); },
+                           [&](const m::Approvals& a) {
+                               place(a.span);
+                               expr(a.within, 1);
+                               if (a.by) {
+                                   expr(*a.by, 1);
+                               }
+                               if (a.guard) {
+                                   expr(*a.guard, 1);
+                               }
+                           },
                            [&](const m::Set& st) {
                                place(st.span);
                                expr(st.target, 1);

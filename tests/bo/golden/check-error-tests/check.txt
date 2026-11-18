@@ -91,8 +91,8 @@ test "values of fields"
 31:3 error check.unknown-party: bank is not one of the contract's parties: add it to the parties line
 32:20 error check.test-to: sign has no counterparty, so a step that does it names none: drop to
 33:14 error check.test-counterparty: the counterparty of lend is customer, bound to a ledger when the instance is created: write to customer
-34:20 error check.test-signer: person: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both, and by names nobody else
-35:3 error check.test-signer: customer sign by AI agent in person: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both, and by names nobody else
+34:20 error check.test-signer: person: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both; a step of the home may name the person who calls (by alice), a name only tests use; by names nobody else
+35:3 error check.test-signer: customer sign by AI agent in person: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both; a step of the home may name the person who calls (by alice), a name only tests use; by names nobody else
 39:17 error check.test-step: yes: besides to and with, a step takes at DATE, in person, and by AI agent, each once
 40:17 error check.test-time: at 1969-05-01: at takes a date after 1970-01-01 (at 2027-01-06)
 41:17 error check.test-time-back: at 2026-01-01 is earlier than a step before it: time never goes back in a test

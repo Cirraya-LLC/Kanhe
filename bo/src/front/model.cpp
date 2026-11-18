@@ -143,9 +143,10 @@ std::string describe_tokens(const std::vector<std::string_view>& tokens, std::si
         return sentence("type-recurring", values, language);
     }
     static constexpr std::pair<std::string_view, std::string_view> simple[] = {
-        {"?", "type-unknown"},   {"number", "type-number"}, {"rate", "type-rate"},
-        {"date", "type-date"},   {"text", "type-text"},     {"yes_no", "type-yes-no"},
-        {"party", "type-party"}, {"state", "type-state"},   {"basis", "type-basis"},
+        {"?", "type-unknown"},     {"number", "type-number"}, {"rate", "type-rate"},
+        {"date", "type-date"},     {"text", "type-text"},     {"yes_no", "type-yes-no"},
+        {"party", "type-party"},   {"state", "type-state"},   {"basis", "type-basis"},
+        {"person", "type-person"},
     };
     for (const auto& [token, id] : simple) {
         if (head == token) {
@@ -296,6 +297,20 @@ void statements(std::string& out, const std::vector<model::Statement>& list, std
                            add_line(out, depth, line + " -> " + text(t.to));
                        },
                        [&](const model::Do& d) { do_lines(out, d, depth); },
+                       [&](const model::Approvals& a) {
+                           std::string line = std::format("approvals {}", a.count);
+                           if (a.by) {
+                               line += " by=" + text(*a.by);
+                           }
+                           if (a.in_person) {
+                               line += " in_person";
+                           }
+                           line += " within=" + text(a.within);
+                           if (a.guard) {
+                               line += " guard=" + text(*a.guard);
+                           }
+                           add_line(out, depth, ruled(std::move(line), a.rule));
+                       },
                        [&](const model::Request& r) {
                            std::string line = "request " + r.kind;
                            if (r.to) {
@@ -376,6 +391,9 @@ void test_lines(std::string& out, const model::Test& t) {
         }
         if (s.agent) {
             line += " agent";
+        }
+        if (!s.person.empty()) {
+            line += " person=" + s.person;
         }
         if (s.answer) {
             line += " answer=" + s.request_kind + " " +
@@ -601,7 +619,23 @@ std::string_view creation_function(const Model& model) noexcept {
 }
 
 bool has_proposals(const Model& model) noexcept {
-    return std::ranges::any_of(model.actions, [](const Action& a) { return a.agents_propose; });
+    return std::ranges::any_of(model.actions, [](const Action& a) { return a.agents_propose; }) ||
+           has_approvals(model);
+}
+
+bool has_approvals(const Model& model) noexcept {
+    return std::ranges::any_of(model.actions,
+                               [](const Action& a) { return !approvals_of(a).empty(); });
+}
+
+std::vector<const Approvals*> approvals_of(const Action& action) {
+    std::vector<const Approvals*> out;
+    for (const Statement& s : action.body) {
+        if (const auto* a = std::get_if<Approvals>(&s.node)) {
+            out.push_back(a);
+        }
+    }
+    return out;
 }
 
 const Do* issued_parts(const Action& action) noexcept {
@@ -783,6 +817,9 @@ bool any_expression(const std::vector<Statement>& list, const F& f) {
                 [&](const Request& r) {
                     return (r.to && walk(*r.to)) ||
                            std::ranges::any_of(r.with, [&](const Set& w) { return walk(w.value); });
+                },
+                [&](const Approvals& a) {
+                    return (a.guard && walk(*a.guard)) || (a.by && walk(*a.by));
                 },
             },
             s.node);
@@ -1045,6 +1082,7 @@ std::string encode(const model::Type& type) {
     case TypeKind::party:
     case TypeKind::state:
     case TypeKind::basis:
+    case TypeKind::person:
         break;
     }
     return std::string(model::type_kind_names[static_cast<std::size_t>(type.kind)]);
@@ -1163,6 +1201,9 @@ std::string dump(const model::Model& m) {
         }
         line += " " + (a.agents_propose ? std::string("agents=propose")
                                         : ruled("agents=delegation", a.agents_rule));
+        if (a.agents_approve) {
+            line += " agents=approve";
+        }
         if (a.executor) {
             line += " " + ruled("executor", a.executor_rule);
         }

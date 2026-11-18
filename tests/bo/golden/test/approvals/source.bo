@@ -1,0 +1,101 @@
+# Approvals by people of the home: the one who proposes counting, AI
+# agents counting where no presence is asked, an AI agent's proposal, the
+# requirements after a line, another party's call, and lapsed proposals.
+contract Approvals
+parties we, partner
+
+thing Order
+  amount HKD
+  directors list person at most 5
+  chair person
+
+can sign by we
+  requires 1 approval by directors in person within 30 days
+  active -> signed
+
+can ship by we
+  over 10_000 requires 2 approvals within 7 days
+  AI agent can approve
+  requires amount > HKD 0
+  signed -> shipped
+
+can reimburse by we
+  requires 1 approval by directors within 14 days
+  AI agent can propose
+  shipped -> reimbursed
+
+can audit by we
+  requires 1 approval by chair in person within 7 days
+  AI agent can approve
+
+can note_it by we
+  requires 2 approvals within 7 days
+
+can return_order by partner
+  requires 1 approval within 7 days
+  shipped -> returned
+
+test "the one who proposes counts, and alone may be enough"
+  we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+  we sign by alice in person -> signed
+
+test "presence is the line's"
+  we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+  we sign by alice -> pending approval
+  we approve by AI agent -> refused "bo:approver sign"
+  we approve by bob in person -> signed
+
+test "AI agents count where no presence is asked"
+  we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+  we sign by alice in person -> signed
+  we ship by dave -> pending approval
+  we approve by dave -> refused "bo:approved ship"
+  we approve -> refused "bo:approver ship"
+  we approve by AI agent -> shipped
+  we audit by AI agent -> pending approval
+  we approve by AI agent -> refused "bo:approver audit"
+  we approve by carol -> refused "bo:in-person audit"
+  we approve by carol in person
+
+test "an AI agent's proposal waits for a person in person"
+  we create with amount = HKD 500, directors = (alice, bob), chair = carol
+  we sign by alice in person -> signed
+  we ship -> shipped
+  we reimburse by AI agent -> pending approval
+  we approve by alice -> refused "bo:approve reimburse"
+  we approve by bob in person -> reimbursed
+
+test "a guard that does not hold, and the requirements after the line"
+  we create with amount = HKD 0, directors = (alice), chair = carol
+  we sign by alice in person -> signed
+  we ship -> refused "bo:requires ship 2"
+
+test "another party's people approve on its own ledger"
+  we create with amount = HKD 50_000, directors = (alice), chair = carol
+  partner return_order -> refused "bo:approvals return_order"
+
+test "lapsed proposals go when a new one is kept"
+  we create with amount = HKD 1, directors = (alice), chair = carol at 2027-01-01
+  we note_it by dave -> pending approval
+  we note_it by erin at 2027-01-20 -> pending approval
+  we approve by frank
+
+test "an instance keeps at most 16 proposals"
+  we create with amount = HKD 1, directors = (alice), chair = carol
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> pending approval
+  we note_it -> refused "bo:pending"

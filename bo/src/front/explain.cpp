@@ -475,6 +475,12 @@ public:
                 return ledger(ByteView(*id));
             }
             break;
+        case TypeKind::person:
+            // A person of the home (R36): its actor id.
+            if (const Bytes* id = v.as_bytes(); id != nullptr && id->size() == 32) {
+                return to_hex(ByteView(*id));
+            }
+            break;
         case TypeKind::list:
             // Each item as its type is written, in parentheses.
             if (const cbor::Array* items = v.as_array();
@@ -1133,6 +1139,12 @@ private:
                                    std::ranges::any_of(
                                        r.with, [&](const m::Set& w) { return in(w.value, in); });
                         },
+                        [&](const m::Approvals& a) {
+                            // A time for approving in months counts by the
+                            // calendar, at the contract's offset.
+                            return in(a.within, in) || (a.guard && in(*a.guard, in)) ||
+                                   (a.by && in(*a.by, in));
+                        },
                     },
                     st.node);
             });
@@ -1385,6 +1397,7 @@ private:
                     },
                     [&](const m::Do& d) { act(d, out, parent, n); },
                     [&](const m::Request& r) { request(r, out, parent, n); },
+                    [&](const m::Approvals& a) { approvals(a, out, parent, n); },
                 },
                 statement.node);
         }
@@ -1473,6 +1486,38 @@ private:
                           {{"number", plain(std::to_string(number))}, {"need", plain(need)}});
         }
         add(out, parent, n, "requirement", std::move(text), rules, number);
+    }
+
+    /// A requirement of approvals (R36), numbered with the requirements:
+    /// who approves, how many, in person or not, and within how long.
+    void approvals(const m::Approvals& a, std::vector<ExplainedClause>& out,
+                   const std::string& parent, std::size_t& n) {
+        const std::uint32_t number = ++requirement_;
+        Rules rules;
+        note(rules, a.rule);
+        const Phrase count = plain(std::to_string(a.count));
+        const Phrase within = plain(expr(a.within, rules));
+        std::string need;
+        if (a.by) {
+            const Phrase people = plain(expr(*a.by, rules));
+            need = w_.say(
+                a.in_person ? "need-approvals-in-person" : "need-approvals",
+                {{"count", count}, {"people", people}, {"party", starter()}, {"duration", within}});
+        } else {
+            need = w_.say(a.in_person ? "need-approvals-any-in-person" : "need-approvals-any",
+                          {{"count", count}, {"party", starter()}, {"duration", within}});
+        }
+        std::string text;
+        if (a.guard) {
+            const std::string guard = expr(*a.guard, rules);
+            text = w_.say("requirement-if", {{"number", plain(std::to_string(number))},
+                                             {"guard", plain(guard)},
+                                             {"need", plain(need)}});
+        } else {
+            text = w_.say("requirement",
+                          {{"number", plain(std::to_string(number))}, {"need", plain(need)}});
+        }
+        add(out, parent, n, "approvals", std::move(text), rules, number);
     }
 
     /// An action done: its words, with its arguments and parties.
@@ -1665,6 +1710,13 @@ private:
                     text = w_.say("agents-delegation");
                 }
                 add(s.clauses, number, k, "agents", std::move(text), rules);
+                if (a.agents_approve) {
+                    // R36: an AI agent's approval counts where no presence
+                    // is asked.
+                    Rules approving;
+                    note(approving, "R36");
+                    add(s.clauses, number, k, "agents", w_.say("agents-approve"), approving);
+                }
             }
             // An action with terms states its request among its clauses (R10).
             if (a.executor && !a.terms) {
@@ -1676,7 +1728,8 @@ private:
         action_ = nullptr;
         function_.clear();
         if (m::has_proposals(model_)) {
-            // approve: a person approves an AI agent's proposal.
+            // approve: a person approves an AI agent's proposal, and the
+            // home's people approve proposals kept for approvals (R36).
             function_ = std::string(m::approve_function);
             const std::string name = w_.word(find_concept("act.approve")).text;
             const std::string title =
@@ -1685,10 +1738,19 @@ private:
                                                                {"function", plain(function_)}});
             const std::string number = add(s.clauses, s.number, n, "action", title, {});
             std::size_t k = 0;
-            Rules rules;
-            note(rules, "R14");
-            add(s.clauses, number, k, "approve",
-                w_.say("approve", {{"function", plain(function_)}}), rules);
+            if (std::ranges::any_of(model_.actions,
+                                    [](const m::Action& a) { return a.agents_propose; })) {
+                Rules rules;
+                note(rules, "R14");
+                add(s.clauses, number, k, "approve",
+                    w_.say("approve", {{"function", plain(function_)}}), rules);
+            }
+            if (m::has_approvals(model_)) {
+                Rules rules;
+                note(rules, "R36");
+                add(s.clauses, number, k, "approve",
+                    w_.say("approve-approvals", {{"function", plain(function_)}}), rules);
+            }
             function_.clear();
         }
     }
@@ -1864,6 +1926,82 @@ private:
 
 } // namespace
 
+namespace {
+
+/// Who proposed or approved, from [ACTOR, KIND, PRESENCE]: the actor id in
+/// hex, and how it signed.
+std::string signed_by(const cbor::Value& who, const Writer& w) {
+    const cbor::Array* parts = who.as_array();
+    if (parts == nullptr || parts->size() != 3) {
+        return cbor::diagnostic(who);
+    }
+    const Bytes* actor = (*parts)[0].as_bytes();
+    const std::optional<std::int64_t> kind = (*parts)[1].as_int64();
+    const std::optional<bool> presence = (*parts)[2].as_bool();
+    if (actor == nullptr || !kind || !presence) {
+        return cbor::diagnostic(who);
+    }
+    const Phrase id = plain(to_hex(ByteView(*actor)));
+    if (*kind == 1) {
+        return w.say(*presence ? "state-by-in-person" : "state-by-person", {{"actor", id}});
+    }
+    if (*kind == 2) {
+        return w.say("state-by-agent", {{"actor", id}});
+    }
+    return w.say("state-by-other", {{"actor", id}, {"kind", plain(std::to_string(*kind))}});
+}
+
+void explain_proposals(const model::Model& model, const cbor::Value& state, const Writer& w,
+                       ExplainedState& out) {
+    // [FUNCTION, ARGS] (an AI agent's proposal), or, with approvals (R36),
+    // [FUNCTION, ARGS, AT, BY, APPROVALS].
+    const cbor::Value* pending = state.find("pending");
+    const cbor::Array* list = pending != nullptr ? pending->as_array() : nullptr;
+    if (list == nullptr) {
+        return;
+    }
+    model::Type when;
+    when.kind = model::TypeKind::date;
+    for (const cbor::Value& entry : *list) {
+        const cbor::Array* parts = entry.as_array();
+        const std::string* function =
+            parts != nullptr && !parts->empty() ? parts->front().as_text() : nullptr;
+        if (function == nullptr) {
+            out.proposals.push_back(ExplainedProposal{{}, cbor::diagnostic(entry)});
+            continue;
+        }
+        std::string action = *function;
+        for (const model::Action& a : model.actions) {
+            if (wire_name(a.word, a.name) == *function) {
+                action = a.word != nullptr ? w.word(a.word).text : a.name;
+            }
+        }
+        const Phrase name = plain(action);
+        if (parts->size() != 5) {
+            out.proposals.push_back(
+                ExplainedProposal{action, w.say("state-proposal-kept", {{"action", name}})});
+            continue;
+        }
+        std::vector<std::string> approvals;
+        if (const cbor::Array* given = (*parts)[4].as_array()) {
+            for (const cbor::Value& one : *given) {
+                approvals.push_back(signed_by(one, w));
+            }
+        }
+        const std::string approved =
+            approvals.empty()
+                ? w.say("state-not-approved")
+                : w.say("state-approved", {{"approvals", plain(w.join(approvals, true))}});
+        out.proposals.push_back(ExplainedProposal{
+            action, w.say("state-proposal", {{"action", name},
+                                             {"time", plain(w.value(when, (*parts)[2], {}))},
+                                             {"by", plain(signed_by((*parts)[3], w))},
+                                             {"approvals", plain(approved)}})});
+    }
+}
+
+} // namespace
+
 Explained explain(const model::Model& model, const Pack* language) {
     return Explainer(model, language).run();
 }
@@ -1892,6 +2030,7 @@ ExplainedState explain_state(const model::Model& model, const cbor::Value& state
                                                 w.value(f.type, *v, ledger)});
         }
     }
+    explain_proposals(model, state, w, out);
     return out;
 }
 

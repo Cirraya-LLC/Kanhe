@@ -47,12 +47,13 @@ enum class TypeKind : std::uint8_t {
     unit_price, ///< money in `currency` per unit of `dimension` (6 decimals)
     recurring,  ///< `element[0]` each `period` (monthly HKD 120)
     basis,      ///< what a charge depends on (according to customer location)
+    person,     ///< a person of the home: an actor id (32 bytes)
 };
 
 /// TypeKind's names, in enumerator order (checked by reflection).
-inline constexpr std::array<std::string_view, 15> type_kind_names{
+inline constexpr std::array<std::string_view, 16> type_kind_names{
     "unknown", "number", "money", "quantity", "rate",       "date",      "duration", "text",
-    "yes_no",  "party",  "state", "list",     "unit_price", "recurring", "basis"};
+    "yes_no",  "party",  "state", "list",     "unit_price", "recurring", "basis",    "person"};
 
 /// What a quantity measures. Units of one dimension convert exactly (TB is
 /// 1,000 GB, TiB 1,024 GiB); units of two never mix.
@@ -226,8 +227,28 @@ struct Request {
     std::string_view rule;
 };
 
+/// `[GUARD] requires N approvals [by PEOPLE] [in person] within DURATION`
+/// (R36): a call of the action, when the guard holds, is kept as a proposal
+/// until `count` different people of the home approve it (each with
+/// presence, if `in_person`), within `within` of the proposal; the one who
+/// proposes counts when it qualifies. `by` names the people who count, a
+/// person or a list of people; without it, anyone the home's delegations
+/// let call `approve`. It stands at the top of an action's block, and
+/// counts among its requirements (bo:requires numbers it, 12.10).
+struct Approvals {
+    static constexpr std::string_view tag = "approvals";
+    Span span;
+    std::uint64_t count = 0;
+    std::optional<Expr> by;
+    bool in_person = false;
+    /// A duration literal: 1 day to 366 days, or 1 to 12 months.
+    Expr within;
+    std::optional<Expr> guard;
+    std::string_view rule;
+};
+
 struct Statement {
-    std::variant<Requires, If, Each, Reject, Set, Transition, Do, Request> node;
+    std::variant<Requires, If, Each, Reject, Set, Transition, Do, Request, Approvals> node;
 };
 
 // ---------------------------------------------------------------------------
@@ -366,6 +387,9 @@ struct Action {
     /// Otherwise agents act within their delegation (R14, in `agents_rule`).
     bool agents_propose = false;
     std::string_view agents_rule;
+    /// `AI agent can approve`: an AI agent's approval counts for the
+    /// action's approvals lines that ask no presence (R36).
+    bool agents_approve = false;
     /// R10: the action asks an executor to act outside the ledger.
     bool executor = false;
     std::string_view executor_rule;
@@ -475,6 +499,10 @@ struct Step {
     bool in_person = false;
     /// `by AI agent`: the subject's signer is an AI agent.
     bool agent = false;
+    /// `by NAME`: the call's caller is a person of the home whom only tests
+    /// name (its actor id the SHA-256 of `kanhe-bo-test person NAME`),
+    /// signing as a person (kind 1), with presence if `in_person`.
+    std::string person;
     /// An answer to a request : `executor notify done`, `keeper notify
     /// expires`: the oldest open request of the kind is answered, with the
     /// values `with` gives (result, reason). The subject signs it.
@@ -579,9 +607,22 @@ struct Model {
 /// asset, `create` otherwise.
 [[nodiscard]] std::string_view creation_function(const Model& model) noexcept;
 
-/// True if some action lets AI agents only propose it, so that compiled code
-/// keeps proposals and has a function `approve`.
+/// True if some action lets AI agents only propose it, or has approvals lines
+/// (R36), so that compiled code keeps proposals and has a function `approve`.
 [[nodiscard]] bool has_proposals(const Model& model) noexcept;
+
+/// True if some action has approvals lines (R36): each of the instance's
+/// proposals is then [FUNCTION, ARGS, AT, BY, APPROVALS] (spec/bo.md 12.5).
+[[nodiscard]] bool has_approvals(const Model& model) noexcept;
+
+/// An action's approvals lines (R36), in order: the top-level lines of its
+/// block.
+[[nodiscard]] std::vector<const Approvals*> approvals_of(const Action& action);
+
+/// The most approvals one action's lines ask together, and the most a
+/// proposal records (R36).
+inline constexpr std::uint64_t max_approvals = 16;
+inline constexpr std::uint64_t max_action_approvals = 32;
 
 /// True if a transition goes back to the state before (`previous state`),
 /// so that compiled code keeps that state.

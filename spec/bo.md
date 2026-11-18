@@ -119,7 +119,7 @@ when notify fails
 
 ### 1.2 One contract, any language
 
-Bo has 22 keywords (Appendix A) and a vocabulary of 142 words (Appendix B): kinds, actions, conditions, prices, charges, time words, units, currencies, rounding modes, documents, types, values, fields, states, actors, roles, and expressions. Each is a *concept* with an id (`kw.can`, `act.transfer`, `cur.HKD`). Eighty-four of the words are Bo's *core*, which every source reads: the kind `thing`, actions every kind of thing may need (issue, create, transfer, cancel, suspend, resume, terminate, approve, propose, notify), conditions, time, units, currencies, rounding, types, values, and common fields, states, actors, roles, and expressions. The others belong to the three official *vocabulary packs* (3.9): `finance` (24 words), `commerce` (22), and `services` (12), which a source uses by declaring them (`use finance`). *Language packs* (section 3) give each concept its spellings in one language, and the reading rules of that language. Three official packs come with edition 1: English (`en`), Traditional Chinese in Hong Kong usage (`zh-Hant-HK`), and Simplified Chinese in mainland usage (`zh-Hans-CN`).
+Bo has 22 keywords (Appendix A) and a vocabulary of 146 words (Appendix B): kinds, actions, conditions, prices, charges, time words, units, currencies, rounding modes, documents, types, values, fields, states, actors, roles, and expressions. Each is a *concept* with an id (`kw.can`, `act.transfer`, `cur.HKD`). Eighty-five of the words are Bo's *core*, which every source reads: the kind `thing`, actions every kind of thing may need (issue, create, transfer, cancel, suspend, resume, terminate, approve, propose, notify), conditions (approvals among them), time, units, currencies, rounding, types, values, and common fields, states, actors, roles, and expressions. The others belong to the three official *vocabulary packs* (3.9): `finance` (24 words), `commerce` (23), and `services` (14), which a source uses by declaring them (`use finance`). *Language packs* (section 3) give each concept its spellings in one language, and the reading rules of that language. Three official packs come with edition 1: English (`en`), Traditional Chinese in Hong Kong usage (`zh-Hant-HK`), and Simplified Chinese in mainland usage (`zh-Hans-CN`).
 
 The compiler works on concepts, never on spellings. A source may mix the three languages, even within a line (`可pledge 予 bank`), and the same contract written in any language, or mixed, gives the same tree, the same checked model, the same compiled code byte for byte, and the same contract text in each output language. Names the contract gives (its own parties, fields, states, actions, charges) are never translated: they stay as written, and compiled code uses them as written.
 
@@ -129,7 +129,7 @@ Bo reads, and infers, only by fixed rules of the edition:
 
 - **Reading.** A run of characters that two rules could read differently (`可用率` as one name, or as `可` + `用率`) is read one way only, or it is an error asking for a space. One spelling never has two meanings across the packs a source is read with.
 - **Grammar.** What could be grouped two ways is an error asking for parentheses (`monthly HKD 120 * 12`, `a < b < c`).
-- **Meaning.** What Bo infers rather than reads (a field's type, the state an instance starts in, a consent an action needs, a threshold's currency), it infers by one of the edition's thirty-two *recognition rules*, R1 to R32 (section 7). Where no rule applies, the checker reports an error. Every clause a rule inferred is marked with the rule's id in the contract text (section 14), so the parties see it before they sign.
+- **Meaning.** What Bo infers rather than reads (a field's type, the state an instance starts in, a consent an action needs, a threshold's currency), it infers by one of the edition's thirty-six *recognition rules*, R1 to R36 (section 7). Where no rule applies, the checker reports an error. Every clause a rule inferred is marked with the rule's id in the contract text (section 14), so the parties see it before they sign.
 
 ### 1.4 Editions
 
@@ -252,12 +252,12 @@ A pack may let some keywords attach to the start of the next word, and some word
 
 | Words | Rule | Joined to | Examples |
 |---|---|---|---|
-| `可` (can), `須`/`须` (requires), `當`/`当` (when), `如`/`如果` (if) | prefix keywords | the start of the next word: a word of the vocabulary, the opening words of a word with an argument, or a name the contract declares | `可質押`, `須親身確認`, `須經`, `當逾期`, `如逾期` |
+| `可` (can), `須`/`须` (requires), `當`/`当` (when), `如`/`如果` (if) | prefix keywords | the start of the next word: a word of the vocabulary, the opening words of a word with an argument, or a name the contract declares; `須`/`须` also the keyword `由` (by) | `可質押`, `須親身確認`, `須經`, `當逾期`, `如逾期`, `須由` |
 | `每` (`price.per`) | attaches before | a unit or a currency | `每GB`, `每港元` |
 | `按` (`charge.by`) | attaches before | a document or a field | `按發票`, `按客戶所在地` |
 | `內`/`内` (`cond.within`, the words after its argument) | attaches after | a time word or a unit | `30日內`, `3個月內` |
 
-A prefix keyword joined to a word of the vocabulary is read by the lexer. Joined to a name (`可提款`), it depends on the names the contract declares, which the parser knows: the name is read as the keyword followed by the rest (`可` + `提款`) when the contract declares the rest and does not declare the whole; if it declares both, it is `parse.ambiguous-name`; if neither, the whole is one name (`可用率` stays a name), and a line that such a name cannot begin is `parse.undeclared-split`. *Declared* means named as the contract, a party, a block, a field, an action after `can`, an input after `with`, or an item of `each`.
+A prefix keyword joined to a word of the vocabulary is read by the lexer, and so is `須`/`须` joined to `由`: `須由 directors 2人批核` is `須` + `由` + ..., a requirement of approvals (6.13). The keyword `requires` joins the keyword `by` in a set of the official packs from version 7 on; a set of an earlier release (3.7) reads `須由` as one name, as it did. Joined to a name (`可提款`), it depends on the names the contract declares, which the parser knows: the name is read as the keyword followed by the rest (`可` + `提款`) when the contract declares the rest and does not declare the whole; if it declares both, it is `parse.ambiguous-name`; if neither, the whole is one name (`可用率` stays a name), and a line that such a name cannot begin is `parse.undeclared-split`. *Declared* means named as the contract, a party, a block, a field, an action after `can`, an input after `with`, or an item of `each`.
 
 ### 2.8 Words with an argument
 
@@ -289,7 +289,7 @@ number = digits { "_" digits } [ "." digits { "_" digits } ]
 - A comma never groups digits: `5,000` is `lex.digit-comma`, which suggests `5_000`. Any other misplaced `_` or `.` is `lex.bad-number`.
 - The value is exact, as written: `0.10` is ten hundredths. At most 18 decimal places, and at most 18,446,744,073,709,551,615 counting every digit without the decimal point (`lex.number-too-large`).
 - **Multipliers.** A pack may define multipliers, powers of ten (the official Chinese packs: `萬`/`万` 10^4 and `億`/`亿` 10^8). One multiplier may follow a number, joined (`500萬`) or after a space (`500 萬`). Decimal places absorb it: `1.5萬` is 15,000. A multiplier anywhere else is `lex.multiplier`; one that makes the number too large, `lex.number-too-large`.
-- **What may follow a number directly.** Without a space, a number may be followed by, in order and each optional: one multiplier; one unit, time unit, or currency spelled as one word; and a word that attaches after a unit or time unit (2.7). `2TB`, `30日`, `500萬港元`, `30日內`. Anything else is `lex.number-suffix`; a suffix that reads two ways, `lex.ambiguous`.
+- **What may follow a number directly.** Without a space, a number may be followed by, in order and each optional: one multiplier; one unit, time unit, or currency spelled as one word; and a word that attaches after a unit or time unit (2.7). `2TB`, `30日`, `500萬港元`, `30日內`. Instead of a unit, the word that counts approvals may follow it, spelled as one word (`2人批核`, `2人审批`, 6.13): it stays a word of its own after the number, which stays a number. Anything else is `lex.number-suffix`; a suffix that reads two ways, `lex.ambiguous`.
 - **Rates.** `%` (or a pack's alias, `％`) directly after a number makes a rate, in percent: `5%`, `3.875%`. `%` anywhere else is `lex.percent`.
 - **No subtraction of dates.** Digits joined by `-` twice or more are a date or an error (2.11), never a subtraction: `2027-1-6` is `lex.bad-date`. `10-3` is a subtraction.
 - **Negative numbers.** A `-` directly before a number's first digit makes the number negative where a value begins: at the start of a line's code, after a space, or directly after a symbol that ends no value (`(`, `,`, `=`, `<`, `>`, `+`, `-`, `*`, `/`, `×`, `÷`, `:`). So `-18 °C`, `HKD -5`, `x = -1`, `(1, -2)`, and `a * -2` hold negative numbers. Directly after a word, a number, a text, `%`, or `)`, it subtracts (`10-3`, `x-3`), and with a space after it, it is the operator (`x - 3`). `x -3` is a name and a negative number side by side, a phrase, which no expression reads (`check.phrase`): Bo never guesses which was meant. A date has no sign.
@@ -335,14 +335,14 @@ The first line that has any token MAY name the edition: `bo` followed by a whole
 
 ### 3.1 Concepts
 
-Edition 1 has 157 concepts: 18 keywords, which every pack spells, and 139 words of the vocabulary, 81 of them in Bo's core and the others in the vocabulary packs (3.9). A concept's id is its category, a dot, and its name. Categories decide where a word may stand, and packs name them in their reading rules:
+Edition 1 has 168 concepts: 22 keywords, which every pack spells (from the version that brought it, 3.7), and 146 words of the vocabulary, 85 of them in Bo's core and the others in the vocabulary packs (3.9). A concept's id is its category, a dot, and its name. Categories decide where a word may stand, and packs name them in their reading rules:
 
 | Category | Id prefix | Concepts | Examples |
 |---|---|---|---|
-| keyword | `kw.` | 18 | `kw.can`, `kw.requires` |
+| keyword | `kw.` | 22 | `kw.can`, `kw.requires` |
 | kind | `kind.` | 4 | `kind.thing`, `kind.asset` |
-| action | `act.` | 28 | `act.transfer`, `act.suspend` |
-| condition | `cond.` | 6 | `cond.in_person`, `cond.overdue` |
+| action | `act.` | 29 | `act.transfer`, `act.suspend` |
+| condition | `cond.` | 7 | `cond.in_person`, `cond.overdue`, `cond.approval` |
 | pricing | `price.` | 6 | `price.price`, `price.per` |
 | charge | `charge.` | 10 | `charge.tax`, `charge.rate` |
 | time | `time.` | 11 | `time.day`, `time.monthly`, `time.now` |
@@ -352,7 +352,7 @@ Edition 1 has 157 concepts: 18 keywords, which every pack spells, and 139 words 
 | document | `doc.` | 3 | `doc.invoice` |
 | type | `type.` | 5 | `type.date`, `type.list` |
 | value | `val.` | 5 | `val.yes`, `val.none` |
-| field | `field.` | 13 | `field.holder`, `field.due` |
+| field | `field.` | 15 | `field.holder`, `field.due` |
 | state | `state.` | 14 | `state.active`, `state.pledged` |
 | actor | `actor.` | 5 | `actor.ai_agent`, `actor.keeper`, `actor.executor` |
 | role | `role.` | 6 | `role.we`, `role.bank` |
@@ -421,9 +421,9 @@ A source is read with a *pack set*: the official packs, always, and any others g
 
 ### 3.7 Official packs and digests
 
-The official packs of edition 1 are `en`, `zh-Hant-HK`, and `zh-Hans-CN`, version 6 each, every one complete: every concept of the core but the retired ones, every message, and every sentence but the retired ones (the official vocabulary packs' names, which their files give, 3.9). The official vocabulary packs spell their own words in these languages (3.9), and a pack set holds those words in the language packs of their languages. A pack's *digest* is the hash of its canonical CBOR under a ledger's hash algorithm (SHA-256 or SM3); [`../tests/bo/golden/pack-digests.txt`](../tests/bo/golden/pack-digests.txt) lists those of the official packs, earlier versions included, and of the vocabulary packs. A released version of an official pack never changes: a change is a new version, and a compiler MUST carry every released version of each official pack, so that every source deployed with one rebuilds (section 16).
+The official packs of edition 1 are `en`, `zh-Hant-HK`, and `zh-Hans-CN`, version 7 each, every one complete: every concept of the core but the retired ones, every message, and every sentence but the retired ones (the official vocabulary packs' names, which their files give, 3.9). The official vocabulary packs spell their own words in these languages (3.9), and a pack set holds those words in the language packs of their languages. A pack's *digest* is the hash of its canonical CBOR under a ledger's hash algorithm (SHA-256 or SM3); [`../tests/bo/golden/pack-digests.txt`](../tests/bo/golden/pack-digests.txt) lists those of the official packs, earlier versions included, and of the vocabulary packs. A released version of an official pack never changes: a change is a new version, and a compiler MUST carry every released version of each official pack, so that every source deployed with one rebuilds (section 16).
 
-Version 1 of the three, from before vocabulary packs, is carried in [`../bo/packs/history/`](../bo/packs/history). Version 2 spells the core's kind word `thing` (`物件` in both Chinese packs), spells `we` `我方` first in both Chinese packs (`本公司` remains a second spelling, so `我方` is what tools write), drops the retired concepts, and adds the messages and sentences of vocabulary packs. Version 3 adds the core's unit of temperature (`unit.celsius`, 2.10) and the messages and sentences of field defaults, durations divided by durations (R32), and tests that expect fields' values; version 2 is carried beside version 1. Version 4 spells the core's words alone: the official vocabulary packs' words, commerce's two attaching rules, and the packs' names moved into the packs' files (3.9); it adds the messages of vocabulary pack files (`vocab.*`) and of `check.pack-requires`; version 3 is carried beside versions 1 and 2. Version 5 adds requests: the keywords `request`, `done`, `fails`, and `expires`, the words `executor`, `result`, and `reason`, rule R33, and their messages and sentences; version 4 is carried beside versions 1 to 3, and reads like version 5 but for requests. Version 6 adds a service's periods, bills, and payments: rules R34 and R35, R10 and R11 as built, and their messages and sentences; it reads with version 3 of the `commerce` and `services` packs (`collect`, `paid until`, `billed until`); version 5 is carried beside versions 1 to 4, and reads with version 2 of them. A keyword added after the first versions (Concept `since`: 5 for these four) is spelled by the official packs from that version on; the official packs of before it, and others' packs, may lack it, and are read and written in English for it, so that the packs embedded in earlier deploys still read. A pack set is built on the official packs of one *release* (3.6): today's (version 6, which reads with version 3 of `commerce` and `services` and version 2 of `finance`), version 5 (which reads with version 2 of all three), version 4 (the same, without requests), version 3 or 2 (which spell the vocabulary packs' words themselves and read with version 1 of those packs), or version 1, from before vocabulary packs. A source read with version 1 uses every vocabulary pack without declaring it (`use` did not exist), and its `record` is today's `thing`; a source read with version 2 reads as today's, but spells no temperature; a source read with version 3 reads as today's. Each compiles to the code it compiled to then.
+Version 1 of the three, from before vocabulary packs, is carried in [`../bo/packs/history/`](../bo/packs/history). Version 2 spells the core's kind word `thing` (`物件` in both Chinese packs), spells `we` `我方` first in both Chinese packs (`本公司` remains a second spelling, so `我方` is what tools write), drops the retired concepts, and adds the messages and sentences of vocabulary packs. Version 3 adds the core's unit of temperature (`unit.celsius`, 2.10) and the messages and sentences of field defaults, durations divided by durations (R32), and tests that expect fields' values; version 2 is carried beside version 1. Version 4 spells the core's words alone: the official vocabulary packs' words, commerce's two attaching rules, and the packs' names moved into the packs' files (3.9); it adds the messages of vocabulary pack files (`vocab.*`) and of `check.pack-requires`; version 3 is carried beside versions 1 and 2. Version 5 adds requests: the keywords `request`, `done`, `fails`, and `expires`, the words `executor`, `result`, and `reason`, rule R33, and their messages and sentences; version 4 is carried beside versions 1 to 3, and reads like version 5 but for requests. Version 6 adds a service's periods, bills, and payments: rules R34 and R35, R10 and R11 as built, and their messages and sentences; it reads with version 3 of the `commerce` and `services` packs (`collect`, `paid until`, `billed until`); version 5 is carried beside versions 1 to 4, and reads with version 2 of them. Version 7 adds approvals inside contracts: the word `approval` and its count (`2 approvals`, `2人批核`, `2人审批`), `須由` read as `須` + `由`, rule R36, the person type, and their messages and sentences (6.13); version 6 is carried beside versions 1 to 5, and reads like version 7 but spells no approval and reads `須由` as a name. A keyword added after the first versions (Concept `since`: 5 for these four) is spelled by the official packs from that version on; the official packs of before it, and others' packs, may lack it, and are read and written in English for it, so that the packs embedded in earlier deploys still read. A pack set is built on the official packs of one *release* (3.6): today's (version 7, which reads with version 3 of `commerce` and `services` and version 2 of `finance`), version 6 (the same, without approvals), version 5 (which reads with version 2 of all three), version 4 (the same, without requests), version 3 or 2 (which spell the vocabulary packs' words themselves and read with version 1 of those packs), or version 1, from before vocabulary packs. A source read with version 1 uses every vocabulary pack without declaring it (`use` did not exist), and its `record` is today's `thing`; a source read with version 2 reads as today's, but spells no temperature; a source read with version 3 reads as today's. Each compiles to the code it compiled to then.
 
 Anyone MAY write a pack for another language, dialect, or a company's own terms. Such a pack MUST spell every keyword of the first versions, SHOULD spell those added later, and SHOULD spell the vocabulary; it is read beside the official packs, and a deploy embeds it in full.
 
@@ -433,7 +433,7 @@ A language pack changes how a source reads and how text is written, never what r
 
 ### 3.9 Vocabulary packs
 
-A *vocabulary pack* says which concepts exist beyond Bo's core: their categories, the type a field's word gives the field (R1) and whether it is *added* (R20) or *taking* (R31), a unit's dimension and scale, how each language spells them, and the standard terms of its built-in actions (section 8). Unlike a language pack, it changes what runs, so a deploy pins each one it uses by version and digest, and embeds those that are not official in full (section 16). Edition 1 has three official vocabulary packs, compiled in from [`../bo/vocab/`](../bo/vocab): `finance` version 2, `commerce` and `services` version 3 (a service's periods and `collect`); each earlier version is carried in [`../bo/vocab/history/`](../bo/vocab/history), and reads with the language packs of its release (version 2 with versions 4 and 5 of the language packs), defining some of the current version's concepts, each as the current one does, with terms that begin the current terms:
+A *vocabulary pack* says which concepts exist beyond Bo's core: their categories, the type a field's word gives the field (R1) and whether it is *added* (R20) or *taking* (R31), a unit's dimension and scale, how each language spells them, and the standard terms of its built-in actions (section 8). Unlike a language pack, it changes what runs, so a deploy pins each one it uses by version and digest, and embeds those that are not official in full (section 16). Edition 1 has three official vocabulary packs, compiled in from [`../bo/vocab/`](../bo/vocab): `finance` version 2, `commerce` and `services` version 3 (a service's periods and `collect`); each earlier version is carried in [`../bo/vocab/history/`](../bo/vocab/history), and reads with the language packs of its release (version 2 with versions 4 and 5 of the language packs; the current versions with versions 6 and 7), defining some of the current version's concepts, each as the current one does, with terms that begin the current terms:
 
 | Pack | Words | Built-in actions |
 |---|---|---|
@@ -502,7 +502,8 @@ body        = INDENT { statement } DEDENT
 statement   = "if" condition [ inline ] NEWLINE [ body ] { otherwise }
             | "each" NAME "in" condition NEWLINE body
             | condition "requires" condition NEWLINE           (a guarded requirement)
-            | condition "can" action NEWLINE                   (AI agent can propose)
+            | [ condition ] "requires" approvals NEWLINE       (6.13)
+            | condition "can" action NEWLINE                   (AI agent can propose, approve)
             | simple NEWLINE
 otherwise   = "otherwise" "if" condition [ inline ] NEWLINE [ body ]
             | "otherwise" [ simple ] NEWLINE [ body ]
@@ -517,6 +518,10 @@ request     = "request" kind { "to" operand
                              | "with" target "=" condition { "," target "=" condition }
                              | WITHIN }                        (each part once; WITHIN required)
 WITHIN      = the word `within` with its duration ("within 1 day", "1日內")
+approvals   = { NUMBER APPROVAL | "by" operand | IN-PERSON | WITHIN }
+                                                               (each part once; NUMBER APPROVAL and WITHIN required)
+APPROVAL    = the word `approval` after its number ("2 approvals", "2人批核")
+IN-PERSON   = the word `in person`
 target      = NAME | WORD
 do          = [ party ] action { operand | "to" operand | "by" operand
                                  | "with" target "=" condition { "," target "=" condition } }
@@ -565,7 +570,9 @@ A line in a `can`, `when`, `if`, `otherwise`, or `each` block is a statement (`p
 |---|---|
 | `requires COND` | a requirement: the call is refused unless COND holds; `requires consent of X` asks for X's consent; `requires in person` asks the starter to prove presence (section 6) |
 | `GUARD requires COND` | a requirement that applies only when GUARD holds: `over 5_000_000 requires in person` |
-| `AI agent can propose` | AI agents may only propose this action (6.9); the only line of this kind in edition 1 (`check.permit`) |
+| `[GUARD] requires N approvals [by PEOPLE] [in person] within DURATION` | a requirement of approvals (6.13): the call is kept as a proposal until N people of the home approve it: `over 1_000_000 requires 2 approvals by directors in person within 7 days` (`超過 1_000_000 須由 directors 2人批核 親身確認 7日內`). Its parts after `requires` come in any order, each once (`parse.duplicate`); a `requires` line whose rest holds the word `approval` is this form, and the word without its number before it, or a part it does not take, is `parse.approvals` |
+| `AI agent can propose` | AI agents may only propose this action (6.9) |
+| `AI agent can approve` | AI agents' approvals count for the action's requirements of approvals that ask no presence (6.13); with `AI agent can propose`, the two lines of this kind in edition 1 (`check.permit`, which an action without a requirement of approvals also gets for this one) |
 | `if COND` … `otherwise` … | a choice; a `requires`, a `reject`, a `-> STATE`, or an action may follow the condition on its line (any statement may follow a plain `otherwise`); `otherwise if` chains; `otherwise` must follow an `if` block at the same indentation (`parse.otherwise`) |
 | `each NAME in LIST` | the block, once for each item of a bounded list (10.1) |
 | `reject TEXT` | refuses the call with the text as its reason |
@@ -626,6 +633,7 @@ Every expression has a type, and every value is kept exactly, as a whole number 
 | text | `text` | `"203.0.113.7"` | UTF-8 |
 | yes or no | `yes or no` (`是否`) | `yes`, `no` | false or true |
 | party | (a field that holds a party: 6.3) | roles, party fields, `none` | a 32-byte ledger id; `none` is no party |
+| person | `person` (`真人`) | (none: from creation and inputs) | a 32-byte actor id of the home (6.13) |
 | list | `list T [at most N]` | `(HKD 1, HKD 2)` | a list of at most N items of T (5.8) |
 | state | (the states of the contract) | state words and names | used as conditions (R7) |
 | unit price | (a field's value) | `per GB HKD 0.10` | money per unit, to six decimals |
@@ -679,6 +687,7 @@ Adding a calendar duration to a date (or a time) moves its local date at the con
 - A text compares only for equality (and membership: `in`). An undeclared name compared with a text is that text (R18).
 - Yes or no values are conditions; `not`, `and`, and `or` combine them.
 - A party is a role of the contract or a field that holds one; its value is a ledger id. Parties compare for equality only. `none` is no party: a party field may hold none (6.3), and `none` equals only a field that holds none.
+- A person (`person`, `真人`, the word `actor.person` as a type) is a person of the home, kept as its actor id (spec section 15: a call's caller, input key 6). A field or an input may hold one, or a list of them (`directors list person at most 5`; `directors 清單 真人 最多 5`). Persons come from creation and from an action's inputs: there are no person literals, and no person is `none`. Persons compare for equality, and `in` finds one in a list of them; a person is never a party, and never mixes with one (`check.operands`). They name who approves a call (6.13).
 
 ### 5.8 Lists
 
@@ -817,16 +826,16 @@ A counterparty that the action neither binds nor makes the holder, the pledgee, 
 
 ### 6.8 Presence
 
-`in person` asks the action's starter to be a person who proves presence with a passkey or a hardware key (R13): the signer of the call when the starter is the home, else the signer of the starter's consent, MUST be of kind 1 (a person) with a presence method (spec section 15, the signer). `requires in person` refuses otherwise (`bo:in-person ACTION`). While the starter's consent is missing, it holds: the call needs that consent anyway, and is checked again when it comes. As a condition (`if in person`), it reads the same way. A time rule never asks presence (`check.when-person`): a keeper calls it.
+`in person` asks the action's starter to be a person who proves presence with a passkey or a hardware key (R13): the signer of the call when the starter is the home, else the signer of the starter's consent, MUST be of kind 1 (a person) with a presence method (spec section 15, the signer). `requires in person` refuses otherwise (`bo:in-person ACTION`). While the starter's consent is missing, it holds: the call needs that consent anyway, and is checked again when it comes. As a condition (`if in person`), it reads the same way. A time rule never asks presence (`check.when-person`): a keeper calls it. A requirement of approvals asks presence of each approver instead, never of the starter (6.13).
 
 ### 6.9 AI agents and proposals
 
 An AI agent (a signer of kind 2) may start an action within its delegation, as the ledger rules allow (R14). An action whose block says `AI agent can propose` lets agents only propose it:
 
 - A call of the action whose starter's signer is an AI agent (the call's signer, for an action the home starts; else the signer of the starter's consent) is kept as a *proposal* in the instance's `pending` list (12.5), with the event `[propose, ACTION]`; the instance does not change otherwise. Before that, the call is checked for the action's entry states and depth, its arguments, and its starter's agreement; while the starter's consent is missing, the call is an ordinary one, which needs it. An instance keeps at most 16 proposals (`bo:pending`).
-- The function `approve` takes `{"function": NAME, "arguments": ARGS}`, finds the first proposal with that function and those arguments (byte for byte), and runs it as the action, every requirement checked then. The approval's starter signer (the caller's, for an action the home starts; else the signer of the starter's consent to the approval) MUST be a person who proves presence (`bo:approve ACTION`); while that consent is missing, the approval needs it. The proposal is removed, and the event `[approve, ACTION]` comes before the state changes. No proposal matching is `bo:proposal`.
+- The function `approve` takes `{"function": NAME, "arguments": ARGS}`, finds the first proposal with that function and those arguments (byte for byte), and runs it as the action, every requirement checked then. The approval's starter signer (the caller's, for an action the home starts; else the signer of the starter's consent to the approval) MUST be a person who proves presence (`bo:approve ACTION`); while that consent is missing, the approval needs it. The proposal is removed, and the event `[approve, ACTION]` comes before the state changes. No proposal matching is `bo:proposal`. In a contract with requirements of approvals, `approve` also approves the proposals kept for them (6.13).
 
-Proposals do not lapse and cannot be withdrawn in edition 1.
+An AI agent's proposal does not lapse, and no proposal can be withdrawn in edition 1; a proposal kept for approvals lapses (6.13).
 
 ### 6.10 Final states
 
@@ -909,9 +918,77 @@ test "unpaid, suspended, then paid and resumed"
 
 `subscribe` asks for the bill and the panel's provisioning; the invoice done asks for the payment (by 2027-02-09: 30 days after the due date, the latest overdue rule); unpaid three days after the due date, the keeper suspends it (and the panel); the payment moves the paid date to 2027-02-10 and resumes it. Usage (traffic beyond the plan) and charges on a service's bills come later; so does a period's proration on `upgrade` and `downgrade`, which an executor applies.
 
+### 6.13 Approvals
+
+An action may need the approvals of several people of the home before it runs: a line of its block `requires N approvals [by PEOPLE] [in person] within DURATION`, with or without a guard (R36). The ledger holds no new kind of statement for it: each approval is a call of `approve` that the home makes, and the contract sees its caller (input key 6: the actor and its signer) and the call's registration time (input key 7), and keeps the count in the instance's state.
+
+```
+contract Payments
+parties we
+
+thing Payment
+  amount HKD
+  directors list person at most 5
+
+can disburse by we
+  over 1_000_000 requires 2 approvals by directors in person within 7 days
+  active -> disbursed
+```
+
+Its field of directors and its action, in Traditional and in Simplified Chinese (the names the contract gives stay as written; `AI agent can approve` is `AI 代理 可批准` in both):
+
+```
+  directors 清單 真人 最多 5                       directors 列表 真人 最多 5
+可 disburse 由 我方                               可 disburse 由 我方
+  超過 1_000_000 須由 directors 2人批核 親身確認 7日內    超过 1_000_000 须由 directors 2人审批 本人确认 7天内
+```
+
+A payment over HKD 1,000,000 waits for two of its directors, each in person, within 7 days of being proposed; a smaller one runs at once. `pay`, `paid`, and `payee` would not do as the contract's own names here: they are words of the finance pack.
+
+**The line.** Its parts:
+
+- **N**, the number before the word `approval` (`2 approvals`, `2人批核`, `2人审批`): a whole number from 1 to 16. An action may have several such lines, an approval matrix (`over 1_000_000 requires 2 approvals by directors ...` and `over 10_000_000 requires 1 approval by chair ...`), together asking at most 32; every line whose guard holds must be met.
+- **`by PEOPLE`**, who counts: a person, a list of people, or a list written out of them (5.7), as the line reads when it is counted (`check.approvals-by` otherwise). Without `by`, any person counts whom the home's delegations let call `approve` on the contract: the role is kept on the ledger, by delegations.
+- **`in person`**: each approval's call carries proof of presence (6.8).
+- **`within DURATION`**, required: a duration written out, from 1 day to 366 days, or 1 to 12 months, as a request's deadline (6.11).
+- **A guard** before `requires`, a condition as any requirement's (`over 1_000_000`, R6), which may not ask presence.
+
+The line stands at the top of a `can` block, never under `if`, `otherwise`, or `each`; it counts among the action's requirements, numbered with them (12.10). A count, a `within`, a place, or a guard otherwise is `check.approvals`. A time rule takes no approvals, since a keeper calls it: a requirement of approvals in its block, or an action with one that it does, is `check.when-approvals`; in a rule for answers it is `check.answer-line`.
+
+**Who counts.** A line *applies* to a call when its guard holds, on the instance's state and the call's arguments. An approval qualifies for a line when its caller:
+
+- is a person (kind 1), or an AI agent (kind 2) where the action says `AI agent can approve` and the line asks no presence: an agent never proves presence. Devices, keepers, executors, and the organization never count;
+- proves presence, if the line says `in person`;
+- is one the line's `by` names, or anyone, without `by`.
+
+Different people are different actor ids. "2 approvals" is two different people.
+
+**A call of the action.** After the starter's agreement (12.8, step 5), the lines' guards are read:
+
+- If no line applies, the call is any call (an AI agent's proposal, 6.9, included).
+- If some line applies and the starter is not the home, the call is refused, `bo:approvals ACTION`. Approvals are calls the home makes, so they come from the home's people: another party's people approve on their own ledger, through its delegation rules on its consent, which every verifier of the contract's evidence sees in the consent's bundle.
+- Else the caller is the *proposer*. If it alone meets every line that applies (each asks 1, and it qualifies), the call runs as any call, with no proposal and no event of one; but an AI agent's call of an action AI agents only propose (6.9) never meets them alone, since a person in person must approve it. Otherwise the call is kept as a *proposal* in the instance's `pending` list (12.5), its time the call's registration time, and it is accepted: the instance changes nothing else, and a role the action binds stays unbound until it runs (as for an agent's proposal, 6.9). The proposer's approval is recorded with it when it qualifies for some line that applies: the proposer counts.
+
+A call that keeps a new proposal first drops the proposals that have lapsed, each with the event `["lapse", FUNCTION]`, so that `pending` does not fill with dead proposals: at most 16 remain (`bo:pending` otherwise). A dropped proposal's time limit is computed as at its approval (below), from its own arguments and the instance as it is; a guard that refuses there (`bo:overflow`, say) refuses the call.
+
+**`approve`.** It takes `{"function": NAME, "arguments": ARGS}` and finds the first kept proposal with that function and those arguments (`bo:proposal`), as in 6.9; then it runs the proposed action from step 2 of 12.8 on, with the proposal's arguments, and reads its lines' guards again, on the instance's state then:
+
+1. If no line applies, the approval is one of 6.9: refused `bo:approve ACTION` when its starter's signer is known and is not a person who proves presence; otherwise it completes the proposal.
+2. If some line applies and the starter is not the home, `bo:approvals ACTION`.
+3. The time limit: the proposal's time plus the shortest `within` of the lines that apply (months by the calendar, at the contract's offset, 5.6). A call registered after it is refused, `bo:lapsed ACTION`.
+4. A caller that is neither a person nor an AI agent the action lets approve, `bo:approver ACTION`.
+5. A caller whose actor id has approved the proposal already, `bo:approved ACTION`.
+6. A caller that qualifies for no line that applies: `bo:in-person ACTION` if it would qualify with presence, else `bo:approver ACTION`.
+7. A proposal holding 32 approvals takes no more, `bo:pending`.
+8. Each line that applies counts the approvals recorded and this one that qualify for it, as the line reads now (its `by` included). For an AI agent's proposal of an action AI agents only propose (its proposer of kind 2), an approval that would meet every line while none of those approvals is by a person in person is refused, `bo:approve ACTION`: its approver may give it again in person. If every line is met, the approval completes the proposal: the proposal is removed, the events `["approval", ...]` and `["approve", ACTION]` come before the action's own, and the action runs from step 7 of 12.8, every other requirement checked then; it may still wait for consents, as any call, and then nothing is recorded. Otherwise the approval is recorded and the call is accepted with the event `["approval", ...]` alone.
+
+Each approval is its own call, checked when it is registered: a person revoked later on the ledger does not undo an approval already recorded, and the history shows both.
+
+**With `AI agent can propose`.** One proposal: an AI agent's call of such an action is kept as one proposal, approved as above; it still needs a person in person among the approvals that complete it (step 8).
+
 ## 7. Recognition rules
 
-Bo infers by the thirty-five rules of edition 1 and by nothing else. Each rule has an id and a name; each official pack gives its text as the sentence `rule-ID`, which the contract text quotes (section 14). The checked model marks what each rule inferred (`{R3}` in `bo check --stage model`), and the contract text marks each clause so inferred (`[R3]` in English, `〔R3〕` in Chinese). A rule never changes meaning once its edition is released.
+Bo infers by the thirty-six rules of edition 1 and by nothing else. Each rule has an id and a name; each official pack gives its text as the sentence `rule-ID`, which the contract text quotes (section 14). The checked model marks what each rule inferred (`{R3}` in `bo check --stage model`), and the contract text marks each clause so inferred (`[R3]` in English, `〔R3〕` in Chinese). A rule never changes meaning once its edition is released.
 
 | Rule | Name | What Bo infers |
 |---|---|---|
@@ -947,10 +1024,10 @@ Bo infers by the thirty-five rules of edition 1 and by nothing else. Each rule h
 | R30 | issue-parts | `issue PARTS to RECIPIENTS` makes each part an instance of its own, of the same contract, created by the call; its amount is the part and its holder its recipient; the instance that issued them ends; a part may be split again, at most eight levels down (section 11). |
 | R31 | role-taking | An action that makes its counterparty (after `to`) a party field its pack marks as *taking* (the core's holder; finance's pledgee and payee) (`holder = bank`, as the terms of `transfer`, `pledge`, and `allocate` do) needs the counterparty's consent at every call, even when its role was bound when the instance was created or by another action; where the action binds the role (R3), each call names it (R21), or it is a party field the action's own lines set (R8), those rules already ask it. An action that names no counterparty adds none: `enforce` makes its own starter, the pledgee, the holder, and `pay` makes the pledgee or the holder the payee. |
 | R32 | whole-times | A duration divided by a duration of the same kind is the number of whole times the second fits in the first; the rest is dropped, toward zero (`(now - due) / 1 day` is 2 two days and twenty hours after the due date). The contract text says so where it divides: "(the time of the call − the due date) ÷ 1 day, in whole times (the rest dropped)". |
-
 | R33 | expired-fails | An answer that a request expired (no answer by its deadline) runs the contract's rule for that kind's failures, unless the contract has a rule for its expiry (6.11). |
 | R34 | service-bill | On such a service, subscribing and renewing make the bill for one period: `billed until` moves one period on, and an executor is asked to invoice the customer for the period's price (`invoice`, within 7 days); once the invoice is done, to collect it (`collect`, by the latest overdue rule's time after the due date, else 30 days after it, at least a day and at most 366 days after the call). An invoice or a collection that fails or expires closes the bill: `billed until` goes back to `paid until` (6.12). |
 | R35 | service-paid | A collection done means the bill's total was paid in full: `paid until` moves one period on, and a suspended service no longer overdue becomes active again, and an executor is asked to resume it, within one day (6.12). |
+| R36 | approvals | `requires N approvals [by PEOPLE] [in person] within DURATION` keeps a call of the action, when the line's guard holds and the home starts it, as a proposal until N different people of the home approve it, each a call of `approve`: people the line names (or anyone the home's delegations let approve), each with presence if the line says `in person`, AI agents only where the action says `AI agent can approve` and the line asks no presence, the one who proposes it counting when it qualifies, all within DURATION of the proposal (6.13). |
 
 The rule texts in the packs are plain-language summaries of the rows above; the rows, sections 6 to 11, and the conformance suite define the rules.
 
@@ -1504,7 +1581,7 @@ Compiled code names a concept by its id without the category (`act.pledge` is `p
 |---|---|---|
 | `issue` for an asset, `create` for any other kind | 1 (creates an instance) | always |
 | each action a `can` declares, by its name (12.1) | 2 (acts on one) | always, but for actions only time rules do |
-| `approve` | 2 | when some action lets AI agents only propose it (6.9) |
+| `approve` | 2 | when some action lets AI agents only propose it (6.9), or has a requirement of approvals (6.13) |
 | `when.X`, `when.X.2`, ... | 2 | for each time rule with code (9.2) |
 | `result` | 2 | when the contract makes requests: every answer calls it (6.11) |
 
@@ -1525,6 +1602,7 @@ Arguments and the instance's state hold values as deterministic CBOR:
 | text | a text string |
 | yes or no | `false` or `true` |
 | party | a byte string of 32 bytes: a ledger id |
+| person | a byte string of 32 bytes: an actor id |
 | list | an array of at most its bound of items, each encoded as its type |
 | a party field holding none | `null` (in the state only) |
 | a date field holding none (a service's `paid until`, `billed until`) | `null` (in the state only) |
@@ -1547,7 +1625,7 @@ With neither, the arguments are null or an empty map. For the agreement of 12.11
 
 **An action** takes a map of exactly its inputs, by name, plus, for an action that binds a role (R3), the role's ledger under the role's name: required while the role is unbound, and on every call of an action that binds it again each time (R23); otherwise optional, and then it MUST name the ledger the role is bound to. The map has no other key: a map with another number of keys, or arguments that are neither a map nor null, are `bo:arguments`; an input missing or not of its type, or the role's ledger missing or another, is `bo:argument NAME`. An action with no inputs and no role to bind takes null or an empty map. A counterparty each call names is the input `counterparty` (R21). For the library's split: `{"parts": [60000000, 40000000], "recipients": [h'...', h'...']}`.
 
-**`approve`** takes `{"function": NAME, "arguments": ARGS}`, exactly (`bo:arguments`): NAME a text (`bo:argument function`), ARGS present (`bo:argument arguments`), compared byte for byte with a kept proposal's.
+**`approve`** takes `{"function": NAME, "arguments": ARGS}`, exactly (`bo:arguments`): NAME a text (`bo:argument function`), ARGS present (`bo:argument arguments`), compared byte for byte with a kept proposal's. It is the same for a proposal kept for approvals (6.13): the approver is the call's caller.
 
 **A time rule's function** takes null or an empty map (`bo:arguments`).
 
@@ -1563,11 +1641,17 @@ An accepted call writes the instance's state (output key 1) as a map, in canonic
  ? "since": TIME,                       when it reads how long a state is held (9.7)
  "state": STATE,                        the current state's name
  "fields": {FIELD: VALUE, ...},         every instance field, by name (12.3)
- ? "pending": [[FUNCTION, ARGS], ...],  when an action lets AI agents only propose (6.9)
+ ? "pending": [PROPOSAL, ...],          when there are proposals (6.9, 6.13)
  ? "previous": STATE / null}            when the contract uses previous state (6.4)
 ```
 
-Which keys are present depends on the contract only, never on the call. Constants are not kept. `pending` holds the kept proposals in the order they came, each its function's name and its arguments as given; `previous` is the state before the current one, or null. A state MUST be at most 65,536 bytes encoded: a call that would write more is refused, `bo:output`.
+Which keys are present depends on the contract only, never on the call. Constants are not kept. `pending` holds the kept proposals in the order they came. In a contract without requirements of approvals, each is `[FUNCTION, ARGS]`, its function's name and its arguments as given. In a contract with them (6.13), each is
+
+```
+[FUNCTION, ARGS, AT, BY, [[ACTOR, KIND, PRESENCE], ...]]
+```
+
+its function's name, its arguments, the time it was proposed (its call's registration time), the proposer as `[ACTOR, KIND, PRESENCE]` (the caller's actor id, input key 6, its signer's kind, and whether it proved presence, `true` or `false`), and the approvals recorded, each as `[ACTOR, KIND, PRESENCE]`, at most 32, in the order they came: an AI agent's proposal is so too, with no approvals. The shape depends on the contract only; `previous` is the state before the current one, or null. A state MUST be at most 65,536 bytes encoded: a call that would write more is refused, `bo:output`.
 
 Compiled code reads the state the ledger gives it back (input key 5, spec section 15) and refuses a call whose state lacks a key or a value this format requires, or names a state the contract does not have, `bo:input`. The instance's parties (input key 5, key 5) tell it which roles are bound, and to which ledgers.
 
@@ -1581,7 +1665,7 @@ Compiled code reads the state the ledger gives it back (input key 5, spec sectio
 - **2**, the status: the state's name, always.
 - **3**, the parties: each role bound so far, and each field that holds a party (except one that holds none), by name, to its ledger id; absent when there are none. The ledger replaces the instance's parties with it, so the current holder, pledgee, and payee may propose calls and consent.
 - **4**, the events, absent when there are none, in this order:
-  1. `["propose", ACTION]` or `["approve", ACTION]`, for a proposal kept or approved (6.9);
+  1. for proposals (6.9, 6.13), in this order: `["lapse", FUNCTION]` for each lapsed proposal a call drops, in the order kept; `["propose", ACTION]` for a proposal kept; `["approval", {"by": ACTOR, "action": ACTION, "in_person": BOOL}]` for an approval recorded, the proposer's or the caller's (its actor id, the action, and whether it proved presence); `["approve", ACTION]` for a proposal approved, after its last approval's;
   2. `["when", {"late": LATE, "rule": RULE, "time": TIME}]`, for a time rule (9.5); or `["answer", {"kind": KIND, "status": STATUS, ? "refused": REASON, "request": ID}]`, for an answer (6.11), STATUS `"done"`, `"failed"`, or `"expired"`, and REASON the reason its rule would have refused the call with, when that rule changed nothing;
   3. `[STATE, null]` for each state change, in the order they happen, a change to the same state included; a creation's first state is one;
   4. `[DOCUMENT, BILL]`, for a bill made (10.5).
@@ -1589,7 +1673,7 @@ Compiled code reads the state the ledger gives it back (input key 5, spec sectio
 - **6**, the parts the call issued (section 11).
 - **7**, the requests the call made, in the order their statements ran, each `{1: KIND, 2: PARAMS, 3: DEADLINE, 4: "result"}` (6.11); absent when there are none, and always for a call that waits for consents. Compiled code drafts each where the output goes when its statement runs, writes the accept after the drafts, and copies them into key 7.
 
-A call of an action that changes no state, makes no bill, and keeps or approves no proposal writes no events. An accept that does not fit the output region of 196,608 bytes is refused, `bo:output`. One call reports at most 64 events (`build.too-many-events`, counting an action's or a rule's state changes, a proposal's, an approval's, or a rule's event, and the event of a bill it makes).
+A call of an action that changes no state, makes no bill, and keeps, approves, or drops no proposal writes no events. An accept that does not fit the output region of 196,608 bytes is refused, `bo:output`. One call reports at most 64 events (`build.too-many-events`, counting an action's or a rule's state changes, a proposal's, an approval's, or a rule's event, and the event of a bill it makes). Dropping lapsed proposals reports at most 16 events more, and an approval one more.
 
 ### 12.7 Consents and needs
 
@@ -1612,19 +1696,19 @@ A call stops at its first refusal; a refusal anywhere wins over needs found befo
 3. the bill, if the contract has one, is made (10.4);
 4. the accept.
 
-**An action** (its own function; an action that AI agents may only propose runs the same steps):
+**An action** (its own function; an action that AI agents may only propose, or that has requirements of approvals, runs the same steps):
 
 1. the instance's state is read (`bo:input`);
 2. a built-in action: its entry states (`bo:state ACTION`);
 3. an action that issues parts: the depth (`bo:depth ACTION`);
 4. the arguments (`bo:arguments`, `bo:argument NAME`);
-5. the starter's agreement: its consent, or the home's call; for a built-in action without a starter, the home's (8.1). A role not yet bound refuses, `bo:party ROLE`; a party field holding none, `bo:empty FIELD`;
+5. the starter's agreement: its consent, or the home's call; for a built-in action without a starter, the home's (8.1). A role not yet bound refuses, `bo:party ROLE`; a party field holding none, `bo:empty FIELD`. **5a**, an action with requirements of approvals (6.13): the lines' guards, in order (anything they refuse); if one applies, a starter that is not the home refuses, `bo:approvals ACTION`; then, for a call, the proposer alone meeting every line that applies goes on to step 7, and any other call drops the lapsed proposals (their guards read in turn), becomes a proposal, and is accepted now (`bo:pending` if 16 remain); for an approval, the checks of 6.13 in order (`bo:lapsed ACTION`, `bo:approver ACTION`, `bo:approved ACTION`, `bo:in-person ACTION`, `bo:pending`), then the count: an approval that completes the proposal goes on to step 7, any other is recorded and accepted now. If no line applies, step 6 follows;
 6. an action AI agents may only propose: a call whose starter's signer is an AI agent becomes a proposal and is accepted now (`bo:pending` if 16 are kept); an approval requires the starter's signer to be a person who proves presence (`bo:approve ACTION`), when that signer is known;
 7. the consents the action records, in order: the role it binds (R3), its counterparty named by the call (R21), or the counterparty it makes the holder, the pledgee, or the payee (R31), then the parties of the party fields its own lines set (R8);
 8. its block, in order (6.5, 12.10): requirements (`bo:requires ACTION N`, `bo:in-person ACTION`), consents asked (`requires consent of`), choices, `each`, `reject TEXT`, fields set, state changes (`bo:state ACTION` from another state, or for `previous state` with none), parts (`bo:parts ACTION`), and anything an expression refuses (`bo:party`, `bo:empty`, `bo:overflow`, `bo:division-by-zero`, `bo:date`);
 9. needs, if any (12.7); else the accept (`bo:output`).
 
-**`approve`:** the state is read; its arguments (12.4); the first kept proposal with that function and those arguments (`bo:proposal`); then the proposed action from step 2 on, with the proposal's arguments, as an approval; the proposal is removed.
+**`approve`:** the state is read; its arguments (12.4); the first kept proposal with that function and those arguments (`bo:proposal`); then the proposed action from step 2 on, with the proposal's arguments, as an approval; the proposal is removed once the approval completes it (at once for one of 6.9; for one kept for approvals, by the approval that meets its lines, 6.13).
 
 **A time rule's function:** the state is read; then 9.3 and 9.4; then needs or the accept.
 
@@ -1647,12 +1731,16 @@ A compiled contract refuses a call by aborting (spec section 14.4) with a reason
 | `bo:argument NAME` | the argument NAME is missing, or not of its type |
 | `bo:state ACTION` | ACTION cannot start, or change state, from the instance's state |
 | `bo:requires ACTION N` | requirement N of ACTION does not hold |
-| `bo:in-person ACTION` | ACTION needs its starter to be a person who proves presence |
+| `bo:in-person ACTION` | ACTION needs its starter to be a person who proves presence; or, approving a proposal of ACTION (6.13), the caller would count only with presence |
 | `bo:party ROLE` | ROLE is not bound to a ledger yet |
 | `bo:empty FIELD` | FIELD holds no party, where a party is needed |
-| `bo:pending` | the instance already keeps 16 proposals |
+| `bo:pending` | the instance already keeps 16 proposals (once the lapsed ones are dropped); or the proposal approved holds 32 approvals |
 | `bo:proposal` | no kept proposal has that function and those arguments |
 | `bo:approve ACTION` | ACTION was proposed by an AI agent, and only a person who proves presence approves it |
+| `bo:approvals ACTION` | a requirement of approvals of ACTION applies, and the call's starter is not the home: only the home's people approve (6.13) |
+| `bo:approved ACTION` | the caller has approved this proposal of ACTION already |
+| `bo:approver ACTION` | the caller counts for no requirement of approvals of ACTION that applies: it is not one the line names, or not a person (nor an AI agent the action lets approve) |
+| `bo:lapsed ACTION` | the time for approving this proposal of ACTION has passed: its time plus the shortest `within` of the lines that apply |
 | `bo:when RULE` | the rule's time has not come, or its conditions do not hold, or the instance is not in its held state |
 | `bo:fired RULE` | the rule has applied for this time already |
 | `bo:depth ACTION` | ACTION would issue parts from a part at depth 8 |
@@ -1666,7 +1754,7 @@ ACTION, ROLE, FIELD, RULE, and KIND are names in compiled code (12.1); N is a de
 
 ### 12.10 Requirement numbers
 
-N in `bo:requires ACTION N` counts the `requires` lines of ACTION from 1: every `requires`, with or without a guard, `requires consent of` and `requires in person` included, in the order written, depth first (an `if` block before its `otherwise`, and into `each` blocks), the contract's own lines first and then a built-in action's terms. The block of an `each` is numbered once, whatever the number of items it runs for. A time rule numbers its own block from 1, under its function's name; an action it does keeps its own numbers and name. The contract text numbers requirements the same way (section 14), so `bo:requires sign 2` is the clause "Requirement 2" of *sign*.
+N in `bo:requires ACTION N` counts the `requires` lines of ACTION from 1: every `requires`, with or without a guard, `requires consent of`, `requires in person`, and requirements of approvals (6.13) included, in the order written, depth first (an `if` block before its `otherwise`, and into `each` blocks), the contract's own lines first and then a built-in action's terms. The block of an `each` is numbered once, whatever the number of items it runs for. A time rule numbers its own block from 1, under its function's name; an action it does keeps its own numbers and name. The contract text numbers requirements the same way (section 14), so `bo:requires sign 2` is the clause "Requirement 2" of *sign*.
 
 ### 12.11 Example
 
@@ -1732,7 +1820,7 @@ test "nobody signs alone"
 A step is
 
 ```
-PARTY ACTION [HOLDER] [to PARTY] [with NAME = VALUE, ...] [at DATE] [in person] [by AI agent] [-> EXPECTATION]
+PARTY ACTION [HOLDER] [to PARTY] [with NAME = VALUE, ...] [at DATE] [in person] [by AI agent | by NAME] [-> EXPECTATION]
 ```
 
 with its expectation on its line or alone on the next line (`-> ...`). A test has an optional name, a text or a name, unique in the source (`check.duplicate`).
@@ -1741,9 +1829,9 @@ with its expectation on its line or alone on the next line (`-> ...`). A test ha
 - **Other steps** do an action the contract declares with `can` (`check.test-action`), `approve` a proposal (13.5), or are a keeper's (13.5). `with` gives the action's inputs, each once (`check.unknown-input`, `check.duplicate`, `check.test-missing`).
 - **Parties** are the contract's parties or names that only tests use, each a ledger of its own (`bank1`); anything else is `check.test-party`.
 - **`to PARTY`** only for an action with a counterparty (`check.test-to`): the ledger a role the action binds is bound to, or the counterparty each call names, which a step MUST then give (`check.test-needs-to`). For a counterparty bound at creation, the step names that role itself (`check.test-counterparty`).
-- **Values** are written out: a number, money, a quantity, a date, a duration, a rate, a text, yes or no, or a list of them (`check.test-value`); a party, or a list of parties, for an input or a field that holds them (`recipients = (gears, castings)`), by role or by a test's ledger name. They are typed against the inputs (or the fields, at creation) as the contract types them.
+- **Values** are written out: a number, money, a quantity, a date, a duration, a rate, a text, yes or no, or a list of them (`check.test-value`); a party, or a list of parties, for an input or a field that holds them (`recipients = (gears, castings)`), by role or by a test's ledger name; a person, or a list of people, for an input or a field that holds them (`directors = (alice, bob, carol)`), by a name the contract does not declare: a person only tests name (13.2). They are typed against the inputs (or the fields, at creation) as the contract types them.
 - **`at DATE`**: the step happens at the start of that day at the contract's offset. The date is on or after 1970-01-01 (`check.test-time`) and never before a step before it (`check.test-time-back`).
-- **`in person`**: the party is a person who proves presence; **`by AI agent`**: its signer is an AI agent; not both, and `by` names nothing else (`check.test-signer`). Other words on a step are `check.test-step`.
+- **`in person`**: the party is a person who proves presence; **`by AI agent`**: its signer is an AI agent; not both. **`by NAME`**, only on a step of the home (the party of the test's first step): the call's caller is the person NAME, a name the contract does not declare, whom only tests name (13.2), signing as a person, with presence if the step says `in person` (`we approve by alice in person`, 6.13). `by` names nothing else (`check.test-signer`). Other words on a step are `check.test-step`.
 - **HOLDER**, a party after the action, names the part the step acts on by its holder (`issuer pay forge`), in a contract whose instances have a `holder` (`check.test-part`).
 - **An answer**: `executor KIND done`, `executor KIND fails`, `keeper KIND expires`, or a party's answer by hand (`we KIND done in person`), with at most `with result = TEXT, reason = TEXT` and `at DATE` (`check.test-answer`, `check.test-value`). KIND is a kind the contract requests (`check.test-answer`). It answers the instance's oldest open request of that kind, as the ledger takes answers: a call of `result` with the request in input key 9 and no consents, signed by the executor or the keeper as the home's devices (kind 3), or by the party. The ledger refuses an answer when no request of the kind is open, an expiry before the deadline, and an accept that would leave the instance more than 64 open requests; a final instance takes answers and stays final. A step that makes requests reports them; their ids derive from a call id of the SHA-256 of `kanhe-bo-test call ` followed by the instance's id in hex, a space, and its head before the call.
 
@@ -1756,7 +1844,7 @@ Expectations (`check.test-expect`; one per step, right after it: `check.test-exp
 | `-> refused` | the call is refused: by the contract, or by the ledger because the instance is final or was never created, or, for an answer, because no request of its kind is open, the deadline has not come, or more than 64 would be open |
 | `-> refused "REASON"` | the contract refuses the call with exactly REASON: a `bo:` reason or a `reject` text, never a worded message, so a test means the same in every language |
 | `-> consent of PARTY`, `-> consent of (A, B)` | the call waits for the consents of exactly those ledgers |
-| `-> pending approval` | the call is kept as a proposal; only for a step `by AI agent` of an action AI agents may only propose (`check.test-proposal`) |
+| `-> pending approval` | the call is kept as a proposal, or, approving one, is recorded while the proposal still waits for more approvals; only for a step `by AI agent` of an action AI agents may only propose, a step of an action with requirements of approvals, or an `approve` step in a contract with them (`check.test-proposal`) |
 
 Only `refused` takes a reason (`check.test-reason`).
 
@@ -1764,13 +1852,13 @@ Only `refused` takes a reason (`check.test-reason`).
 
 ### 13.2 Ledgers and time
 
-Every party a test names is a ledger of its own, whose id is the SHA-256 of the UTF-8 text `kanhe-bo-test ledger ` followed by the party's key: a role word's concept id (`role.supplier`), or a name as written (`bank1`, or a party the contract names). So ids are the same in every language. Roles bound at creation are bound to their own ledgers; a role an action binds, to the ledger the step's `to` names. Once bound, a role in a step stands for its ledger. The contract's id is the SHA-256 of `kanhe-bo-test contract`, the home's acting actor the SHA-256 of `kanhe-bo-test actor`, the instance the SHA-256 of `kanhe-bo-test instance`, and a part's id the child id of spec section 15 under SHA-256.
+Every party a test names is a ledger of its own, whose id is the SHA-256 of the UTF-8 text `kanhe-bo-test ledger ` followed by the party's key: a role word's concept id (`role.supplier`), or a name as written (`bank1`, or a party the contract names). So ids are the same in every language. Roles bound at creation are bound to their own ledgers; a role an action binds, to the ledger the step's `to` names. Once bound, a role in a step stands for its ledger. A person a test names (`by alice`, or a value of a person field or input) is an actor of the home whose id is the SHA-256 of `kanhe-bo-test person ` followed by the name as written (`kanhe-bo-test person alice`). The contract's id is the SHA-256 of `kanhe-bo-test contract`, the home's acting actor (the caller of every other step of the home) the SHA-256 of `kanhe-bo-test actor`, the instance the SHA-256 of `kanhe-bo-test instance`, and a part's id the child id of spec section 15 under SHA-256.
 
 A test starts at 2026-01-01, at the start of that day at the contract's offset, or on its first `at` date if that is earlier. A step without `at` happens at the time of the step before it.
 
 ### 13.3 Signers and consents
 
-The step's party signs as a person who proves presence with a passkey (`in person`: kind 1, presence 1), as an AI agent (`by AI agent`: kind 2, the model `bo-test-agent`), or as the organization (kind 0). When the step's party is the home, that is the call's signer; otherwise the home's registrar makes the call (signed by the organization), and the step's party signs its consent.
+The step's party signs as a person who proves presence with a passkey (`in person`: kind 1, presence 1), as an AI agent (`by AI agent`: kind 2, the model `bo-test-agent`), or as the organization (kind 0). A step `by NAME` is called by the person NAME, who signs as a person (kind 1, with presence 1 if the step says `in person`). When the step's party is the home, that is the call's signer; otherwise the home's registrar makes the call (signed by the organization), and the step's party signs its consent.
 
 A step's call runs first without consents, as the home does to learn whom to ask. Then every ledger the call needs consents (the step's party with its own signer, any other as its organization), the consents cited in ascending order of ledger, and the call runs again, until it is accepted, refused, or waits only for ledgers that do not consent. Those are the ledgers the expectation names, and the action's starter (a role or a party field, read from the instance) when the step's party is not the starter. The home agrees only by making the call: a step by another party of an action the home starts waits for the home ("the call waits for us to make it"), and `-> consent of we` expects that.
 
@@ -1781,7 +1869,7 @@ Before any split, every step acts on the test's instance. Once a call has made p
 ### 13.5 Keepers and approvals
 
 - **`keeper ACTION [at DATE] [-> ...]`** calls, as the home's keeper (a device, kind 3), the time rule whose function is `when.` and ACTION's name (`keeper suspend` calls `when.suspend`; `check.test-rule` if there is none), with no arguments. Nothing else may be on the step (`check.test-keeper`). Nothing fires by itself: each call of a rule is a step, so a test shows a rule refused before its time and accepted after. A second rule doing the same action (`when.suspend.2`) cannot be named in edition 1, nor a rule that does no action and leads to a state of the vocabulary.
-- **`PARTY approve [in person]`** approves the first proposal the instance keeps: its arguments are that proposal's function and arguments. The approval is started by the proposed action's starter.
+- **`PARTY approve [in person] [by NAME]`** approves the first proposal the instance keeps: its arguments are that proposal's function and arguments. The approval is started by the proposed action's starter. For a proposal kept for approvals (6.13), `by NAME` names the person who approves.
 
 ```
 test "a receipt pledged, released, and redeemed"
@@ -1791,6 +1879,30 @@ test "a receipt pledged, released, and redeemed"
   bank1 approve in person -> active
   depositor redeem with portion = 600 kg -> redeemed
 ```
+
+The payments of 6.13 are tested so: two directors approve a large payment, a small one needs nobody, and approvals lapse.
+
+```
+test "two directors approve a large payment"
+  we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+  we disburse by dave in person -> pending approval
+  we approve by alice in person -> pending approval
+  we approve by alice in person -> refused "bo:approved disburse"
+  we approve by erin in person -> refused "bo:approver disburse"
+  we approve by bob -> refused "bo:in-person disburse"
+  we approve by bob in person -> disbursed
+
+test "a small payment needs nobody"
+  we create with amount = HKD 500, directors = (alice, bob, carol)
+  we disburse -> disbursed
+
+test "approvals lapse"
+  we create with amount = HKD 2_000_000, directors = (alice, bob, carol) at 2027-01-04
+  we disburse by alice in person -> pending approval
+  we approve by bob in person at 2027-01-12 -> refused "bo:lapsed disburse"
+```
+
+Dave, who is no director, proposes the payment, and his approval does not count; Alice's counts once; Erin is no director; Bob counts only in person, and his approval completes it. In the last test, Alice's proposal counts her approval, but Bob's comes 8 days after it, past the 7 days the line allows.
 
 ### 13.6 Results
 
@@ -1807,12 +1919,14 @@ What the parties read and confirm before they sign is the *contract text*, which
 3. **Each instance**: the kind; each field (given at creation, given at creation or else its default, the party it starts with, none at first, or a constant's value); how an instance is created (by which function, needing no consent); the UTC offset, for a contract with dates, calendar durations, or time rules;
 4. **Charges**, if any: the bill, and each charge's lines (section 10);
 5. **States**: the first, all of them, the final ones (6.10), and that each change of state is an event;
-6. **Actions**: each action with its function, whether it is built-in (with the standard terms, naming the vocabulary pack that gives them, if one does) or the home's own word, its starter, counterparty, inputs, the consents it needs, its block in order (requirements numbered as compiled code numbers them, 12.10; choices, `each`, refusals, fields set, state changes, parts, and their depth and privacy), and what AI agents may do; and `approve`, if there are proposals;
+6. **Actions**: each action with its function, whether it is built-in (with the standard terms, naming the vocabulary pack that gives them, if one does) or the home's own word, its starter, counterparty, inputs, the consents it needs, its block in order (requirements numbered as compiled code numbers them, 12.10; choices, `each`, refusals, fields set, state changes, parts, and their depth and privacy), and what AI agents may do (propose only, and approve where the action lets them, 6.13); each requirement of approvals is a requirement, numbered with the others, stating how many of whom must approve, in person or not, within how long, that the one who proposes counts, and that the call is kept as a proposal until then (R36); and `approve`, if there are proposals, with what it does for a proposal kept for approvals;
 7. **Time rules**, if any: what is due, and for each rule its time, its function (R24), its consents, the actions it does, and its block; duties (R9) and executors (R10);
 8. **Answers to requests**, for a contract that makes requests: the reply function and what it does with every answer, then each rule for answers with its block. Each request, where it is made, states its kind, its party, its values, its deadline, and what happens if it fails or expires (the rule for that answer, R33, or nothing more than the event);
 9. **Rules Bo applied**: the text of each recognition rule the clauses above use.
 
 Clauses are numbered by section, item, and sub-item (`4.2.3`). A clause that states what a rule inferred ends with a mark naming its rules, in the order of their ids: `[R6, R13]` in English, `〔R6、R13〕` in Chinese. Every text value is shown in the pack's quotation marks (`"中国内地"`, `「中国内地」`, `“中国内地”`), a name read as text by R18 included.
+
+A requirement of approvals reads, for the payments of 6.13: "Requirement 1: if the amount is over HKD 1,000,000, 2 of directors (people of us) must approve it, each in person, within 7 days of its proposal, the person who proposes it counting if they are one of them; until then the call is kept as a proposal. [R6, R36]".
 
 ```
 4.2 sign
@@ -1894,6 +2008,8 @@ Codegen 5 makes compiled code do what this document says in two places where cod
 
 Codegen 6 does the same wherever else compiled code moves a time by a fixed duration: a time outside the years 1 to 9999 that a rule's event names (`N before due`, `overdue`, `overdue N`, a state held N; 9.1), that a condition on time compares with now (9.7), or that a request's deadline is computed from (6.11) refuses the call, `bo:date` (5.5), as a calendar duration's already did. Code that codegens 4 and 5 built compares or keeps such a time as it is, and their deploys rebuild with them. Codegen 6 also makes a rule for answers never refuse the answer (6.11): a refusal in the rule, or in the accept it leaves, drops what the rule did, and the answer is accepted with the reason in its event, `"refused"`; code that codegens 4 and 5 built refuses such an answer, and its request stays open.
 
+Requirements of approvals (6.13), the person type, and `AI agent can approve` are constructs no earlier compiler read: codegen 6 compiles them, and every contract without them builds to the same bytes as before; deploys made before them rebuild unchanged.
+
 ### 16.4 Rebuilding
 
 A verifier SHOULD rebuild a Bo deploy (spec section 15): decode the bundle, open its packs under the home's hash, build the source with the codegen version the compiler string names, and compare the module, the interface, and the name (if the deploy has one) with the deploy's. It reports one of:
@@ -1949,6 +2065,7 @@ A rebuild compares bytes only: it does not refuse code for its fuel or output bo
 | parties: roles and fields that hold a party | 64 (spec section 15) | `build.too-many-parties` |
 | instance fields | 256 | `build.too-many-fields` |
 | an action's inputs | 256 | `build.too-many-inputs` |
+| a requirement of approvals | 1 to 16 approvals, within 1 day to 366 days or 1 to 12 months; an action's together at most 32 | `check.approvals` |
 | events of one call | 64 (spec section 15) | `build.too-many-events` |
 | charges | 64 | `build.too-many-charges` |
 | the module's globals | 1,024 (spec section 14.1) | `build.too-large` |
@@ -1969,6 +2086,7 @@ A rebuild compares bytes only: it does not refuse code for its fuel or output bo
 | a call's output | 196,608 bytes (192 KiB): the output region of compiled code, within the profile's 1 MiB | `bo:output` |
 | ledgers a call needs | 16 | `bo:consents` |
 | proposals kept | 16 | `bo:pending` |
+| approvals one proposal records | 32 | `bo:pending` |
 | parts one call issues | 16 | (the bound of `recipients`) |
 | a part's depth | 8 | `bo:depth ACTION` |
 | a reason | 1,024 bytes (spec section 14.4); a `reject` text is at most 1,000 | |
@@ -1979,9 +2097,9 @@ A call has 10,000,000 fuel (spec section 14.3); code that runs out traps, and th
 
 For each function of the interface, time rules and `approve` included, Kanhe's compiler computes a static worst-case fuel bound from the code it writes: each instruction's fuel (spec section 14.3), the more costly arm of each choice, and each loop's body times the most times it can run.
 
-- **Loops** run as often as the language allows: a list's bound (nested `each` loops multiply), a bill's lines and the charges on each, a split's parts and the consents of its recipients, at most 16 consents a call cites, 16 ledgers it asks, and 16 proposals kept.
+- **Loops** run as often as the language allows: a list's bound (nested `each` loops multiply), a bill's lines and the charges on each, a split's parts and the consents of its recipients, at most 16 consents a call cites, 16 ledgers it asks, and 16 proposals kept; for requirements of approvals, the 32 approvals a proposal records, each counted against each line that applies, and the items of each line's `by` list, within its bound. A contract whose `by` lists are large enough to take a call past its fuel does not build (`build.fuel`).
 - **Sizes.** A comparison of texts reads at most the shorter text, which is at most a text written in the contract, an item of a list the loop walks (the items of one list add up to the list), or else 64 KiB, the most an argument or a state holds; copying a value into the output costs by its size the same way; a search of a map reads at most the entries the map can have (an argument map has the action's inputs; a state's map the contract's fields).
-- **Reading the input.** The code reads and indexes the whole input before anything else. Kanhe's reader takes at most 3,000 fuel, plus 240 per item of the input and 160 per map key (whose names are at most 64 bytes); the bound counts the items an input can hold: the arguments of the function's shape (each input of its type, lists within their bounds), the state the contract writes (its fields, at most 16 proposals, a bill's lines and charges), and the rest of the input as the ledger encodes it (spec section 15: the instance's parties, at most 16 consents).
+- **Reading the input.** The code reads and indexes the whole input before anything else. Kanhe's reader takes at most 3,000 fuel, plus 240 per item of the input and 160 per map key (whose names are at most 64 bytes); the bound counts the items an input can hold: the arguments of the function's shape (each input of its type, lists within their bounds), the state the contract writes (its fields, at most 16 proposals with their approvals, a bill's lines and charges), and the rest of the input as the ledger encodes it (spec section 15: the instance's parties, at most 16 consents).
 
 The bound holds for every call whose arguments are of the function's shape: a map of its inputs, each of its type, lists within their bounds (or null when it has none). Any other arguments are refused (`bo:arguments`, `bo:argument NAME`); a caller who sends far larger ones, up to the 64 KiB a call's arguments may take, may make the code run out of fuel reading them first, which refuses the call too. Nothing another party does can make a call run out of fuel: a state is at most 64 KiB, and the bound counts the largest state the contract can write.
 
@@ -2036,12 +2154,12 @@ A tool that writes **the contract text** conforms as section 14.3 says; one that
 
 - its source, in each language it is written in (English, Traditional Chinese, Simplified Chinese, and mixed, for some), and its name (`contract`);
 - its interface (`interface`: each function, `create` or `call`);
-- the `bo-source` bundle a deploy records (`bundle`, and its SHA-256), with the official packs' SHA-256 digests (version 5) and those of the vocabulary packs its `use` lines name (key 6, version 2), and the compiler string it was built with (`compiler`);
+- the `bo-source` bundle a deploy records (`bundle`, and its SHA-256), with the official packs' SHA-256 digests (version 7, the current release) and those of the vocabulary packs its `use` lines name (key 6, at their current versions), and the compiler string it was built with (`compiler`);
 - `earlier`, when there are any: the bundles its deploys recorded with earlier releases of the official packs or with earlier codegen versions that `kanhe-bo` carries (16.3), oldest first, each with the compiler string it was built with and the SHA-256 of the code it deployed: each such deploy rebuilds, with the codegen version its compiler string names, to that code (16.4), which with the suite's codegen is `code_sha256`;
 - the code `kanhe-bo` built from it (`code`, `code_sha256`), and each function's fuel and output bounds (`bounds`): all informative;
 - runs: each call, as its parts (function, arguments, home, contract, instance view, caller and signer, time, consents) and as the contract input the ledger encodes from them (spec section 15), with the outcome, the output or the reason, and the fuel the code used. The runs include every step of the contract's own test blocks.
 
-It also holds sources that must not build (`errors`): each with its name, its text (or, for one that is not UTF-8, its bytes in hex), and the error codes a compiler reports, in source order, with their lines. The codes are normative; the lines are Kanhe's.
+The contracts include the payments of 6.13 in each language, with their calls: a proposal kept, approvals recorded and completing it, each refusal of approvals, and a lapsed proposal refused and dropped. It also holds sources that must not build (`errors`): each with its name, its text (or, for one that is not UTF-8, its bytes in hex), and the error codes a compiler reports, in source order, with their lines. The codes are normative; the lines are Kanhe's.
 
 `tools/testvectors/bo_vectors.py` writes the suite from the runs Kanhe's tests record, and checks each before writing it: it encodes the input again from the call's parts with its own deterministic CBOR encoder, runs the code on the independent reference interpreter `tools/testvectors/wasm_ref.py` (which MUST give the same outcome, output, fuel, and reason as the ledger's interpreter), decodes the output as `contract-output`, and decodes each bundle, requiring the source as written, the digest of each official pack, which it computes from the packs' text (`bo/packs/`, and `bo/packs/history/` for the earlier bundles) with its own reader of their diagnostic notation, and key 6 equal to the source's `use` lines with the digests of the vocabulary packs' canonical CBOR, which it computes from their files (`bo/vocab/`, and `bo/vocab/history/` for the earlier bundles), each equal to the C++ reader's. Sources read with users' vocabulary packs are tested by Kanhe's tests (`tests/bo/vocab_test.cpp`, the goldens with `.vocab` files, `examples/events`), not by this suite, which names official packs only. Kanhe's tests rebuild every source to the pinned code, bundle, interface, and bounds, rebuild every earlier bundle to the code it deployed, replay every run, and compile every source that must not build to the same errors.
 
@@ -2131,6 +2249,7 @@ The words of edition 1, by category, with the vocabulary pack each belongs to (`
 
 | Concept | Pack | English | 繁體中文（香港） | 简体中文 |
 |---|---|---|---|---|
+| `cond.approval` | core | `approval` (plural `approvals`) | `人批核` | `人审批` |
 | `cond.before_due` | core | `… before due` | `到期前 …` | `到期前 …` |
 | `cond.consent_of` | core | `consent of …` | `經 … 同意` | `经 … 同意` |
 | `cond.in_person` | core | `in person` | `親身確認` | `本人确认` |
@@ -2232,6 +2351,8 @@ The words of edition 1, by category, with the vocabulary pack each belongs to (`
 | `type.number` | core | `number` | `數值` | `数值` |
 | `type.text` | core | `text` | `文字` | `文本` |
 | `type.yes_no` | core | `yes or no` | `是否` | `是否` |
+
+The actor word `person` (`actor.person`: `真人`, `真人`) is also a type: a person of the home (5.7).
 
 **Values** (`val.*`)
 
@@ -2419,6 +2540,7 @@ Every problem the compiler reports has a code, a severity, and parameters, which
 | `parse.can` | error | {found} cannot follow the action here: write by PARTY, to PARTY, or with INPUTS, each at most once |
 | `parse.when` | error | when needs an event before its action: when overdue 3 days suspend, when 7 days before due notify customer |
 | `parse.request` | error | a request is written request KIND [to PARTY] [with NAME = VALUE, ...] within DURATION, its kind a name, an action's word, or a document's (invoice); found {found} |
+| `parse.approvals` | error | a requirement of approvals is written requires N approvals [by PEOPLE] [in person] within DURATION, the number before the word approvals; found {found} |
 | `parse.each` | error | each is written each NAME in LIST, with the lines to repeat in a block under it |
 | `parse.bare-condition` | error | a condition alone does nothing: write requires or if before it; to set a field, write FIELD = VALUE |
 | `parse.unclosed` | error | this ( is not closed on its line |
@@ -2470,7 +2592,10 @@ Every problem the compiler reports has a code, a severity, and parameters, which
 | `check.unreachable-state` | error | no state change leads to {state} from the state an instance starts in, so no instance can ever reach it |
 | `check.needs-by` | error | who starts {action}? An action of your own needs by PARTY |
 | `check.recursion` | error | {action} leads back to itself through the actions it does; a contract never recurses |
-| `check.permit` | error | {text}: the only line of this kind in edition 1 is AI agent can propose |
+| `check.permit` | error | {text}: the lines of this kind in edition 1 are AI agent can propose and, in an action with a requirement of approvals, AI agent can approve |
+| `check.approvals` | error | {text}: a requirement of approvals asks for 1 to 16 approvals (an action's requirements of approvals together at most 32), within a duration written out, from 1 day to 366 days (12 months); it stands at the top of an action's block, and its condition asks no presence |
+| `check.approvals-by` | error | {text}: approvals are by people of the home: by names a person or a list of people (a field or an input of the type person) |
+| `check.when-approvals` | error | {text}: a when rule takes no approvals: a keeper (a device) calls it, and nobody approves its call |
 | `check.subject` | error | {text}: inside an action only the contract acts; a party's duty belongs in a when rule (when due issuer pays) |
 | `check.threshold-amount` | error | {text} compares the amount of {action}, which has no one amount: give it one input of money (with amount HKD) or the instance an amount field, or compare a field instead (requires amount > HKD 100) |
 | `check.standard-by` | error | {action} is a built-in action, started by {party} under its standard terms; to have another party start it, copy it under a name of your own (bo stdlib show {action}) |
@@ -2510,7 +2635,7 @@ Every problem the compiler reports has a code, a severity, and parameters, which
 | `check.test-party` | error | {text} is not a party: a step names one of the contract's parties, or a ledger that only tests name (bank1) |
 | `check.test-to` | error | {action} has no counterparty, so a step that does it names none: drop to |
 | `check.test-counterparty` | error | the counterparty of {action} is {party}, bound to a ledger when the instance is created: write to {party} |
-| `check.test-signer` | error | {text}: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both, and by names nobody else |
+| `check.test-signer` | error | {text}: a step is by AI agent (an agent signs it) or in person (a person proves presence), not both; a step of the home may name the person who calls (by alice), a name only tests use; by names nobody else |
 | `check.test-step` | error | {text}: besides to and with, a step takes at DATE, in person, and by AI agent, each once |
 | `check.test-time` | error | {text}: at takes a date after 1970-01-01 (at 2027-01-06) |
 | `check.test-time-back` | error | {text} is earlier than a step before it: time never goes back in a test |
@@ -2521,7 +2646,7 @@ Every problem the compiler reports has a code, a severity, and parameters, which
 | `check.test-fields` | error | {text}: values of fields are expected only of a call that is accepted (-> delivered, fee = HKD 4_000, or -> fee = HKD 0), not of one refused, waiting for consents, or kept as a proposal |
 | `check.test-expect-step` | error | an expectation (->) follows the step it is about, once |
 | `check.test-reason` | error | {text}: only refused takes a reason |
-| `check.test-proposal` | error | -> pending approval: only a call by AI agent to an action an AI agent may only propose (AI agent can propose) is kept as a proposal, and {action} is not such an action |
+| `check.test-proposal` | error | -> pending approval: only a call by AI agent to an action an AI agent may only propose (AI agent can propose), or a call of an action with a requirement of approvals (or an approval of one), is kept as a proposal, and {action} is not such an action |
 | `check.test-needs-to` | error | {action} takes its counterparty from each call: write to PARTY (supplier transfer to factor1) |
 | `check.test-rule` | error | no when rule does {action}: a keeper step names the action a when rule does (keeper suspend) |
 | `check.test-part` | error | {text}: a step names the instance it acts on by the party that holds it (issuer pay smith1): one party, in a contract whose instances have a holder |
@@ -2576,6 +2701,10 @@ Every problem the compiler reports has a code, a severity, and parameters, which
 | `run.pending` | `bo:pending` | the instance already keeps 16 proposals awaiting approval |
 | `run.proposal` | `bo:proposal` | no proposal awaiting approval has that function and those arguments |
 | `run.approve` | `bo:approve ACTION` | {action} was proposed by an AI agent: a person who proves presence must approve it |
+| `run.approvals` | `bo:approvals ACTION` | {action} needs approvals by the people of the home ledger: another party cannot start it while a requirement of approvals applies |
+| `run.approved` | `bo:approved ACTION` | this person has approved the proposal of {action} already |
+| `run.approver` | `bo:approver ACTION` | the caller is not one whose approval counts for a requirement of approvals of {action} that applies |
+| `run.lapsed` | `bo:lapsed ACTION` | the time for approving the proposal of {action} has passed |
 | `run.when` | `bo:when RULE` | {rule} does not apply yet: its time has not come, or its conditions do not hold |
 | `run.fired` | `bo:fired RULE` | {rule} has already applied for this time |
 | `run.depth` | `bo:depth ACTION` | {action} creates parts, but this instance is a part at depth 8, the deepest the ledger allows |

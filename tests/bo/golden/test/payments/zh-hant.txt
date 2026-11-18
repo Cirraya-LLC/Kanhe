@@ -1,0 +1,35 @@
+測試 「two directors approve a large payment」：通過
+  第 1 步（第 13 行）通過：we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 14 行）通過：we disburse by dave in person -> pending approval
+    結果：調用保留為 disburse 的提議，正等待真人批准；實例維持不變。
+  第 3 步（第 15 行）通過：we approve by alice in person -> pending approval
+    結果：已記錄 disburse 的一項批核；提議仍待更多批核。
+  第 4 步（第 16 行）通過：we approve by alice in person -> refused "bo:approved disburse"
+    結果：調用被拒絕，因為此人已批核 disburse 的提議（bo:approved disburse）。
+    合約條文 4.1.2：要求 1：如金額超過港元 1,000,000，須由 directors 其中 2 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 5 步（第 17 行）通過：we approve by erin in person -> refused "bo:approver disburse"
+    結果：調用被拒絕，因為調用者並非 disburse 適用批核要求所計算的批核人（bo:approver disburse）。
+    合約條文 4.1.2：要求 1：如金額超過港元 1,000,000，須由 directors 其中 2 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 6 步（第 18 行）通過：we approve by bob -> refused "bo:in-person disburse"
+    結果：調用被拒絕，因為 disburse 須由本人以通行密鑰或硬件密鑰證明親身在場（bo:in-person disburse）。
+    合約條文 4.1.2：要求 1：如金額超過港元 1,000,000，須由 directors 其中 2 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 7 步（第 19 行）通過：we approve by bob in person -> disbursed
+    結果：調用獲接納，實例現為 disbursed；此為最終狀態，實例不再接受調用。
+
+測試 「a small payment needs nobody」：通過
+  第 1 步（第 22 行）通過：we create with amount = HKD 500, directors = (alice, bob, carol)
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 23 行）通過：we disburse -> disbursed
+    結果：調用獲接納，實例現為 disbursed；此為最終狀態，實例不再接受調用。
+
+測試 「approvals lapse」：通過
+  第 1 步（第 26 行）通過：we create with amount = HKD 2_000_000, directors = (alice, bob, carol) at 2027-01-04
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 27 行）通過：we disburse by alice in person -> pending approval
+    結果：調用保留為 disburse 的提議，正等待真人批准；實例維持不變。
+  第 3 步（第 28 行）通過：we approve by bob in person at 2027-01-12 -> refused "bo:lapsed disburse"
+    結果：調用被拒絕，因為批核 disburse 提議的時限已過（bo:lapsed disburse）。
+    合約條文 4.1.2：要求 1：如金額超過港元 1,000,000，須由 directors 其中 2 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+
+共 3 個測試：3 個通過，0 個失敗。

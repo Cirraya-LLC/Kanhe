@@ -159,7 +159,25 @@ struct Requires {
     std::optional<Expr> guard;
 };
 
-/// `AI agent can propose`: who may start the action, and how.
+/// `requires N approvals [by PEOPLE] [in person] within DURATION`, the parts
+/// after `requires` in any order, each once; or `GUARD requires ...` (`over
+/// 1_000_000 requires 2 approvals by directors in person within 7 days`;
+/// `須由 directors 2人批核 親身確認 7日內`): the call waits for N approvals by
+/// people of the home (R36). Its parts are as written: the number before
+/// the word `approval`, the people after `by`, the word `in person`, and the
+/// word `within` applied to its duration.
+struct Approvals {
+    static constexpr std::string_view tag = "approvals";
+    Span span;
+    std::optional<Expr> guard;
+    std::optional<Expr> count;
+    std::optional<Expr> by;
+    std::optional<Expr> in_person;
+    std::optional<Expr> within;
+};
+
+/// `AI agent can propose`, `AI agent can approve`: who may start the action,
+/// and how.
 struct Permit {
     static constexpr std::string_view tag = "permit";
     Span span;
@@ -214,7 +232,9 @@ struct Each {
 };
 
 struct Statement {
-    std::variant<Requires, Permit, If, Each, Reject, Set, Transition, Do, Expect, Request> node;
+    std::variant<Requires, Permit, If, Each, Reject, Set, Transition, Do, Expect, Request,
+                 Approvals>
+        node;
 };
 
 // ---------------------------------------------------------------------------

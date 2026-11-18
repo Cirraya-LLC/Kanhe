@@ -165,6 +165,8 @@ TEST_CASE("each example, in each language or mixed, gives the same tree", "[bo][
         {"parse-statements", {"en", "zh-hant", "zh-hans"}},
         {"parse-test", {"en", "zh-hant", "zh-hans"}},
         {"parse-requests", {"en", "zh-hant", "zh-hans"}},
+        {"parse-approvals", {"en", "zh-hant", "zh-hans"}},
+        {"example-approvals", {"en", "zh-hant", "zh-hans", "mixed"}},
     };
     for (const auto& [group, languages] : groups) {
         const std::string first = tree(read_text(golden_dir / (group + "-en") / "source.bo"));
@@ -360,6 +362,46 @@ TEST_CASE("blocks: if, otherwise, each, and the lines that open none", "[bo][par
     CHECK(dump(recovered.file) == "edition 1\ncan act.transfer\n");
 }
 
+TEST_CASE("a requirement of approvals: its parts in any order, each once", "[bo][parser]") {
+    // The same tree in every language, whatever the order of its parts.
+    const std::string line =
+        "  approvals count=2 by=directors in_person "
+        "within=(cond.within (duration time.day 7)) guard=(cond.over 1000000)\n";
+    for (const std::string_view text :
+         {"  over 1_000_000 requires 2 approvals by directors in person within 7 days\n",
+          "  over 1_000_000 requires within 7 days in person by directors 2 approvals\n",
+          "  超過 1_000_000 須由 directors 2人批核 親身確認 7日內\n",
+          "  超过 1_000_000 须由 directors 2人审批 本人确认 7天内\n",
+          "  over 1_000_000 須由 directors 2 approvals in person 7天内\n"}) {
+        INFO(text);
+        CHECK(body(text) == line);
+    }
+    // Without a guard, without people, without presence; a list of people.
+    CHECK(body("  requires 1 approval within 1 month\n") ==
+          "  approvals count=1 within=(cond.within (duration time.month 1))\n");
+    CHECK(body("  須 1人批核 1個月內\n") ==
+          "  approvals count=1 within=(cond.within (duration time.month 1))\n");
+    CHECK(body("  requires 3 approvals by (chair, treasurer) within 30 days\n") ==
+          "  approvals count=3 by=(list chair treasurer) "
+          "within=(cond.within (duration time.day 30))\n");
+    // Its parts as written: the checker requires within and the count's range.
+    CHECK(body("  requires 0 approvals by x\n") == "  approvals count=0 by=x\n");
+    // AI agents may approve: a permit line, beside propose.
+    CHECK(body("  AI agent can approve\n") == "  permit actor.ai_agent act.approve\n");
+    CHECK(body("  AI 代理 可批准\n") == "  permit actor.ai_agent act.approve\n");
+    // Any other requires line stays as it was.
+    CHECK(body("  requires in person\n") == "  requires cond.in_person\n");
+    // The word without its number, or a part that is no within.
+    CHECK(body_codes("  requires approvals within 7 days\n") == "parse.approvals");
+    CHECK(body_codes("  requires 2 approvals 7 days\n") == "parse.approvals");
+    CHECK(body_codes("  requires 2 approvals within 7 days within 8 days\n") == "parse.duplicate");
+    CHECK(body_codes("  requires 2 approvals 3 approvals within 7 days\n") == "parse.duplicate");
+    CHECK(body_codes("  requires 2 approvals by a by b within 7 days\n") == "parse.duplicate");
+    CHECK(body_codes("  requires 2 approvals in person in person within 7 days\n") ==
+          "parse.duplicate");
+    CHECK(body_codes("  requires 2 approvals within 7 days and more\n") == "parse.trailing");
+}
+
 TEST_CASE("tests: steps and expectations", "[bo][parser]") {
     CHECK(tree("test\n  supplier pledge to bank1 at 2027-01-06 in person\n  -> pledged\n"
                "  supplier pledge to bank2 by AI agent -> refused \"already pledged\"\n") ==
@@ -447,7 +489,7 @@ TEST_CASE("the parser's messages are in every official pack", "[bo][parser]") {
             }
         }
     }
-    CHECK(parser_codes == 31);
+    CHECK(parser_codes == 32);
     const Parsed parsed = parse_text("can x\n  requires a < b < c\n");
     REQUIRE(parsed.diagnostics.size() == 1);
     const Diagnostic& d = parsed.diagnostics[0];

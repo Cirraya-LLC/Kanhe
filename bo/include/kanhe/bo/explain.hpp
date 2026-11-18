@@ -48,8 +48,9 @@ struct ExplainedClause {
     std::string number;
     /// What it states: party, kind, field, creation, first-state, states,
     /// final-state, events, action, standard, by, to, inputs, consent,
-    /// requirement, if, otherwise, reject, set, transition, each, do,
-    /// agents, executor, due, when, charge, charge-line.
+    /// requirement, approvals (a requirement of approvals, R36), if,
+    /// otherwise, reject, set, transition, each, do, agents, executor, due,
+    /// when, charge, charge-line.
     std::string_view kind;
     /// The clause, in the pack's language, without its rule marks.
     std::string text;
@@ -105,13 +106,22 @@ struct ExplainedValue {
     std::string value;
 };
 
-/// What an instance holds, in the pack's language: its state, and each of
-/// its fields the state carries.
+/// A proposal an instance keeps, waiting for approval: its action, and in
+/// words when and by whom it was proposed and who approved it so far.
+struct ExplainedProposal {
+    /// The action, in the pack's language (a name as written).
+    std::string action;
+    std::string text;
+};
+
+/// What an instance holds, in the pack's language: its state, each of its
+/// fields the state carries, and the proposals it keeps.
 struct ExplainedState {
     /// The state's word (or name); empty if the state names none of the
     /// model's.
     std::string state;
     std::vector<ExplainedValue> fields;
+    std::vector<ExplainedProposal> proposals;
 };
 
 /// Names a party's ledger (its 32-byte id) for people.
@@ -121,7 +131,10 @@ using LedgerLabel = std::function<std::string(ByteView ledger)>;
 /// "fields": {...}}`: money in its smallest unit, rates in millionths, dates
 /// in milliseconds at the contract's UTC offset, parties as ledger ids), read
 /// by the model's types and written in the pack's language. A value that is
-/// not of its field's type is shown in CBOR diagnostic notation.
+/// not of its field's type is shown in CBOR diagnostic notation. Each
+/// proposal kept (`"pending"`) is written too: in a contract with
+/// requirements of approvals (R36), when and by whom it was proposed and
+/// each approval given, people as their actor ids in hex.
 [[nodiscard]] ExplainedState explain_state(const model::Model& model, const cbor::Value& state,
                                            const Pack* language, const LedgerLabel& ledger);
 

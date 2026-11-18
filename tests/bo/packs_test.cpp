@@ -146,8 +146,9 @@ TEST_CASE("the official packs read, and their digests match the goldens", "[bo][
     // kind word thing, and spells the retired kind.record; version 2 lacks
     // the words added since (a temperature).
     for (const auto& [which, version] :
-         {std::pair{Officials::before_billing, 5U}, std::pair{Officials::before_requests, 4U},
-          std::pair{Officials::before_pack_files, 3U}, std::pair{Officials::before_temperature, 2U},
+         {std::pair{Officials::before_approvals, 6U}, std::pair{Officials::before_billing, 5U},
+          std::pair{Officials::before_requests, 4U}, std::pair{Officials::before_pack_files, 3U},
+          std::pair{Officials::before_temperature, 2U},
           std::pair{Officials::before_vocabulary, 1U}}) {
         REQUIRE(official_pack_texts(which).size() == 3);
         REQUIRE(official_packs(which).size() == 3);
@@ -185,7 +186,7 @@ TEST_CASE("the official packs read, and their digests match the goldens", "[bo][
                                  digest_hex(*r.pack, crypto::HashAlg::sm3));
         }
     }
-    CHECK(official_releases().size() == 6);
+    CHECK(official_releases().size() == 7);
     CHECK(official_releases().front() == Officials::current);
     // The official vocabulary packs (vocab.hpp), current and carried.
     const crypto::openssl::Provider provider;
@@ -221,7 +222,7 @@ static std::size_t vocabulary_words() {
 TEST_CASE("the official packs spell every keyword, word, message, and sentence", "[bo][packs]") {
     for (const Pack& pack : official_packs()) {
         INFO(pack.id);
-        CHECK(pack.version == 6);
+        CHECK(pack.version == 7);
         // Every concept but the retired ones, which only the earlier
         // official packs spell: the core's from the pack's file, the
         // official vocabulary packs' from theirs (vocab.hpp).
@@ -290,6 +291,15 @@ TEST_CASE("the official packs read together, every spelling with one meaning", "
     CHECK(concept_of("GB") == "unit.GB");
     CHECK(concept_of("港元") == "cur.HKD");
     CHECK(concept_of("逐个") == "kw.each");
+    // Approvals (packs version 7): the word that counts them, its plural,
+    // and the person a type.
+    CHECK(concept_of("approval") == "cond.approval");
+    CHECK(concept_of("approvals") == "cond.approval");
+    CHECK(set.lookup("approvals")->form == "plural");
+    CHECK(concept_of("人批核") == "cond.approval");
+    CHECK(concept_of("人审批") == "cond.approval");
+    CHECK(concept_of("真人") == "actor.person");
+    CHECK(set.lookup("須由") == nullptr);
     // 每个 would be both "each" and 每 + 个 ("per item"): it is neither.
     CHECK(set.lookup("每个") == nullptr);
     CHECK(set.lookup("萬")->multiplier == 10000);
@@ -334,7 +344,7 @@ TEST_CASE("a pack that misses a keyword is refused", "[bo][packs]") {
     // counted are the core's (the vocabulary packs spell their own).
     const PackRead partial = read(TestPack{});
     REQUIRE(partial.pack);
-    CHECK(reports(partial.diagnostics, "pack.partial", {{"missing", "84"}, {"total", "84"}}));
+    CHECK(reports(partial.diagnostics, "pack.partial", {{"missing", "85"}, {"total", "85"}}));
 }
 
 TEST_CASE("one spelling with two meanings is refused, within a pack and across packs",

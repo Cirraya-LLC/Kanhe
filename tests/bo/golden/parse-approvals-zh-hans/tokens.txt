@@ -1,0 +1,113 @@
+1:1 word kw.contract | 合约
+1:4 name Payments | Payments
+1:12 newline
+2:1 word kw.parties | 参与方
+2:5 word role.we | 我方
+2:7 newline
+4:1 word kind.thing | 物件
+4:4 name Payment | Payment
+4:11 newline
+5:1 indent
+5:3 word field.amount | 金额
+5:6 word cur.HKD | 港元
+5:8 newline
+6:3 name directors | directors
+6:13 word type.list | 列表
+6:16 word actor.person | 真人
+6:19 word expr.at_most piece=head | 最多
+6:22 number 5 | 5
+6:23 newline
+7:3 name chair | chair
+7:9 word actor.person | 真人
+7:11 newline
+9:1 dedent
+9:1 word kw.can | 可
+9:3 name disburse | disburse
+9:12 word kw.by | 由
+9:14 word role.we | 我方
+9:17 word kw.with | 附带
+9:20 name treasurer | treasurer
+9:30 word actor.person | 真人
+9:32 newline
+10:1 indent
+10:3 word cond.over piece=head | 超过
+10:6 number 1000000 | 1_000_000
+10:16 word kw.requires | 须
+10:17 word kw.by | 由
+10:19 name directors | directors
+10:29 number 2 | 2
+10:30 word cond.approval | 人审批
+10:34 word cond.in_person | 本人确认
+10:39 duration time.day 7 | 7天
+10:41 word cond.within piece=tail | 内
+10:42 newline
+11:3 word kw.requires | 须
+11:5 number 1 | 1
+11:6 word cond.approval | 人审批
+11:10 duration time.month 1 | 1个月
+11:13 word cond.within piece=tail | 内
+11:14 newline
+12:3 word kw.requires | 须
+12:5 duration time.day 30 | 30天
+12:8 word cond.within piece=tail | 内
+12:10 number 3 | 3
+12:11 word cond.approval | 人审批
+12:15 word kw.by | 由
+12:17 symbol ( | (
+12:18 name chair | chair
+12:23 symbol , | ,
+12:25 name treasurer | treasurer
+12:34 symbol ) | )
+12:35 newline
+13:3 word actor.ai_agent | AI 代理
+13:9 word kw.can | 可
+13:10 word act.approve | 批准
+13:12 newline
+14:3 word state.active | 正常
+14:6 symbol -> | ->
+14:9 name disbursed | disbursed
+14:18 newline
+16:1 dedent
+16:1 word kw.test | 测试
+16:3 newline
+17:1 indent
+17:3 word role.we | 我方
+17:6 word act.create | 创建
+17:9 word kw.with | 附带
+17:12 word field.amount | 金额
+17:15 symbol = | =
+17:17 money cur.HKD 2000000 | 港元 2_000_000
+17:29 symbol , | ,
+17:31 name directors | directors
+17:41 symbol = | =
+17:43 symbol ( | (
+17:44 name alice | alice
+17:49 symbol , | ,
+17:51 name bob | bob
+17:54 symbol ) | )
+17:55 symbol , | ,
+17:57 name chair | chair
+17:63 symbol = | =
+17:65 name carol | carol
+17:70 newline
+18:3 word role.we | 我方
+18:6 name disburse | disburse
+18:15 word kw.with | 附带
+18:18 name treasurer | treasurer
+18:28 symbol = | =
+18:30 name dave | dave
+18:35 word kw.by | 由
+18:37 name alice | alice
+18:43 word cond.in_person | 本人确认
+18:48 symbol -> | ->
+18:51 word val.pending_approval | 待批准
+18:54 newline
+19:3 word role.we | 我方
+19:6 word act.approve | 批准
+19:9 word kw.by | 由
+19:11 name bob | bob
+19:15 symbol -> | ->
+19:18 word val.pending_approval | 待批准
+19:21 newline
+20:1 dedent
+20:1 end

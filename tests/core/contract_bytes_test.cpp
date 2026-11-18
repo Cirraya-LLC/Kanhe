@@ -313,7 +313,7 @@ TEST_CASE("contracts: every bo-v1 input, its state spliced, is the tree-built in
             outputs.check(hex(text(r["output"])), id(std::string(64, '1')));
         }
     }
-    CHECK(inputs == 761);
+    CHECK(inputs == 836);
     CHECK(with_state > 500);
     CHECK(outputs.accepted > 500);
     CHECK(outputs.differing == 0);

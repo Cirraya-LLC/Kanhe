@@ -295,6 +295,37 @@ TEST_CASE("bo args: every problem by its code", "[bo][calls]") {
     CHECK(problem({}, "nothing") == ":function ");
 }
 
+TEST_CASE("bo args: people, as actor ids", "[bo][calls]") {
+    // R36: a person is an actor id, 64 hexadecimal digits; a list of
+    // people, a list of them.
+    const model::Model model =
+        model_of("contract Payments\nparties we\n\nthing Payment\n  amount HKD\n"
+                 "  directors list person at most 3\n\ncan disburse by we with deputy person\n"
+                 "  over 1_000 requires 1 approval by directors in person within 7 days\n"
+                 "  active -> disbursed\n");
+    const std::string alice(64, 'a');
+    const std::string bob(64, 'b');
+    const calls::Values values{{"amount", {std::string("HKD 2_000")}},
+                               {"directors", {std::vector<calls::Value>{{alice}, {bob}}}},
+                               {"we", {we}}};
+    const calls::Arguments built = calls::arguments(model, official(), "create", values);
+    INFO(codes(built));
+    REQUIRE(built.value.has_value());
+    CHECK(field(built, "directors") == "[h'" + alice + "', h'" + bob + "']");
+    const calls::Arguments deputy =
+        calls::arguments(model, official(), "disburse", {{"deputy", {bob}}});
+    INFO(codes(deputy));
+    REQUIRE(deputy.value.has_value());
+    CHECK(cbor::diagnostic(*deputy.value) == "{\"deputy\": h'" + bob + "'}");
+    const calls::Arguments wrong =
+        calls::arguments(model, official(), "disburse", {{"deputy", {std::string("alice")}}});
+    CHECK_FALSE(wrong.value.has_value());
+    CHECK(codes(wrong) == "deputy:actor ");
+    const calls::Arguments short_id =
+        calls::arguments(model, official(), "disburse", {{"deputy", {std::string(62, 'a')}}});
+    CHECK(codes(short_id) == "deputy:actor ");
+}
+
 TEST_CASE("bo args: values from JSON", "[bo][calls]") {
     const auto read = calls::parse_values(R"({"a": "x", "b": true, "c": ["y", "z"]})");
     REQUIRE(std::holds_alternative<calls::Values>(read));

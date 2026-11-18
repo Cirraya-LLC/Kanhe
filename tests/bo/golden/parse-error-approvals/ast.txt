@@ -1,0 +1,10 @@
+edition 1
+can disburse by=role.we
+  approvals count=2 guard=(cond.over 5)
+  approvals count=2 within=(cond.within (duration time.day 7))
+2:12 error parse.approvals: a requirement of approvals is written requires N approvals [by PEOPLE] [in person] within DURATION, the number before the word approvals; found approvals
+3:38 error parse.duplicate: within is given twice; give it once
+4:24 error parse.duplicate: approvals is given twice; give it once
+5:29 error parse.duplicate: by is given twice; give it once
+6:34 error parse.duplicate: in person is given twice; give it once
+7:24 error parse.approvals: a requirement of approvals is written requires N approvals [by PEOPLE] [in person] within DURATION, the number before the word approvals; found 7 days

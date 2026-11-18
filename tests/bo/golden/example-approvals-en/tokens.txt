@@ -1,0 +1,185 @@
+1:1 word kw.contract | contract
+1:10 name Payments | Payments
+1:18 newline
+2:1 word kw.parties | parties
+2:9 word role.we | we
+2:11 newline
+4:1 word kind.thing | thing
+4:7 name Payment | Payment
+4:14 newline
+5:1 indent
+5:3 word field.amount | amount
+5:10 word cur.HKD | HKD
+5:13 newline
+6:3 name directors | directors
+6:13 word type.list | list
+6:18 word actor.person | person
+6:25 word expr.at_most piece=head | at most
+6:33 number 5 | 5
+6:34 newline
+8:1 dedent
+8:1 word kw.can | can
+8:5 name disburse | disburse
+8:14 word kw.by | by
+8:17 word role.we | we
+8:19 newline
+9:1 indent
+9:3 word cond.over piece=head | over
+9:8 number 1000000 | 1_000_000
+9:18 word kw.requires | requires
+9:27 number 2 | 2
+9:29 word cond.approval form=plural | approvals
+9:39 word kw.by | by
+9:42 name directors | directors
+9:52 word cond.in_person | in person
+9:62 word cond.within piece=head | within
+9:69 duration time.day 7 | 7 days
+9:75 newline
+10:3 word state.active | active
+10:10 symbol -> | ->
+10:13 name disbursed | disbursed
+10:22 newline
+12:1 dedent
+12:1 word kw.test | test
+12:6 text "two directors approve a large payment" | "two directors approve a large payment"
+12:45 newline
+13:1 indent
+13:3 word role.we | we
+13:6 word act.create | create
+13:13 word kw.with | with
+13:18 word field.amount | amount
+13:25 symbol = | =
+13:27 money cur.HKD 2000000 | HKD 2_000_000
+13:40 symbol , | ,
+13:42 name directors | directors
+13:52 symbol = | =
+13:54 symbol ( | (
+13:55 name alice | alice
+13:60 symbol , | ,
+13:62 name bob | bob
+13:65 symbol , | ,
+13:67 name carol | carol
+13:72 symbol ) | )
+13:73 newline
+14:3 word role.we | we
+14:6 name disburse | disburse
+14:15 word kw.by | by
+14:18 name dave | dave
+14:23 word cond.in_person | in person
+14:33 symbol -> | ->
+14:36 word val.pending_approval | pending approval
+14:52 newline
+15:3 word role.we | we
+15:6 word act.approve | approve
+15:14 word kw.by | by
+15:17 name alice | alice
+15:23 word cond.in_person | in person
+15:33 symbol -> | ->
+15:36 word val.pending_approval | pending approval
+15:52 newline
+16:3 word role.we | we
+16:6 word act.approve | approve
+16:14 word kw.by | by
+16:17 name alice | alice
+16:23 word cond.in_person | in person
+16:33 symbol -> | ->
+16:36 word val.refused | refused
+16:44 text "bo:approved disburse" | "bo:approved disburse"
+16:66 newline
+17:3 word role.we | we
+17:6 word act.approve | approve
+17:14 word kw.by | by
+17:17 name erin | erin
+17:22 word cond.in_person | in person
+17:32 symbol -> | ->
+17:35 word val.refused | refused
+17:43 text "bo:approver disburse" | "bo:approver disburse"
+17:65 newline
+18:3 word role.we | we
+18:6 word act.approve | approve
+18:14 word kw.by | by
+18:17 name bob | bob
+18:21 symbol -> | ->
+18:24 word val.refused | refused
+18:32 text "bo:in-person disburse" | "bo:in-person disburse"
+18:55 newline
+19:3 word role.we | we
+19:6 word act.approve | approve
+19:14 word kw.by | by
+19:17 name bob | bob
+19:21 word cond.in_person | in person
+19:31 symbol -> | ->
+19:34 name disbursed | disbursed
+19:43 newline
+21:1 dedent
+21:1 word kw.test | test
+21:6 text "a small payment needs nobody" | "a small payment needs nobody"
+21:36 newline
+22:1 indent
+22:3 word role.we | we
+22:6 word act.create | create
+22:13 word kw.with | with
+22:18 word field.amount | amount
+22:25 symbol = | =
+22:27 money cur.HKD 500 | HKD 500
+22:34 symbol , | ,
+22:36 name directors | directors
+22:46 symbol = | =
+22:48 symbol ( | (
+22:49 name alice | alice
+22:54 symbol , | ,
+22:56 name bob | bob
+22:59 symbol , | ,
+22:61 name carol | carol
+22:66 symbol ) | )
+22:67 newline
+23:3 word role.we | we
+23:6 name disburse | disburse
+23:15 symbol -> | ->
+23:18 name disbursed | disbursed
+23:27 newline
+25:1 dedent
+25:1 word kw.test | test
+25:6 text "approvals lapse" | "approvals lapse"
+25:23 newline
+26:1 indent
+26:3 word role.we | we
+26:6 word act.create | create
+26:13 word kw.with | with
+26:18 word field.amount | amount
+26:25 symbol = | =
+26:27 money cur.HKD 2000000 | HKD 2_000_000
+26:40 symbol , | ,
+26:42 name directors | directors
+26:52 symbol = | =
+26:54 symbol ( | (
+26:55 name alice | alice
+26:60 symbol , | ,
+26:62 name bob | bob
+26:65 symbol , | ,
+26:67 name carol | carol
+26:72 symbol ) | )
+26:74 word time.at piece=head | at
+26:77 date 2027-01-04 | 2027-01-04
+26:87 newline
+27:3 word role.we | we
+27:6 name disburse | disburse
+27:15 word kw.by | by
+27:18 name alice | alice
+27:24 word cond.in_person | in person
+27:34 symbol -> | ->
+27:37 word val.pending_approval | pending approval
+27:53 newline
+28:3 word role.we | we
+28:6 word act.approve | approve
+28:14 word kw.by | by
+28:17 name bob | bob
+28:21 word cond.in_person | in person
+28:31 word time.at piece=head | at
+28:34 date 2027-01-12 | 2027-01-12
+28:45 symbol -> | ->
+28:48 word val.refused | refused
+28:56 text "bo:lapsed disburse" | "bo:lapsed disburse"
+28:76 newline
+29:1 dedent
+29:1 end

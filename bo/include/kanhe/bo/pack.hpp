@@ -240,7 +240,11 @@ struct Meaning {
 ///   - before_billing: version 5 of each, from before a service's periods
 ///     and bills: it reads like before_requests with requests, with
 ///     version 2 of the official vocabulary packs;
-///   - current: version 6 of each, which spell the core's words alone; the
+///   - before_approvals: version 6 of each, from before approvals inside
+///     contracts: it reads like the current release, with the same
+///     vocabulary packs, but spells no word for an approval (`approvals`,
+///     人批核, 人审批), and `須由` (须由) reads as one name;
+///   - current: version 7 of each, which spell the core's words alone; the
 ///     official vocabulary packs (commerce and services version 3, finance
 ///     version 2) spell theirs (vocab.hpp), and the release's packs hold
 ///     them as their own.
@@ -251,6 +255,7 @@ enum class Officials : std::uint8_t {
     before_pack_files,
     before_requests,
     before_billing,
+    before_approvals,
 };
 
 /// The packs a source is read with: the official packs, always, and any

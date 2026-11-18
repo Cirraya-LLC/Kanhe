@@ -171,6 +171,10 @@ std::vector<std::pair<std::string, std::filesystem::path>> cases() {
         // A time rule's action on the next line of its block: the states
         // it ends in are final.
         {"rule-block", golden_dir / "test/rule-block/source.bo"},
+        // Approvals: the spec's payment that two directors approve, and
+        // the proposer, AI agents, presence, lapse, and their refusals.
+        {"payments", golden_dir / "example-approvals-en/source.bo"},
+        {"approvals", golden_dir / "test/approvals/source.bo"},
     };
 }
 
@@ -637,6 +641,149 @@ TEST_CASE("bo test: signers, presence, and AI agents", "[bo][test]") {
                                           "  we offer to bank1 by AI agent with fee = HKD 3\n"));
     CHECK(only(home).steps[0].calls[0].input.caller_signer.kind == 1);
     CHECK(only(home).steps[1].calls[0].input.caller_signer.kind == 2);
+}
+
+TEST_CASE("bo test: approvals, by people only tests name, the same in every language",
+          "[bo][test]") {
+    // The spec's payment in four spellings: the same results.
+    const std::string english =
+        results_of(read_text(golden_dir / "example-approvals-en/source.bo"));
+    CHECK(english.find("3 tests: 3 passed, 0 failed") != std::string::npos);
+    for (const std::string_view spelling : {"zh-hant", "zh-hans", "mixed"}) {
+        INFO(spelling);
+        CHECK(results_of(read_text(golden_dir / ("example-approvals-" + std::string(spelling)) /
+                                   "source.bo")) == english);
+    }
+    const Tested t = tested(read_text(golden_dir / "example-approvals-en/source.bo"));
+    REQUIRE(t.results.tests.size() == 3);
+    const TestResult& two = t.results.tests[0];
+    CHECK(two.passed);
+    // A person a step names calls as itself: its actor id derives from its
+    // name, and it signs as a person, with presence in person.
+    const auto person = [&](std::string_view name) -> protocol::Id {
+        const std::string seed = "kanhe-bo-test person " + std::string(name);
+        const auto digest = provider().digest(crypto::HashAlg::sha256, as_bytes(seed));
+        REQUIRE(digest.has_value());
+        return *digest;
+    };
+    REQUIRE(two.steps.size() == 7);
+    CHECK(two.steps[1].calls.front().input.caller == person("dave"));
+    CHECK(two.steps[1].calls.front().input.caller_signer.kind == 1);
+    CHECK(two.steps[1].calls.front().input.caller_signer.presence ==
+          protocol::PresenceMethod::webauthn);
+    CHECK(two.steps[5].calls.front().input.caller == person("bob"));
+    CHECK(!two.steps[5].calls.front().input.caller_signer.presence.has_value());
+    // The proposal is kept; alice's approval is recorded; bob's completes it.
+    CHECK(has_event(two.steps[1], "propose:disburse"));
+    CHECK(!has_event(two.steps[1], "approval:disburse"));
+    CHECK(two.steps[1].proposed == "disburse");
+    CHECK(has_event(two.steps[2], "approval:disburse"));
+    CHECK(two.steps[2].approved == "disburse");
+    CHECK(two.steps[3].reason == "bo:approved disburse");
+    CHECK(two.steps[4].reason == "bo:approver disburse");
+    CHECK(two.steps[5].reason == "bo:in-person disburse");
+    CHECK(has_event(two.steps[6], "approval:disburse"));
+    CHECK(has_event(two.steps[6], "approve:disburse"));
+    CHECK(two.steps[6].approved.empty());
+    CHECK(two.steps[6].state == "disbursed");
+    // The directors are the people the creation names, as actor ids.
+    const cbor::Value state = two.steps[1].calls.front().input.instance->state.value();
+    const cbor::Value* directors = state.find("fields")->find("directors");
+    REQUIRE(directors != nullptr);
+    REQUIRE(directors->as_array() != nullptr);
+    REQUIRE(directors->as_array()->size() == 3);
+    const protocol::Id alice = person("alice");
+    REQUIRE((*directors->as_array())[0].as_bytes() != nullptr);
+    CHECK(std::ranges::equal(*(*directors->as_array())[0].as_bytes(), alice.bytes()));
+    // The proposal: [function, arguments, time, proposer, approvals].
+    const auto pending = [](const StepResult& s) {
+        REQUIRE(!s.calls.empty());
+        REQUIRE(s.calls.back().output.has_value());
+        const auto& accept = std::get<protocol::ContractAccept>(*s.calls.back().output);
+        const cbor::Value held = accept.state.value();
+        const cbor::Value* list = held.find("pending");
+        REQUIRE(list != nullptr);
+        REQUIRE(list->as_array() != nullptr);
+        return *list->as_array();
+    };
+    {
+        const cbor::Array kept = pending(two.steps[2]);
+        REQUIRE(kept.size() == 1);
+        const cbor::Array& entry = *kept[0].as_array();
+        REQUIRE(entry.size() == 5);
+        CHECK(*entry[0].as_text() == "disburse");
+        CHECK(entry[1].is_null());
+        CHECK(entry[2].as_int64() == two.steps[1].time);
+        REQUIRE(entry[3].as_array() != nullptr);
+        const protocol::Id dave = person("dave");
+        REQUIRE((*entry[3].as_array())[0].as_bytes() != nullptr);
+        CHECK(std::ranges::equal(*(*entry[3].as_array())[0].as_bytes(), dave.bytes()));
+        REQUIRE(entry[4].as_array() != nullptr);
+        CHECK(entry[4].as_array()->size() == 1);
+    }
+    CHECK(pending(two.steps[6]).empty());
+    // Nobody for a small payment; too late for a week-old proposal.
+    CHECK(t.results.tests[1].passed);
+    CHECK(t.results.tests[2].passed);
+    CHECK(t.results.tests[2].steps[2].reason == "bo:lapsed disburse");
+    // The report says an approval is recorded, in the reader's language.
+    CHECK(outcome_text(two.steps[2], t.results, pack("en")) ==
+          "an approval of disburse is recorded; the proposal waits for more approvals");
+    // The refusals name the contract text's line of approvals.
+    const model::Test& test = t.compiled.model->tests.front();
+    for (const Pack* language : {pack("en"), pack("zh-Hant-HK"), pack("zh-Hans-CN")}) {
+        const Explained text = explain(*t.compiled.model, language);
+        for (const std::size_t step : {3U, 4U, 5U}) {
+            const ExplainedClause* line =
+                refusal_clause(text, *t.compiled.model, test.steps[step], two.steps[step]);
+            REQUIRE(line != nullptr);
+            CHECK(line->kind == "approvals");
+            CHECK(line->requirement == 1);
+        }
+    }
+}
+
+TEST_CASE("bo test: approvals, the proposer, AI agents, lapse, and the limits", "[bo][test]") {
+    const Tested t = tested(read_text(golden_dir / "test/approvals/source.bo"));
+    REQUIRE(t.results.tests.size() == 8);
+    for (const TestResult& r : t.results.tests) {
+        CHECK(r.passed);
+    }
+    // The one who proposes, alone enough: the call runs, keeping nothing.
+    const StepResult& alone = t.results.tests[0].steps[1];
+    CHECK(alone.state == "signed");
+    CHECK(alone.proposed.empty());
+    CHECK(!has_event(alone, "propose:sign"));
+    // An AI agent counts where the action lets it and no presence is asked.
+    const TestResult& agents = t.results.tests[2];
+    CHECK(has_event(agents.steps[2], "approval:ship"));
+    CHECK(agents.steps[4].reason == "bo:approver ship");
+    CHECK(agents.steps[5].calls.front().input.caller_signer.kind == 2);
+    CHECK(agents.steps[5].state == "shipped");
+    CHECK(agents.steps[7].reason == "bo:approver audit");
+    CHECK(agents.steps[8].reason == "bo:in-person audit");
+    // An AI agent's proposal completes only with a person in person: an
+    // approval that would complete it without one is refused.
+    const TestResult& proposal = t.results.tests[3];
+    CHECK(proposal.steps[4].reason == "bo:approve reimburse");
+    CHECK(has_event(proposal.steps[5], "approval:reimburse"));
+    CHECK(has_event(proposal.steps[5], "approve:reimburse"));
+    CHECK(proposal.steps[5].state == "reimbursed");
+    // A requires line after the line of approvals is requirement 2.
+    CHECK(t.results.tests[4].steps[2].reason == "bo:requires ship 2");
+    // Another party starts it: refused before its consent is asked.
+    CHECK(t.results.tests[5].steps[1].reason == "bo:approvals return_order");
+    // The new proposal drops the lapsed one first.
+    const TestResult& lapse = t.results.tests[6];
+    CHECK(!has_event(lapse.steps[1], "lapse:note_it"));
+    CHECK(has_event(lapse.steps[2], "lapse:note_it"));
+    CHECK(has_event(lapse.steps[2], "propose:note_it"));
+    CHECK(has_event(lapse.steps[3], "approve:note_it"));
+    // Sixteen proposals at most.
+    const TestResult& full = t.results.tests[7];
+    REQUIRE(full.steps.size() == 18);
+    CHECK(full.steps[16].proposed == "note_it");
+    CHECK(full.steps[17].reason == "bo:pending");
 }
 
 TEST_CASE("bo test: time, from 2026-01-01 or the first at, never going back", "[bo][test]") {

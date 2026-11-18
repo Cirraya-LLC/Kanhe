@@ -31,6 +31,9 @@
 ///             | `test` [NAME | TEXT] block of steps
 ///   field     = OPERAND [SUM] { `,` SUM }                  amount HKD
 ///   statement = `requires` COND | GUARD `requires` COND    over 5_000_000 requires in person
+///             | [GUARD] `requires` { NUMBER `approval` | `by` OPERAND | `in person` | WITHIN }
+///                                                          requires 2 approvals by directors
+///                                                          in person within 7 days
 ///             | WHO `can` ACTION                           AI agent can propose
 ///             | `if` COND [statement] [block] [`otherwise` [statement | if] [block]]
 ///             | `each` NAME `in` COND block

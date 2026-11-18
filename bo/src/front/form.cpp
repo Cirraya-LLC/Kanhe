@@ -175,10 +175,29 @@ Outcome read_outcome(const Json& value, const std::string& path) {
     return *outcome;
 }
 
+Approval read_approval(const Json& value, const std::string& path) {
+    known_keys(value, path, {"count", "by", "in_person", "within", "guard"});
+    Approval a;
+    const Json* count = member(value, "count");
+    if (count == nullptr) {
+        fail(at(path, "count"), "this is required");
+    }
+    if (!count->is_number_unsigned() || count->get<std::uint64_t>() == 0) {
+        fail(at(path, "count"), "how many approvals: a whole number, 1 or more");
+    }
+    a.count = count->get<std::uint64_t>();
+    a.by = optional_piece(value, "by", path);
+    a.in_person = flag(value, "in_person", path);
+    a.within = required_piece(value, "within", path);
+    a.guard = optional_piece(value, "guard", path);
+    return a;
+}
+
 Action read_action(const Json& value, const std::string& path) {
     known_keys(value, path,
                {"action", "by", "to", "inputs", "requires", "consent_of", "in_person",
-                "in_person_over", "agents_propose", "from", "to_state", "set", "requests"});
+                "in_person_over", "approvals", "agents_propose", "agents_approve", "from",
+                "to_state", "set", "requests"});
     Action a;
     a.action = required_piece(value, "action", path);
     a.by = optional_piece(value, "by", path);
@@ -188,7 +207,9 @@ Action read_action(const Json& value, const std::string& path) {
     a.consent_of = pieces(value, "consent_of", path);
     a.in_person = flag(value, "in_person", path);
     a.in_person_over = optional_piece(value, "in_person_over", path);
+    a.approvals = list(value, "approvals", path, read_approval);
     a.agents_propose = flag(value, "agents_propose", path);
+    a.agents_approve = flag(value, "agents_approve", path);
     a.effects = read_effects(value, path);
     return a;
 }
@@ -516,6 +537,24 @@ struct Back {
         }
         return {text(r.kind), text(r.to), assigns(r.with), text(*r.within)};
     }
+    [[nodiscard]] Approval approval(const ast::Approvals& a) const {
+        Approval out;
+        const ast::Expr* count = a.count ? &*a.count : nullptr;
+        if (count == nullptr || count->kind != ast::ExprKind::literal ||
+            count->literal.kind != ast::LiteralKind::number || count->literal.number.scale != 0 ||
+            count->literal.number.negative || count->literal.number.digits == 0) {
+            misfit("a count of approvals the form holds is a whole number, 1 or more", a.span);
+        }
+        if (!a.within) {
+            misfit("a requirement of approvals without its time", a.span);
+        }
+        out.count = count->literal.number.digits;
+        out.by = text(a.by);
+        out.in_person = a.in_person.has_value();
+        out.within = text(*a.within);
+        out.guard = text(a.guard);
+        return out;
+    }
     [[nodiscard]] std::vector<Text> actions(const std::vector<ast::Do>& done) const {
         std::vector<Text> out;
         for (const ast::Do& d : done) {
@@ -602,8 +641,10 @@ Action read_can(const Back& back, const ast::Can& can) {
     const Concept* in_person = concept_named("cond.in_person");
     const Concept* ai_agent = concept_named("actor.ai_agent");
     const Concept* propose = concept_named("act.propose");
+    const Concept* approve = concept_named("act.approve");
     // The requirements' order: plain, consents, presence, then a threshold's
-    // presence, then what AI agents may do; then the effects.
+    // presence, then approvals, then what AI agents may do; then the
+    // effects.
     int phase = 0;
     std::size_t effects_from = can.body.size();
     for (std::size_t i = 0; i < can.body.size(); ++i) {
@@ -611,7 +652,7 @@ Action read_can(const Back& back, const ast::Can& can) {
         auto order = [&](int next, const Span& span) {
             if (next < phase) {
                 misfit("requirements come in the form's order: conditions, consents, presence, "
-                       "what AI agents may do",
+                       "approvals, what AI agents may do",
                        span);
             }
             phase = next;
@@ -642,12 +683,23 @@ Action read_can(const Back& back, const ast::Can& can) {
                 order(0, r->span);
                 a.requires_.push_back(back.text(r->condition));
             }
+        } else if (const auto* ap = std::get_if<ast::Approvals>(&s.node)) {
+            order(4, ap->span);
+            a.approvals.push_back(back.approval(*ap));
         } else if (const auto* p = std::get_if<ast::Permit>(&s.node)) {
-            if (!is_word(p->who, ai_agent) || !is_word(p->action, propose) || a.agents_propose) {
-                misfit("of who may do what, the form holds only: AI agent can propose", p->span);
+            const bool proposes = is_word(p->action, propose) && !a.agents_propose;
+            const bool approves = is_word(p->action, approve) && !a.agents_approve;
+            if (!is_word(p->who, ai_agent) || (!proposes && !approves)) {
+                misfit("of who may do what, the form holds only: AI agent can propose, and AI "
+                       "agent can approve",
+                       p->span);
             }
-            order(4, p->span);
-            a.agents_propose = true;
+            order(proposes ? 5 : 6, p->span);
+            if (proposes) {
+                a.agents_propose = true;
+            } else {
+                a.agents_approve = true;
+            }
         } else {
             effects_from = i;
             break;
@@ -724,15 +776,35 @@ std::string sheet_json(const Sheet& sheet) {
     }
     Json actions = Json::array();
     for (const Action& a : sheet.actions) {
-        Json item{{"action", a.action},
-                  {"by", optional_json(a.by)},
-                  {"to", optional_json(a.to)},
-                  {"inputs", lines_json(a.inputs)},
-                  {"requires", a.requires_},
-                  {"consent_of", a.consent_of},
-                  {"in_person", a.in_person},
-                  {"in_person_over", optional_json(a.in_person_over)},
-                  {"agents_propose", a.agents_propose}};
+        Json item{{"action", a.action},        {"by", optional_json(a.by)},
+                  {"to", optional_json(a.to)}, {"inputs", lines_json(a.inputs)},
+                  {"requires", a.requires_},   {"consent_of", a.consent_of},
+                  {"in_person", a.in_person},  {"in_person_over", optional_json(a.in_person_over)}};
+        // Written only when the action has them, so that sheets without
+        // approvals stay as they were.
+        if (!a.approvals.empty()) {
+            Json approvals = Json::array();
+            for (const Approval& ap : a.approvals) {
+                Json one = Json::object();
+                one["count"] = ap.count;
+                if (ap.by) {
+                    one["by"] = *ap.by;
+                }
+                if (ap.in_person) {
+                    one["in_person"] = true;
+                }
+                one["within"] = ap.within;
+                if (ap.guard) {
+                    one["guard"] = *ap.guard;
+                }
+                approvals.push_back(std::move(one));
+            }
+            item["approvals"] = std::move(approvals);
+        }
+        item["agents_propose"] = a.agents_propose;
+        if (a.agents_approve) {
+            item["agents_approve"] = true;
+        }
         effects_json(item, a.effects);
         actions.push_back(std::move(item));
     }
@@ -819,8 +891,24 @@ Generated generate(const Sheet& sheet) {
         if (a.in_person_over) {
             w.line(1, *a.in_person_over + " requires in person", at(path, "in_person_over"));
         }
+        for (std::size_t k = 0; k < a.approvals.size(); ++k) {
+            const Approval& ap = a.approvals[k];
+            std::string text = ap.guard ? *ap.guard + " requires " : std::string("requires ");
+            text += std::to_string(ap.count) + (ap.count == 1 ? " approval" : " approvals");
+            if (ap.by) {
+                text += " by " + *ap.by;
+            }
+            if (ap.in_person) {
+                text += " in person";
+            }
+            text += " " + ap.within;
+            w.line(1, text, at(at(path, "approvals"), k));
+        }
         if (a.agents_propose) {
             w.line(1, "AI agent can propose", at(path, "agents_propose"));
+        }
+        if (a.agents_approve) {
+            w.line(1, "AI agent can approve", at(path, "agents_approve"));
         }
         effects_lines(w, a.effects, path);
     }

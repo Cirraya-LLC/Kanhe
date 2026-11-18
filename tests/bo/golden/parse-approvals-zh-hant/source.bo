@@ -1,0 +1,19 @@
+合約 Payments
+訂約方 我方
+
+物件 Payment
+  金額 港元
+  directors 清單 真人 最多 5
+  chair 真人
+
+可 disburse 由 我方 連同 treasurer 真人
+  超過 1_000_000 須由 directors 2人批核 親身確認 7日內
+  須 1人批核 1個月內
+  須 30日內 3人批核 由 (chair, treasurer)
+  AI 代理 可批准
+  正常 -> disbursed
+
+測試
+  我方 建立 連同 金額 = 港元 2_000_000, directors = (alice, bob), chair = carol
+  我方 disburse 連同 treasurer = dave 由 alice 親身確認 -> 待批准
+  我方 批准 由 bob -> 待批准

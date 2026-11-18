@@ -1,0 +1,28 @@
+合約 Payments
+訂約方 我方
+
+物件 Payment
+  金額 港元
+  directors 清單 真人 最多 5
+
+可 disburse 由 我方
+  超過 1_000_000 須由 directors 2人批核 親身確認 7日內
+  正常 -> disbursed
+
+測試 "two directors approve a large payment"
+  我方 建立 連同 金額 = 港元 2_000_000, directors = (alice, bob, carol)
+  我方 disburse 由 dave 親身確認 -> 待批准
+  我方 批准 由 alice 親身確認 -> 待批准
+  我方 批准 由 alice 親身確認 -> 被拒絕 "bo:approved disburse"
+  我方 批准 由 erin 親身確認 -> 被拒絕 "bo:approver disburse"
+  我方 批准 由 bob -> 被拒絕 "bo:in-person disburse"
+  我方 批准 由 bob 親身確認 -> disbursed
+
+測試 "a small payment needs nobody"
+  我方 建立 連同 金額 = 港元 500, directors = (alice, bob, carol)
+  我方 disburse -> disbursed
+
+測試 "approvals lapse"
+  我方 建立 連同 金額 = 港元 2_000_000, directors = (alice, bob, carol) 時間 2027-01-04
+  我方 disburse 由 alice 親身確認 -> 待批准
+  我方 批准 由 bob 親身確認 時間 2027-01-12 -> 被拒絕 "bo:lapsed disburse"

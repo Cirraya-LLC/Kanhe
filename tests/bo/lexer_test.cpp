@@ -215,6 +215,43 @@ TEST_CASE("the spec's cases lex as it says", "[bo][lexer]") {
     CHECK(lexed.tokens[2].concept_entry->id == "kw.requires");
 }
 
+TEST_CASE("a count of approvals, and the prefix requires joined to by", "[bo][lexer]") {
+    // A count is a number, then the word that counts approvals: spaced in
+    // English, joined in Chinese as a unit is (2人批核), a word of its own.
+    const std::vector<std::string> two{"number 2", "word cond.approval form=plural"};
+    CHECK(tokens("2 approvals") == two);
+    CHECK(tokens("1 approval") == std::vector<std::string>{"number 1", "word cond.approval"});
+    for (const std::string_view line : {"2人批核", "2 人批核", "2人审批", "2 人审批"}) {
+        INFO(line);
+        CHECK(tokens(line) == std::vector<std::string>{"number 2", "word cond.approval"});
+    }
+    CHECK(tokens("16人批核 7日內") == std::vector<std::string>{"number 16", "word cond.approval",
+                                                               "duration time.day 7",
+                                                               "word cond.within piece=tail"});
+    // Nothing else follows a number so: 2人 is no word.
+    CHECK(codes(lex("2人", official())) == "lex.number-suffix");
+    // 須由 (须由): requires, then by, in a requirement of approvals.
+    for (const std::string_view line : {"須由", "须由"}) {
+        INFO(line);
+        CHECK(tokens(line) == std::vector<std::string>{"word kw.requires", "word kw.by"});
+    }
+    CHECK(tokens("超過 1_000_000 須由 directors 2人批核 親身確認 7日內") ==
+          std::vector<std::string>{"word cond.over piece=head", "number 1000000",
+                                   "word kw.requires", "word kw.by", "name directors", "number 2",
+                                   "word cond.approval", "word cond.in_person",
+                                   "duration time.day 7", "word cond.within piece=tail"});
+    // Other prefixes join no keyword: 可由 stays a name.
+    CHECK(tokens("可由") == std::vector<std::string>{"name 可由 split=kw.can/由"});
+    // The official packs of before approvals spell no approval, and read
+    // 須由 as one name (the sources deployed with them rebuild as they were).
+    const PackSetRead earlier = make_pack_set({}, Officials::before_approvals);
+    REQUIRE(earlier.set.has_value());
+    const Lexicon before(*earlier.set);
+    CHECK(tokens("須由", before) == std::vector<std::string>{"name 須由 split=kw.requires/由"});
+    CHECK(tokens("2 approvals", before) == std::vector<std::string>{"number 2", "name approvals"});
+    CHECK(codes(lex("2人批核", before)) == "lex.number-suffix");
+}
+
 TEST_CASE("places: lines and columns count characters, offsets count bytes", "[bo][lexer]") {
     const std::string source = "合約 X\n  可質押 予 銀行 # 註\n";
     const Lexed lexed = lex(source, official());

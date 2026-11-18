@@ -1,0 +1,122 @@
+測試 「the one who proposes counts, and alone may be enough」：通過
+  第 1 步（第 39 行）通過：we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 40 行）通過：we sign by alice in person -> signed
+    結果：調用獲接納，實例現為 signed。
+
+測試 「presence is the line's」：通過
+  第 1 步（第 43 行）通過：we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 44 行）通過：we sign by alice -> pending approval
+    結果：調用保留為 sign 的提議，正等待真人批准；實例維持不變。
+  第 3 步（第 45 行）通過：we approve by AI agent -> refused "bo:approver sign"
+    結果：調用被拒絕，因為調用者並非 sign 適用批核要求所計算的批核人（bo:approver sign）。
+    合約條文 4.1.2：要求 1：須由 directors 其中 1 人於提議後 30 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 4 步（第 46 行）通過：we approve by bob in person -> signed
+    結果：調用獲接納，實例現為 signed。
+
+測試 「AI agents count where no presence is asked」：通過
+  第 1 步（第 49 行）通過：we create with amount = HKD 50_000, directors = (alice, bob), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 50 行）通過：we sign by alice in person -> signed
+    結果：調用獲接納，實例現為 signed。
+  第 3 步（第 51 行）通過：we ship by dave -> pending approval
+    結果：調用保留為 ship 的提議，正等待真人批准；實例維持不變。
+  第 4 步（第 52 行）通過：we approve by dave -> refused "bo:approved ship"
+    結果：調用被拒絕，因為此人已批核 ship 的提議（bo:approved ship）。
+    合約條文 4.2.2：要求 1：如金額超過港元 10,000，須由我方的人員其中 2 人（凡其授權可調用批准者）於提議後 7 日內批核，提議人亦計算在內；在此之前，調用保留為提議。
+  第 5 步（第 53 行）通過：we approve -> refused "bo:approver ship"
+    結果：調用被拒絕，因為調用者並非 ship 適用批核要求所計算的批核人（bo:approver ship）。
+    合約條文 4.2.2：要求 1：如金額超過港元 10,000，須由我方的人員其中 2 人（凡其授權可調用批准者）於提議後 7 日內批核，提議人亦計算在內；在此之前，調用保留為提議。
+  第 6 步（第 54 行）通過：we approve by AI agent -> shipped
+    結果：調用獲接納，實例現為 shipped。
+  第 7 步（第 55 行）通過：we audit by AI agent -> pending approval
+    結果：調用保留為 audit 的提議，正等待真人批准；實例維持不變。
+  第 8 步（第 56 行）通過：we approve by AI agent -> refused "bo:approver audit"
+    結果：調用被拒絕，因為調用者並非 audit 適用批核要求所計算的批核人（bo:approver audit）。
+    合約條文 4.4.2：要求 1：須由 chair 其中 1 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 9 步（第 57 行）通過：we approve by carol -> refused "bo:in-person audit"
+    結果：調用被拒絕，因為 audit 須由本人以通行密鑰或硬件密鑰證明親身在場（bo:in-person audit）。
+    合約條文 4.4.2：要求 1：須由 chair 其中 1 人於提議後 7 日內各自親身批核，提議人如屬其中一人亦計算在內；在此之前，調用保留為提議。
+  第 10 步（第 58 行）通過：we approve by carol in person
+    結果：調用獲接納，實例現為 shipped。
+
+測試 「an AI agent's proposal waits for a person in person」：通過
+  第 1 步（第 61 行）通過：we create with amount = HKD 500, directors = (alice, bob), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 62 行）通過：we sign by alice in person -> signed
+    結果：調用獲接納，實例現為 signed。
+  第 3 步（第 63 行）通過：we ship -> shipped
+    結果：調用獲接納，實例現為 shipped。
+  第 4 步（第 64 行）通過：we reimburse by AI agent -> pending approval
+    結果：調用保留為 reimburse 的提議，正等待真人批准；實例維持不變。
+  第 5 步（第 65 行）通過：we approve by alice -> refused "bo:approve reimburse"
+    結果：調用被拒絕，因為 reimburse 由 AI 代理提議：須由證明親身在場的真人批准（bo:approve reimburse）。
+  第 6 步（第 66 行）通過：we approve by bob in person -> reimbursed
+    結果：調用獲接納，實例現為 reimbursed。
+
+測試 「a guard that does not hold, and the requirements after the line」：通過
+  第 1 步（第 69 行）通過：we create with amount = HKD 0, directors = (alice), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 70 行）通過：we sign by alice in person -> signed
+    結果：調用獲接納，實例現為 signed。
+  第 3 步（第 71 行）通過：we ship -> refused "bo:requires ship 2"
+    結果：調用被拒絕，因為 ship 的第 2 項要求未獲滿足（bo:requires ship 2）。
+    合約條文 4.2.3：要求 2：金額大於港元 0。
+
+測試 「another party's people approve on its own ledger」：通過
+  第 1 步（第 74 行）通過：we create with amount = HKD 50_000, directors = (alice), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 75 行）通過：partner return_order -> refused "bo:approvals return_order"
+    結果：調用被拒絕，因為 return_order 須由所屬賬本的人員批核：適用批核要求時，其他訂約方不可發起此動作（bo:approvals return_order）。
+    合約條文 4.6.2：要求 1：須由 partner 的人員其中 1 人（凡其授權可調用批准者）於提議後 7 日內批核，提議人亦計算在內；在此之前，調用保留為提議。
+
+測試 「lapsed proposals go when a new one is kept」：通過
+  第 1 步（第 78 行）通過：we create with amount = HKD 1, directors = (alice), chair = carol at 2027-01-01
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 79 行）通過：we note_it by dave -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 3 步（第 80 行）通過：we note_it by erin at 2027-01-20 -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 4 步（第 81 行）通過：we approve by frank
+    結果：調用獲接納，實例現為正常。
+
+測試 「an instance keeps at most 16 proposals」：通過
+  第 1 步（第 84 行）通過：we create with amount = HKD 1, directors = (alice), chair = carol
+    結果：調用獲接納，實例現為正常。
+  第 2 步（第 85 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 3 步（第 86 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 4 步（第 87 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 5 步（第 88 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 6 步（第 89 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 7 步（第 90 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 8 步（第 91 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 9 步（第 92 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 10 步（第 93 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 11 步（第 94 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 12 步（第 95 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 13 步（第 96 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 14 步（第 97 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 15 步（第 98 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 16 步（第 99 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 17 步（第 100 行）通過：we note_it -> pending approval
+    結果：調用保留為 note_it 的提議，正等待真人批准；實例維持不變。
+  第 18 步（第 101 行）通過：we note_it -> refused "bo:pending"
+    結果：調用被拒絕，因為實例已保留 16 項待批准的提議（bo:pending）。
+
+共 8 個測試：8 個通過，0 個失敗。

@@ -1,0 +1,16 @@
+test "two directors approve a large payment" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 5889
+  step 2 passed 2026-01-01 accepted active event=propose:disburse; fuel 10203
+  step 3 passed 2026-01-01 accepted active event=approval:disburse; fuel 12966
+  step 4 passed 2026-01-01 refused "bo:approved disburse"; fuel 10705
+  step 5 passed 2026-01-01 refused "bo:approver disburse"; fuel 11272
+  step 6 passed 2026-01-01 refused "bo:in-person disburse"; fuel 11055
+  step 7 passed 2026-01-01 accepted disbursed event=approval:disburse event=approve:disburse event=disbursed final; fuel 13804
+test "a small payment needs nobody" passed home=role.we
+  step 1 passed 2026-01-01 accepted active event=active; fuel 5793
+  step 2 passed 2026-01-01 accepted disbursed event=disbursed final; fuel 8514
+test "approvals lapse" passed home=role.we
+  step 1 passed 2027-01-04 accepted active event=active; fuel 5889
+  step 2 passed 2027-01-04 accepted active event=propose:disburse event=approval:disburse; fuel 10734
+  step 3 passed 2027-01-12 refused "bo:lapsed disburse"; fuel 10515
+3 tests: 3 passed, 0 failed

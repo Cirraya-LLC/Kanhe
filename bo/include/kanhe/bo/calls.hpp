@@ -24,7 +24,8 @@
 ///
 /// Values are typed by the model, never guessed from what is written: a
 /// text is taken as typed, yes or no as a choice, a party as its ledger id
-/// (64 hexadecimal digits), a list item by item, and a number, an amount of
+/// (64 hexadecimal digits), a person as its actor id (64 hexadecimal
+/// digits), a list item by item, and a number, an amount of
 /// money, a quantity, a rate, a date, or a duration as Bo writes it, in any
 /// official language (`HKD 100.50`, `500萬`, `2027年1月6日`, `30日`), read by
 /// Bo's lexer and checked against the declared type. A plain number is
@@ -118,7 +119,8 @@ struct Problem {
     /// dimension, or time unit); literal: does not read as one value (or a
     /// text not in UTF-8);
     /// exact: finer than its smallest unit, or too large;
-    /// ledger: not a ledger id; bound: more items than its list holds;
+    /// ledger: not a ledger id; actor: not a person's actor id; bound: more
+    /// items than its list holds;
     /// size: a text too long; twice: given twice.
     std::string_view code;
     /// The encoded type expected, if any.

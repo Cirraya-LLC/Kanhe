@@ -111,7 +111,7 @@ contains -x 1 out.txt || fail "version names the edition"
 
 echo "== the official packs, and their digests"
 run bo packs list > out.txt
-contains -F "zh-Hant-HK   version 6   official   繁體中文（香港）" out.txt || fail "list"
+contains -F "zh-Hant-HK   version 7   official   繁體中文（香港）" out.txt || fail "list"
 run bo packs list --json > list.json
 json 'len(d)' < list.json > out.txt
 contains -x 3 out.txt || fail "three official packs"
@@ -121,7 +121,7 @@ for hash in SHA-256 SM3; do
     [ "$hash" = SM3 ] && option=sm3
     run bo packs list --json --hash "$option" |
         json "'\\n'.join(p['id'] + ' ' + str(p['version']) + ' ' + p['hash'] + ' ' + p['digest'] for p in d)" > digests.txt
-    grep -E "^(en|zh-Hant-HK|zh-Hans-CN) 6 $hash " "$GOLDEN" > expected.txt
+    grep -E "^(en|zh-Hant-HK|zh-Hans-CN) 7 $hash " "$GOLDEN" > expected.txt
     diff expected.txt digests.txt > /dev/null || fail "digests ($hash) differ from $GOLDEN"
     # The vocabulary packs too.
     run bo vocab list --json --hash "$option" |
@@ -130,7 +130,7 @@ for hash in SHA-256 SM3; do
     diff expected.txt digests.txt > /dev/null || fail "vocabulary digests ($hash) differ from $GOLDEN"
 done
 json 'd[1]["keywords"], d[1]["words"], d[1]["official"], d[1]["separation"]' < list.json > out.txt
-contains -Fx "22 145 True none" out.txt || fail "facts"
+contains -Fx "22 146 True none" out.txt || fail "facts"
 
 run bo packs show zh-Hant-HK > out.txt
 contains -F "prefixes     可 (kw.can), 須 (kw.requires), 當 (kw.when), 如 (kw.if)" out.txt || fail "prefixes"
@@ -145,14 +145,14 @@ run bo packs show zh-Hans-CN --json > show.json
 json 'd["keywords"]["kw.each"], d["vocabulary"]["unit.item"]["category"], d["reading"]["multipliers"]["万"]' < show.json > out.txt
 contains -Fx "['逐个'] unit 10000" out.txt || fail "show --json"
 json 'len(d["messages"]), len(d["sentences"])' < show.json > out.txt
-contains -Fx "265 274" out.txt || fail "messages and sentences"
+contains -Fx "273 291" out.txt || fail "messages and sentences"
 expect_exit 1 bo packs show fr
 contains -F "no pack fr" out.txt || fail "unknown pack"
 expect_exit 1 bo packs show en --section nope
 
 echo "== Bo's core and its vocabulary packs"
 run bo vocab list > out.txt
-contains -E "^core +- +core +84 words, +5 built-in actions +\(every source\)$" out.txt || fail "vocab list: core"
+contains -E "^core +- +core +85 words, +5 built-in actions +\(every source\)$" out.txt || fail "vocab list: core"
 contains -E "^finance +version 2 +finance +24 words, 10 built-in actions  SHA-256 [0-9a-f]{64}$" out.txt || fail "vocab list: finance"
 contains -E "^commerce +version 3 +commerce +23 words, +0 built-in actions" out.txt || fail "vocab list: commerce"
 contains -E "^services +version 3 +services +14 words, +6 built-in actions" out.txt || fail "vocab list: services"
@@ -293,7 +293,7 @@ cat > company.pack <<'EOF'
 }
 EOF
 run bo packs check company.pack > out.txt
-contains -F "warning: pack acme-terms does not spell 83 of the 84 words" out.txt || fail "partial"
+contains -F "warning: pack acme-terms does not spell 84 of the 85 words" out.txt || fail "partial"
 contains -F "company.pack: pack acme-terms version 3 (community): 18 keywords, 3 words" out.txt || fail "check ok"
 contains -F "ok: the packs read" out.txt || fail "ok"
 run bo packs list --pack company.pack > out.txt
@@ -573,7 +573,7 @@ contains -Fx "agreement.bo: built contract Agreement (Bo edition 1)" out.txt || 
 contains -F "functions  amend, close, countersign, create (creates), sign" out.txt || fail "functions"
 contains -F "code       $GOLDEN_SIZE bytes, SHA-256 $GOLDEN_HASH" out.txt || fail "code"
 contains -F "compiler   $COMPILER" out.txt || fail "compiler"
-contains -F "the packs en 6, zh-Hans-CN 6, zh-Hant-HK 6, and the vocabulary packs commerce 3 (SHA-256 digests)" out.txt || fail "packs"
+contains -F "the packs en 7, zh-Hans-CN 7, zh-Hant-HK 7, and the vocabulary packs commerce 3 (SHA-256 digests)" out.txt || fail "packs"
 contains -F "wrote" out.txt && fail "nothing written without --out"
 # The highest fuel and output bounds, as the golden keeps them.
 AMEND_FUEL="$(sed -n 's/^bound amend: fuel \([0-9]*\),.*/\1/p' "$BUILDS/agreement-en/build.txt")"
@@ -923,7 +923,7 @@ contains -Fx "language:   bo (compiler: $COMPILER)" show.txt || fail "show: comp
 d contract export "$C" --out exported.boc > /dev/null
 cmp agreement.boc exported.boc || fail "the deploy file, exported as built"
 run bo rebuild exported.boc > rebuild.txt
-contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 6, zh-Hans-CN 6, zh-Hant-HK 6; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the bundle"
+contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 7, zh-Hans-CN 7, zh-Hant-HK 7; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the bundle"
 contains -F "rebuild:  rebuilds: the source rebuilds to the deployed code ($GOLDEN_SIZE bytes, SHA-256 ${GOLDEN_HASH:0:16}) with $COMPILER" rebuild.txt || fail "rebuild"
 run bo rebuild exported.boc --json | json 'd["status"], d["failed"], d["edition"], len(d["packs"])' > out.txt
 contains -Fx "rebuilds False 1 3" out.txt || fail "rebuild --json"
@@ -1000,7 +1000,7 @@ run contract verify e1.cbor --ledger-id "$D_ID" --json | json 'd["verified"]' | 
 # The deploy the evidence carries is the one deployed, and it rebuilds.
 cmp agreement.boc e1.boc || fail "the evidence's deploy"
 run bo rebuild e1.boc > rebuild.txt
-contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 6, zh-Hans-CN 6, zh-Hant-HK 6; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the source"
+contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 7, zh-Hans-CN 7, zh-Hant-HK 7; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the source"
 contains -F "rebuild:  rebuilds: the source rebuilds to the deployed code ($GOLDEN_SIZE bytes, SHA-256 ${GOLDEN_HASH:0:16})" rebuild.txt || fail "rebuild: rebuilds"
 run bo rebuild e1.boc --json | json 'd["status"], d["compiler"] == d["this_compiler"], d["bundle_size"]' > out.txt
 contains -Fx "rebuilds True $BUNDLE_SIZE" out.txt || fail "rebuild --json"

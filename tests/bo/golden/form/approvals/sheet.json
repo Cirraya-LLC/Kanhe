@@ -1,0 +1,139 @@
+{
+  "sheet": 1,
+  "kind": "rules",
+  "contract": "Payments",
+  "packs": [],
+  "parties": [
+    "we"
+  ],
+  "thing": {
+    "word": "thing",
+    "name": "Payment",
+    "fields": [
+      {
+        "name": "amount",
+        "type": "HKD",
+        "default": null
+      },
+      {
+        "name": "directors",
+        "type": "list person at most 5",
+        "default": null
+      }
+    ]
+  },
+  "actions": [
+    {
+      "action": "disburse",
+      "by": "we",
+      "to": null,
+      "inputs": [],
+      "requires": [],
+      "consent_of": [],
+      "in_person": false,
+      "in_person_over": null,
+      "approvals": [
+        {
+          "count": 2,
+          "by": "directors",
+          "in_person": true,
+          "within": "within 7 days",
+          "guard": "over 1_000_000"
+        }
+      ],
+      "agents_propose": false,
+      "from": [
+        "active"
+      ],
+      "to_state": "disbursed",
+      "set": [],
+      "requests": []
+    }
+  ],
+  "rules": [],
+  "answers": [],
+  "tests": [
+    {
+      "name": "\"two directors approve a large payment\"",
+      "steps": [
+        {
+          "party": "we",
+          "action": "create",
+          "outcome": null,
+          "args": [],
+          "to": null,
+          "by": null,
+          "with": [
+            {
+              "name": "amount",
+              "value": "HKD 2_000_000"
+            },
+            {
+              "name": "directors",
+              "value": "(alice, bob, carol)"
+            }
+          ],
+          "expect": null
+        },
+        {
+          "party": "we",
+          "action": "disburse",
+          "outcome": null,
+          "args": [
+            "in person"
+          ],
+          "to": null,
+          "by": "dave",
+          "with": [],
+          "expect": "pending approval"
+        },
+        {
+          "party": "we",
+          "action": "approve",
+          "outcome": null,
+          "args": [
+            "in person"
+          ],
+          "to": null,
+          "by": "alice",
+          "with": [],
+          "expect": "pending approval"
+        },
+        {
+          "party": "we",
+          "action": "approve",
+          "outcome": null,
+          "args": [
+            "in person"
+          ],
+          "to": null,
+          "by": "erin",
+          "with": [],
+          "expect": "refused \"bo:approver disburse\""
+        },
+        {
+          "party": "we",
+          "action": "approve",
+          "outcome": null,
+          "args": [],
+          "to": null,
+          "by": "bob",
+          "with": [],
+          "expect": "refused \"bo:in-person disburse\""
+        },
+        {
+          "party": "we",
+          "action": "approve",
+          "outcome": null,
+          "args": [
+            "in person"
+          ],
+          "to": null,
+          "by": "bob",
+          "with": [],
+          "expect": "disbursed"
+        }
+      ]
+    }
+  ]
+}

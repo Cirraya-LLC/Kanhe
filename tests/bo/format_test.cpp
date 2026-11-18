@@ -240,6 +240,9 @@ TEST_CASE("formatting a source into its own language changes only its layout", "
         {"example-tax-zh-hant", "zh-Hant-HK"},
         {"example-tax-zh-hans", "zh-Hans-CN"},
         {"example-vps-en", "en"},
+        {"example-approvals-en", "en"},
+        {"example-approvals-zh-hant", "zh-Hant-HK"},
+        {"example-approvals-zh-hans", "zh-Hans-CN"},
         {"build/agreement-en", "en"},
         {"build/agreement-zh-hant", "zh-Hant-HK"},
         {"build/agreement-zh-hans", "zh-Hans-CN"},
@@ -254,8 +257,9 @@ TEST_CASE("formatting a source into its own language changes only its layout", "
     }
     // Without a language, every source written in canonical spellings keeps
     // its characters, mixed ones included.
-    for (const std::string_view name : {"example-vps-mixed", "example-receivable-mixed",
-                                        "example-tax-mixed", "build/agreement-mixed"}) {
+    for (const std::string_view name :
+         {"example-vps-mixed", "example-receivable-mixed", "example-tax-mixed",
+          "build/agreement-mixed", "example-approvals-mixed"}) {
         INFO(name);
         const std::string source = read_text(golden_dir / name / "source.bo");
         CHECK(without_layout(formatted(source, nullptr)) == without_layout(source));
@@ -336,6 +340,36 @@ TEST_CASE("the layout rules", "[bo][format]") {
                     "use commerce\n",
                     nullptr) == "use commerce\nuse services\n\nthing R\n  amount HKD\n\ncan pay by "
                                 "we\n  requires now < due\n");
+}
+
+TEST_CASE("a count of approvals joins its number in Chinese, and is plural in English",
+          "[bo][format]") {
+    const std::string english = "can go by we\n"
+                                "  over 1_000_000 requires 2 approvals by directors in person "
+                                "within 7 days\n  requires 1 approval within 1 month\n";
+    CHECK(formatted(english, nullptr) == english);
+    CHECK(formatted(english, pack("en")) == english);
+    CHECK(formatted(english, pack("zh-Hant-HK")) ==
+          "可 go 由 我方\n  超過 1_000_000 須 2人批核 由 directors 親身確認 7日內\n"
+          "  須 1人批核 1個月內\n");
+    CHECK(formatted(english, pack("zh-Hans-CN")) ==
+          "可 go 由 我方\n  超过 1_000_000 须 2人审批 由 directors 本人确认 7天内\n"
+          "  须 1人审批 1个月内\n");
+    // 須由: requires joined to by, as the lexer reads it.
+    const std::string hant =
+        "可 go 由 我方\n  超過 1_000_000 須由 directors 2人批核 親身確認 7日內\n";
+    CHECK(formatted(hant, nullptr) == hant);
+    CHECK(formatted(hant, pack("zh-Hans-CN")) ==
+          "可 go 由 我方\n  超过 1_000_000 须由 directors 2人审批 本人确认 7天内\n");
+    CHECK(formatted(hant, pack("en")) ==
+          "can go by we\n  over 1_000_000 requires by directors 2 approvals in person within 7 "
+          "days\n");
+    // Spaced as written, joined as Chinese is written.
+    CHECK(formatted("can go by we\n  須 2 人批核 7 日 內\n", nullptr) ==
+          "can go by we\n  須 2人批核 7日內\n");
+    // The permit line.
+    CHECK(formatted("can go by we\n  AI agent can approve\n", pack("zh-Hant-HK")) ==
+          "可 go 由 我方\n  AI 代理 可批准\n");
 }
 
 TEST_CASE("words the new language would read together get parentheses", "[bo][format]") {

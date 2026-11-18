@@ -1,0 +1,19 @@
+contract Payments
+parties we
+
+thing Payment
+  amount HKD
+  directors list person at most 5
+  chair person
+
+can disburse by we with treasurer person
+  over 1_000_000 requires 2 approvals by directors in person within 7 days
+  requires 1 approval within 1 month
+  requires within 30 days 3 approvals by (chair, treasurer)
+  AI agent can approve
+  active -> disbursed
+
+test
+  we create with amount = HKD 2_000_000, directors = (alice, bob), chair = carol
+  we disburse with treasurer = dave by alice in person -> pending approval
+  we approve by bob -> pending approval

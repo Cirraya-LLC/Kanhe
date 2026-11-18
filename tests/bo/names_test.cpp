@@ -193,3 +193,38 @@ TEST_CASE("a checked model, written member by member", "[bo][names]") {
     CHECK(steps[1].find("to")->find("role")->as_bool() == false);
     CHECK(*steps[1].find("at")->find("type")->as_text() == "date");
 }
+
+TEST_CASE("a line of approvals and the person type, written member by member", "[bo][names]") {
+    const std::string source = "contract Payments\nparties we\nthing Payment\n  amount HKD\n"
+                               "  directors list person at most 5\n"
+                               "can disburse by we\n"
+                               "  over 1_000_000 requires 2 approvals by directors in person "
+                               "within 7 days\n"
+                               "  AI agent can approve\n  active -> disbursed\n";
+    const PackSetRead set = make_pack_set({});
+    REQUIRE(set.set);
+    const Lexicon lexicon(*set.set);
+    const Parsed parsed = parse(source, lex(source, lexicon));
+    REQUIRE(parsed.diagnostics.empty());
+    // The tree: the line's parts as written.
+    const cbor::Value tree = to_cbor(parsed.file);
+    const cbor::Value& can = tree.find("clauses")->as_array()->at(3);
+    const cbor::Value& line = can.find("body")->as_array()->at(0);
+    CHECK(*line.find("node")->as_text() == "approvals");
+    CHECK(line.find("count") != nullptr);
+    CHECK(line.find("within") != nullptr);
+    // The model: the count, the people, presence, the rule; the type.
+    const Checked checked = check(source, parsed.file);
+    REQUIRE(checked.diagnostics.empty());
+    const cbor::Value value = to_cbor(checked.model);
+    const cbor::Value& directors = value.find("fields")->as_array()->at(1);
+    CHECK(*directors.find("type")->as_text() == "list 5 person");
+    const cbor::Value& disburse = value.find("actions")->as_array()->at(0);
+    CHECK(disburse.find("agents_approve")->as_bool() == true);
+    const cbor::Value& approvals = disburse.find("body")->as_array()->at(0);
+    CHECK(*approvals.find("node")->as_text() == "approvals");
+    CHECK(approvals.find("count")->as_uint64() == 2U);
+    CHECK(approvals.find("in_person")->as_bool() == true);
+    CHECK(*approvals.find("rule")->as_text() == "R36");
+    CHECK(*approvals.find("by")->find("name")->as_text() == "directors");
+}

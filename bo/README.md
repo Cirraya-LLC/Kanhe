@@ -27,7 +27,7 @@ The reference is [`spec/bo.md`](../spec/bo.md), with the conformance suite
 |---|---|
 | `src/front/` | What reads source: the language and vocabulary packs, the lexer, the parser, the checker, the contract text, the formatter, forms, and calls' arguments. It also builds with Clang, so that libFuzzer fuzzes it |
 | `src/` | Building: the checked model lowered (`lower.cpp`) to WebAssembly (`wasm.cpp`) with its runtime (`runtime*.cpp`), each function's fuel and output bounds (`cost.cpp`), and the contract's tests run on its code (`scenario.cpp`) |
-| `packs/` | The official language packs (`en`, `zh-Hant-HK`, `zh-Hans-CN`), with every released version in `packs/history/` |
+| `packs/` | The official language packs (`en`, `zh-Hant-HK`, `zh-Hans-CN`, version 7), with every released version in `packs/history/` |
 | `vocab/` | The official vocabulary packs (`finance`, `commerce`, `services`), with earlier versions in `vocab/history/` |
 | `stdlib/` | The standard terms of the built-in actions |
 | `cli/` | The `bo` program |
@@ -40,12 +40,12 @@ the crypto backend, and the verifier), never a ledger or a node; the build check
 
 Bo is the language contracts are written in: a few keywords in English, Traditional Chinese (Hong
 Kong usage), and Simplified Chinese, freely mixed, and a built-in vocabulary of words with fixed
-meanings. Its core, which every contract reads, holds 84 generic words: kinds of things (`thing`),
-common actions (transfer, suspend, cancel), conditions, time words, units (a temperature among
+meanings. Its core, which every contract reads, holds 85 generic words: kinds of things (`thing`),
+common actions (transfer, suspend, cancel), conditions (approvals among them), time words, units (a temperature among
 them, `°C`), currencies, types, and common fields, states, and roles. Words of particular fields live in three official *vocabulary
 packs*, each with the standard terms of its built-in actions: `finance` (24 words: pledges,
-payments, freezes, splits), `commerce` (22: prices, charges such as taxes, bills), and `services`
-(12: services and resources allocated to one holder at a time). A contract declares the packs it
+payments, freezes, splits), `commerce` (23: prices, charges such as taxes, bills, collections), and `services`
+(14: services and resources allocated to one holder at a time, and a service's periods). A contract declares the packs it
 uses, one line each at its top (`use finance`; `使用 finance` in Chinese), and a deploy records each
 one's version and digest; a pack's word in a contract that does not use its pack is an error, never
 a name of the contract's own. Its reference is [`spec/bo.md`](../spec/bo.md), with the conformance suite `testvectors/bo-v1.json`. The
@@ -510,6 +510,44 @@ An action can let AI agents only propose it (`AI agent can propose`): an agent's
 kept with the instance as a proposal, and a person who proves presence approves it with the
 function `approve`, which runs it with every requirement checked. In a test, `owner lend to
 friend1 by AI agent -> pending approval`, then `owner approve in person -> lent`.
+
+## Approvals
+
+An action can need the approvals of several people of the home (rule R36): a line `requires N
+approvals [by PEOPLE] [in person] within DURATION`, with or without a guard, written in any language
+(`須由 directors 2人批核 親身確認 7日內`, `须由 directors 2人审批 本人确认 7天内`). A field or an input of type
+`person` (`真人`) holds a person of the home, an actor id, or a list of them. A call of the action
+whose line applies is kept as a proposal until enough different people, each a call of `approve`,
+have approved it within the time; the one who proposes counts when it qualifies, and AI agents count
+only where the action says `AI agent can approve` and the line asks no presence. Each approval is
+recorded with the instance (its `pending` entries hold the time proposed, the proposer, and the
+approvals so far), and the approval that meets every line runs the action. Only the home's people
+approve: another party's people approve through their own ledger's rules on their consents.
+
+```
+contract Payments
+parties we
+
+thing Payment
+  amount HKD
+  directors list person at most 5
+
+can disburse by we
+  over 1_000_000 requires 2 approvals by directors in person within 7 days
+  active -> disbursed
+
+test "two directors approve a large payment"
+  we create with amount = HKD 2_000_000, directors = (alice, bob, carol)
+  we disburse by dave in person -> pending approval
+  we approve by alice in person -> pending approval
+  we approve by alice in person -> refused "bo:approved disburse"
+  we approve by bob -> refused "bo:in-person disburse"
+  we approve by bob in person -> disbursed
+```
+
+In a test, `by NAME` names the person of the home who calls (a name only tests use), and such names
+are also the values of person fields. An approval that comes too late is refused `bo:lapsed disburse`, and a call
+that keeps a new proposal first drops the lapsed ones. `spec/bo.md` section 6.13 has the details.
 
 ## Time rules and keepers
 
