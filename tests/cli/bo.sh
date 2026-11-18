@@ -160,7 +160,7 @@ run bo vocab list --language zh-Hant-HK > out.txt
 contains -F "金融" out.txt || fail "vocab list: names in the reader's language"
 run bo vocab list --json > vocab.json
 json 'sum(p["words"] for p in d), [p["id"] for p in d], d[2]["actions"]' < vocab.json > out.txt
-contains -Fx "145 ['core', 'commerce', 'finance', 'services'] ['pledge', 'release', 'enforce', 'redeem', 'pay', 'confirm_payment', 'dispute', 'freeze', 'unfreeze', 'split']" out.txt || fail "vocab list --json"
+contains -Fx "146 ['core', 'commerce', 'finance', 'services'] ['pledge', 'release', 'enforce', 'redeem', 'pay', 'confirm_payment', 'dispute', 'freeze', 'unfreeze', 'split']" out.txt || fail "vocab list --json"
 run bo vocab show core > out.txt
 contains -E "^  kind +kind.thing +thing$" out.txt || fail "vocab show: the core's kind"
 contains -E "^  field +field.holder +holder  party; taking \(R31\)$" out.txt || fail "vocab show: a field's facts"
