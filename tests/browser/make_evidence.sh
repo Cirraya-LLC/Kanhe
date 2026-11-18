@@ -14,7 +14,13 @@
 # requests-ledger-id, and native-requests-report.json and .txt; and the
 # record's evidence again with a time-stamp authority's token over its
 # checkpoint (v0.11), stamped.cbor, tsa-root.pem, and
-# native-stamped-report.json (with that root trusted).
+# native-stamped-report.json (with that root trusted). With SoftHSM (which
+# stands in for hardware keys; PKCS11_MODULE names its module, else it is
+# looked for where Homebrew and Linux distributions install it), approvals
+# and guardians (v0.20): approvals.cbor, guardians.cbor, office-ledger-id,
+# approvals-record-id, and native-approvals-report.json and
+# native-guardians-report.json; without it, none of these, unless
+# REQUIRE_BROWSER=1, which makes it fail instead.
 set -Eeuo pipefail
 trap 'echo "FAILED at line $LINENO: $BASH_COMMAND" >&2' ERR
 
@@ -218,3 +224,81 @@ run credential did-document --url https://college.example --out credential-did.j
 run credential status --as credentials.key --url https://college.example --out credential-list.jwt > /dev/null
 run credential verify credential.jwt --offline --evidence credential-evidence.cbor \
     --did-document credential-did.json --status-list credential-list.jwt --json > native-credential-report.json
+
+# Approvals and guardians (v0.20), with SoftHSM standing in for each
+# approver's hardware key. An office's clerk issues a form that 2 of 3 named
+# people approve in person; Chan Tai Man endorses it in person under a rule
+# that counts her and lets the office's review agent approve without
+# presence; the organization's own statements need 2 of 3 guardians, the
+# setting approved by the new guardians. approvals.cbor is the form's
+# evidence then; guardians.cbor is its evidence after the guardians were
+# changed to guard only revocations (approved by both sets) and then removed.
+MODULE="${PKCS11_MODULE:-}"
+for m in /opt/homebrew/lib/softhsm/libsofthsm2.so /usr/local/lib/softhsm/libsofthsm2.so \
+    /usr/lib/softhsm/libsofthsm2.so /usr/lib/x86_64-linux-gnu/softhsm/libsofthsm2.so \
+    /usr/lib/aarch64-linux-gnu/softhsm/libsofthsm2.so; do
+    if [ -z "$MODULE" ] && [ -f "$m" ]; then MODULE="$m"; fi
+done
+if [ -n "$MODULE" ] && command -v softhsm2-util > /dev/null; then
+    export LSAN_OPTIONS="suppressions=$SOURCE/tests/cli/lsan-softhsm.supp${LSAN_OPTIONS:+:$LSAN_OPTIONS}"
+    rm -rf tokens "$DIR/office"
+    mkdir tokens
+    printf 'directories.tokendir = %s/tokens\nobjectstore.backend = file\nlog.level = ERROR\n' "$DIR" > softhsm2.conf
+    export SOFTHSM2_CONF="$DIR/softhsm2.conf" KANHE_PKCS11_PIN=123456
+    softhsm2-util --init-token --free --label Kanhe --pin 123456 --so-pin 12345678 > /dev/null
+    ukey() { printf 'pkcs11:token=Kanhe;object=%s-ukey?module-path=%s' "$1" "$MODULE"; }
+    office() { run "$@" --ledger "$DIR/office"; }
+    for k in office-root office-log clerk chan lee ho reviewer; do run key generate --out "$k.key" > /dev/null; done
+    office init --org "Cirraya Office" --root-key office-root.key --log-key office-log.key | id_from > office-ledger-id
+    person() { office actor add --as office-root.key --kind person --name "$1" --key "$2.key" | id_from; }
+    CLERK="$(person "Wong Siu Ming" clerk)"
+    CHAN="$(person "Chan Tai Man" chan)"
+    LEE="$(person "Lee Ka Yan" lee)"
+    HO="$(person "Ho Wing" ho)"
+    REVIEWER="$(office actor add --as office-root.key --kind agent --name "Review Agent" --key reviewer.key \
+        --responsible "$CHAN" --model review-model-2 | id_from)"
+    for p in chan lee ho; do
+        run key generate --pkcs11 "$(ukey "$p")" --alg esp256 --out "$p-ukey.pub" > /dev/null
+        run presence enroll --pkcs11 "$(ukey "$p")" --label "$p's key" --out "$p.ukey" > /dev/null
+    done
+    office actor set-presence "$CHAN" --as office-root.key --credential chan.ukey > /dev/null
+    office actor set-presence "$LEE" --as office-root.key --credential lee.ukey > /dev/null
+    office actor set-presence "$HO" --as office-root.key --credential ho.ukey > /dev/null
+    office delegation grant --as office-root.key --to "$CLERK" --allow record-register --approvals 2 \
+        --approver "$CHAN" --approver "$LEE" --approver "$HO" > /dev/null
+    office delegation grant --as office-root.key --to "$CHAN" --allow record-endorse --approvals 2 \
+        --approver "$CHAN" --approver "$HO" --approver "$REVIEWER" --approvals-without-presence \
+        --approval-within 1d > /dev/null
+    approve() { # STATEMENT PERSON...: each approves it in person with their hardware key
+        local id="$1"; shift
+        for p in "$@"; do
+            office approval give "$id" --as "$p.key" --presence-key "$(ukey "$p")" --yes > /dev/null
+        done
+    }
+    SETTING="$(office ledger guardians set 2 --guardian "$CHAN" --guardian "$LEE" --guardian "$HO" \
+        --as office-root.key --json | field '["statement_id"]')"
+    approve "$SETTING" chan lee
+    FORM="$(office record issue --as clerk.key --type example.org.payment-form/1 --field amount=1200 \
+        --for-approval --json | field '["statement_id"]')"
+    approve "$FORM" chan lee
+    echo "$FORM" > approvals-record-id
+    ENDORSEMENT="$(office record endorse "$FORM" --as chan.key --role approver --presence-key "$(ukey chan)" \
+        --for-approval --json | field '["statement_id"]')"
+    office approval give "$ENDORSEMENT" --as reviewer.key --yes > /dev/null
+    office checkpoint create --log-key office-log.key > /dev/null
+    office export "$FORM" --log-key office-log.key --out approvals.cbor > /dev/null
+    run verify approvals.cbor --ledger-id "$(cat office-ledger-id)" --json > native-approvals-report.json
+    SETTING="$(office ledger guardians set 2 --guardian "$CHAN" --guardian "$LEE" --guardian "$HO" \
+        --guard record-revoke --as office-root.key --json | field '["statement_id"]')"
+    approve "$SETTING" chan lee
+    SETTING="$(office ledger guardians remove --as office-root.key --json | field '["statement_id"]')"
+    approve "$SETTING" chan ho
+    office checkpoint create --log-key office-log.key > /dev/null
+    office export "$FORM" --log-key office-log.key --out guardians.cbor > /dev/null
+    run verify guardians.cbor --ledger-id "$(cat office-ledger-id)" --json > native-guardians-report.json
+elif [ "${REQUIRE_BROWSER:-0}" = 1 ]; then
+    echo "SoftHSM is missing (apt install softhsm2, or brew install softhsm; or set PKCS11_MODULE)" >&2
+    exit 1
+else
+    echo "approvals and guardians: SKIPPED (no SoftHSM)"
+fi

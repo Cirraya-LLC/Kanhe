@@ -255,6 +255,47 @@ const text = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
   const bom = new Uint8Array([0xef, 0xbb, 0xbf, ...did]);
   assert.deepEqual(verifier.verifyCredential(credential, evidence, { didDocument: bom }).did_document.problems,
     ["the DID document cannot be read (JSON text that begins with a byte order mark)"]);
+
+  // Approvals and guardians (v0.20), when SoftHSM stood in for the approvers'
+  // hardware keys: the same report as `kanhe verify --json`, naming who
+  // approved each event and how, the guardians in effect, and every setting.
+  if (fs.existsSync(path.join(dir, "approvals.cbor"))) {
+    const officeLedger = text("office-ledger-id");
+    const approved = verifier.verify(read("approvals.cbor"), { ledgerId: officeLedger });
+    assert.equal(approved.verified, true, approved.error);
+    assert.match(approved.text, /needs 2 of 3 named, within 7 days by the delegation /);
+    assert.match(approved.text, /approved by "Lee Ka Yan" \[[^\]]*in person: hardware key\]/);
+    assert.match(approved.text, /approved by "Review Agent" \[AI agent; not in person\]/);
+    assert.match(approved.text, /the signer among them/);
+    assert.match(approved.text, /Guardians {4}2 of 3 must approve/);
+    delete approved.text;
+    delete approved.kind;
+    assert.deepEqual(approved, JSON.parse(text("native-approvals-report.json")));
+    const [form, endorsed] = approved.events;
+    assert.deepEqual(form.rules.map((r) => [r.source, r.k, r.approvers.length, r.within_ms, r.without_presence, r.signer_counted, r.count]),
+                     [["delegation", 2, 3, 604800000, false, false, 2]]);
+    assert.deepEqual(form.approvals.map((a) => [a.approver.name, a.presence.method, a.counted_for]).sort(),
+                     [["Chan Tai Man", "hardware-key", [0]], ["Lee Ka Yan", "hardware-key", [0]]]);
+    assert.deepEqual(endorsed.rules.map((r) => [r.within_ms, r.without_presence, r.signer_counted, r.count]),
+                     [[86400000, true, true, 2]]);
+    assert.deepEqual(endorsed.approvals.map((a) => [a.approver.name, a.approver.kind, a.presence, a.counted_for]),
+                     [["Review Agent", "agent", null, [0]]]);
+    const inEffect = approved.guardians.in_effect;
+    assert.deepEqual([inEffect.k, inEffect.within_ms, inEffect.guards], [2, 604800000, null]);
+    assert.deepEqual(inEffect.guardians.map((a) => a.name).sort(), ["Chan Tai Man", "Ho Wing", "Lee Ka Yan"]);
+    assert.deepEqual(approved.guardians.settings.map((s) => s.rules.map((r) => r.source)), [["new_guardians"]]);
+    const after = verifier.verify(read("guardians.cbor"), { ledgerId: officeLedger });
+    assert.equal(after.verified, true, after.error);
+    assert.match(after.text, /Guardians {4}none in effect/);
+    assert.match(after.text, /removed them/);
+    delete after.text;
+    delete after.kind;
+    assert.deepEqual(after, JSON.parse(text("native-guardians-report.json")));
+    assert.equal(after.guardians.in_effect, null);
+    assert.deepEqual(after.guardians.settings.map((s) => [s.removed, s.guards, s.rules.map((r) => r.source)]),
+                     [[false, null, ["new_guardians"]], [false, ["record-revoke"], ["guardians", "new_guardians"]],
+                      [true, null, ["guardians"]]]);
+  }
   console.log("wasm verifier (node): ok, version " + verifier.version);
 })().catch((e) => {
   console.error(e);

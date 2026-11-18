@@ -6,7 +6,8 @@
 // URL; opened from disk with files chosen by hand; fed a forged attachment;
 // and given a contract instance's evidence, a part's, and one whose calls
 // made requests and answered them; and in Chinese, as a certificate's QR code
-// opens it.
+// opens it; and, with SoftHSM, a record approved by several people under an
+// organization's guardians, in the three languages.
 // Usage: node page_test.js PAGE EVIDENCE_DIR KANHE
 "use strict";
 const assert = require("node:assert/strict");
@@ -24,7 +25,8 @@ const recordId = text("record-id");
 function serve() {
   const files = { "/kanhe-verify.html": pagePath, "/bundle.cbor": path.join(dir, "bundle.cbor"),
                   "/contract.cbor": path.join(dir, "contract.cbor"), "/part.cbor": path.join(dir, "part.cbor"),
-                  "/claim.cbor": path.join(dir, "claim.cbor"), "/sourced.cbor": path.join(dir, "sourced.cbor") };
+                  "/claim.cbor": path.join(dir, "claim.cbor"), "/sourced.cbor": path.join(dir, "sourced.cbor"),
+                  "/approvals.cbor": path.join(dir, "approvals.cbor"), "/guardians.cbor": path.join(dir, "guardians.cbor") };
   const server = http.createServer((req, res) => {
     const file = files[req.url];
     if (!file) { res.writeHead(404).end(); return; }
@@ -33,6 +35,13 @@ function serve() {
   });
   return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve(server)));
 }
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const permutations = (items) => items.length <= 1 ? [items]
+  : items.flatMap((x, i) => permutations(items.filter((_, j) => j !== i)).map((rest) => [x, ...rest]));
+// Names joined by `sep`, in any order: a report lists approvers by their ids.
+const anyOrder = (items, sep) => "(?:" + permutations(items).map((p) => p.map(escapeRegExp).join(escapeRegExp(sep))).join("|") + ")";
+const TIME = "\\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d UTC";
 
 async function verdict(page) {
   await page.waitForFunction(() => !document.getElementById("result").hidden);
@@ -90,6 +99,8 @@ async function verdict(page) {
     // Untrusted text is shown as text, never run.
     assert.match(body, /中文 ✓ <script>alert\(1\)<\/script>/);
     assert.equal(await page.locator("#fields script").count(), 0);
+    assert.equal(await page.locator("#events .approvals").count(), 0);
+    assert.doesNotMatch(await page.textContent("#facts"), /Guardian/);
     await page.close();
 
     // 2. A link naming another record is refused.
@@ -312,6 +323,93 @@ async function verdict(page) {
     assert.match(sourced, /\u300cCirraya Land Registry\u300d\u5e33\u672c\u4e0a\u985e\u578b\u70ba example\.org\.land-title\/1 \u7684\u8a18\u9304/);
     assert.match(sourced, /\u5176\u5f8c\u6709\u4f9d\u64da\u7684\u8a18\u9304\u88ab\u64a4\u92b7\u6216\u53d6\u4ee3/);
     await page.close();
+
+    // 11c. Approvals and guardians (v0.20), when SoftHSM stood in for the
+    // approvers' hardware keys: under each event, who approved it, how, and
+    // within what window, the signer among them when it counted; the
+    // guardians in effect, what they guard, and the setting with who approved
+    // it; in the three languages. After a change and a removal: every
+    // setting, each with its approvals, and none in effect.
+    if (fs.existsSync(path.join(dir, "approvals.cbor"))) {
+      const officeLink = (bundle) => base + "/kanhe-verify.html#l=" + text("office-ledger-id") + "&r=" +
+        text("approvals-record-id") + "&b=" + encodeURIComponent(base + "/" + bundle);
+      const guardians = ["Chan Tai Man", "Lee Ka Yan", "Ho Wing"];
+      const shown = (page) => page.evaluate(() => ({
+        events: [...document.querySelectorAll("#events .approvals")].map((n) => n.textContent),
+        facts: [...document.querySelectorAll("#facts dd")].map((n) => n.textContent),
+        labels: [...document.querySelectorAll("#facts dt")].map((n) => n.textContent) }));
+      const has = (lines, pattern) => assert.ok(lines.some((l) => pattern.test(l)), pattern + " in " + JSON.stringify(lines));
+      const exactly = (s) => new RegExp("^" + escapeRegExp(s) + "$");
+      page = await open(officeLink("approvals.cbor"));
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      let lines = await shown(page);
+      assert.equal(lines.events.length, 2, JSON.stringify(lines.events));
+      has(lines.events, new RegExp("^Approved by 2 of 3 within 7 days: " +
+        anyOrder(["Chan Tai Man (in person, hardware key)", "Lee Ka Yan (in person, hardware key)"], ", ") + "$"));
+      has(lines.events, exactly("Approved by 2 of 3 within 1 day (approvals without presence count): " +
+        "Chan Tai Man (the signer, in person, hardware key), Review Agent (AI agent, not in person)"));
+      has(lines.facts, new RegExp("^The top key is guarded by 2 of 3 guardians: " + anyOrder(guardians, ", ") +
+        ", since " + TIME + "$"));
+      has(lines.facts, exactly("Every statement the organization signs needs 2 of them, within 7 days of its issue."));
+      has(lines.facts, new RegExp("^" + TIME + " \\(entry #\\d+\\): the organization set 2 of 3 guardians \\(" +
+        anyOrder(guardians, ", ") + "\\), within 7 days, for every statement it signs$"));
+      has(lines.facts, new RegExp("^Approved by 2 of 3 new guardians within 7 days: " +
+        anyOrder(["Chan Tai Man (in person, hardware key)", "Lee Ka Yan (in person, hardware key)"], ", ") + "$"));
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a57\u8b49");
+      lines = await shown(page);
+      has(lines.events, new RegExp("^\u65bc 7 \u65e5\u5167\u7d93 3 \u4eba\u4e2d 2 \u4eba\u6279\u6838\uff1a" +
+        anyOrder(["Chan Tai Man\uff08\u89aa\u8eab\uff0c\u786c\u4ef6\u5bc6\u9470\uff09", "Lee Ka Yan\uff08\u89aa\u8eab\uff0c\u786c\u4ef6\u5bc6\u9470\uff09"], "\u3001") + "$"));
+      has(lines.events, exactly("\u65bc 1 \u65e5\u5167\u7d93 3 \u4eba\u4e2d 2 \u4eba\u6279\u6838\uff08\u975e\u89aa\u8eab\u7684\u6279\u6838\u4ea6\u8a08\u7b97\u5728\u5167\uff09\uff1a" +
+        "Chan Tai Man\uff08\u7c3d\u7f72\u4eba\uff0c\u89aa\u8eab\uff0c\u786c\u4ef6\u5bc6\u9470\uff09\u3001Review Agent\uff08AI \u4ee3\u7406\uff0c\u975e\u89aa\u8eab\uff09"));
+      has(lines.facts, new RegExp("^\u6700\u9ad8\u5bc6\u9470\u7531 3 \u4f4d\u5b88\u8b77\u4eba\u4e2d\u4efb 2 \u4f4d\u5171\u540c\u628a\u95dc\uff1a" + anyOrder(guardians, "\u3001") +
+        "\uff0c\u81ea " + TIME + " \u8d77$"));
+      has(lines.facts, exactly("\u6a5f\u69cb\u7c3d\u7f72\u7684\u6bcf\u9805\u9673\u8ff0\uff0c\u5747\u9808\u65bc\u7c3d\u767c\u5f8c 7 \u65e5\u5167\u7d93\u5176\u4e2d 2 \u4f4d\u6279\u6838\u3002"));
+      await page.selectOption("#language", "zh-Hans");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a8c\u8bc1");
+      lines = await shown(page);
+      has(lines.events, new RegExp("^\u5728 7 \u5929\u5185\u7ecf 3 \u4eba\u4e2d 2 \u4eba\u5ba1\u6279\uff1a" +
+        anyOrder(["Chan Tai Man\uff08\u672c\u4eba\uff0c\u786c\u4ef6\u5bc6\u94a5\uff09", "Lee Ka Yan\uff08\u672c\u4eba\uff0c\u786c\u4ef6\u5bc6\u94a5\uff09"], "\u3001") + "$"));
+      has(lines.events, exactly("\u5728 1 \u5929\u5185\u7ecf 3 \u4eba\u4e2d 2 \u4eba\u5ba1\u6279\uff08\u975e\u672c\u4eba\u7684\u5ba1\u6279\u4e5f\u8ba1\u7b97\u5728\u5185\uff09\uff1a" +
+        "Chan Tai Man\uff08\u7b7e\u7f72\u4eba\uff0c\u672c\u4eba\uff0c\u786c\u4ef6\u5bc6\u94a5\uff09\u3001Review Agent\uff08AI \u4ee3\u7406\uff0c\u975e\u672c\u4eba\uff09"));
+      has(lines.facts, new RegExp("^\u6700\u9ad8\u5bc6\u94a5\u7531 3 \u4f4d\u5b88\u62a4\u4eba\u4e2d\u4efb 2 \u4f4d\u5171\u540c\u628a\u5173\uff1a" + anyOrder(guardians, "\u3001") +
+        "\uff0c\u81ea " + TIME + " \u8d77$"));
+      await page.close();
+
+      page = await open(officeLink("guardians.cbor"));
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      lines = await shown(page);
+      has(lines.facts, exactly("none in effect at the checkpoint"));
+      assert.equal(lines.labels.filter((l) => l === "Guardian settings").length, 1);
+      const setting = (what) => new RegExp("^" + TIME + " \\(entry #\\d+\\): the organization set 2 of 3 guardians \\(" +
+        anyOrder(guardians, ", ") + "\\), within 7 days, for " + escapeRegExp(what) + "$");
+      has(lines.facts, setting("every statement it signs"));
+      has(lines.facts, setting("its record-revoke statements and those always guarded"));
+      has(lines.facts, new RegExp("^" + TIME + " \\(entry #\\d+\\): the organization removed its guardians$"));
+      // The change approved by both sets, each approval counting in both;
+      // the removal by the guardians in effect.
+      const approvedBy = (who, pair) => new RegExp("^Approved by 2 of 3 " + who + " within 7 days: " +
+        anyOrder(pair.map((name) => name + " (in person, hardware key)"), ", ") + "$");
+      const count = (pattern) => lines.facts.filter((l) => pattern.test(l)).length;
+      assert.equal(count(approvedBy("new guardians", ["Chan Tai Man", "Lee Ka Yan"])), 2, JSON.stringify(lines.facts));
+      assert.equal(count(approvedBy("guardians", ["Chan Tai Man", "Lee Ka Yan"])), 1, JSON.stringify(lines.facts));
+      assert.equal(count(approvedBy("guardians", ["Chan Tai Man", "Ho Wing"])), 1, JSON.stringify(lines.facts));
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a57\u8b49");
+      lines = await shown(page);
+      has(lines.facts, exactly("\u622a\u81f3\u6aa2\u67e5\u9ede\uff0c\u6c92\u6709\u5b88\u8b77\u4eba"));
+      has(lines.facts, new RegExp("^" + TIME + "\uff08\u7b2c \\d+ \u9805\uff09\uff1a\u6a5f\u69cb\u64a4\u9664\u5176\u5b88\u8b77\u4eba$"));
+      has(lines.facts, /\u9069\u7528\u65bc\u5176 record-revoke \u9673\u8ff0\u53ca\u4e00\u5f8b\u9808\u628a\u95dc\u7684\u9673\u8ff0$/);
+      await page.selectOption("#language", "zh-Hans");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a8c\u8bc1");
+      lines = await shown(page);
+      has(lines.facts, exactly("\u622a\u81f3\u68c0\u67e5\u70b9\uff0c\u6ca1\u6709\u5b88\u62a4\u4eba"));
+      has(lines.facts, new RegExp("^" + TIME + "\uff08\u7b2c \\d+ \u9879\uff09\uff1a\u673a\u6784\u79fb\u9664\u5176\u5b88\u62a4\u4eba$"));
+      has(lines.facts, /\u9002\u7528\u4e8e\u5176 record-revoke \u9648\u8ff0\u53ca\u4e00\u5f8b\u987b\u628a\u5173\u7684\u9648\u8ff0$/);
+      await page.close();
+    }
 
     // 12. A W3C credential chosen as a file (spec/credentials.md): the page
     // fetches its record's evidence, the issuer's DID document, and its status
