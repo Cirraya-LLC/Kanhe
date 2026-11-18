@@ -30,6 +30,7 @@
 #include <kanhe/crypto/pkcs11.hpp>
 #endif
 
+#include "output.hpp"
 #include "registry.hpp"
 #include "webauthn.hpp"
 
@@ -299,7 +300,59 @@ client::Location location_of(const Args& args) {
 
 } // namespace
 
-Session::Session(const Args& args) : client::Session(location_of(args)) {}
+Session::Session(const Args& args) : client::Session(location_of(args)) {
+    // Approvals (spec v0.20): a command that signs sends a statement that
+    // needs them for approval with --for-approval, and otherwise refuses it
+    // with its rules in words.
+    const bool signs = std::ranges::any_of(
+        args.spec().options, [](const OptionSpec& o) { return o.name == "for-approval"; });
+    if (!signs) {
+        return;
+    }
+    client::ApprovalMode mode;
+    mode.hint = "add --for-approval";
+    if (const auto file = args.get("for-approval")) {
+        mode.send = true;
+        if (!file->empty()) {
+            mode.file = *file;
+        }
+    } else if (args.has("show-fields") || args.has("approval-note")) {
+        throw UsageError{"--show-fields and --approval-note go with --for-approval"};
+    }
+    mode.show_fields = args.has("show-fields");
+    mode.note = args.get("approval-note");
+    if (mode.note && (mode.note->empty() || mode.note->size() > 1000)) {
+        throw UsageError{"--approval-note is 1 to 1,000 bytes"};
+    }
+    mode.preparer = "cli";
+    mode.sent = [&args, this](const client::SentForApproval& sent) {
+        print_sent_for_approval(args, *this, sent);
+        throw CommandFinished{0};
+    };
+    set_approval_mode(std::move(mode));
+}
+
+void Session::always_for_approval() {
+    client::ApprovalMode mode = approval_mode();
+    mode.send = true;
+    set_approval_mode(std::move(mode));
+}
+
+bool confirm_on_terminal(const std::string& question) {
+    const int tty = ::open("/dev/tty", O_RDWR | O_CLOEXEC);
+    if (tty < 0) {
+        throw UsageError{"no terminal to ask on: confirm with --yes"};
+    }
+    const std::string prompt = question + " [y/N] ";
+    static_cast<void>(::write(tty, prompt.data(), prompt.size()));
+    std::string line;
+    char c = 0;
+    while (::read(tty, &c, 1) == 1 && c != '\n') {
+        line.push_back(c);
+    }
+    ::close(tty);
+    return line == "y" || line == "Y" || line == "yes";
+}
 
 std::optional<protocol::Provenance> Session::provenance(const Args& args) const {
     if (!args.has("model") && !args.has("model-version") && !args.has("inputs") &&

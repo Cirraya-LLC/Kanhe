@@ -26,6 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <kanhe/client/approvals.hpp>
 #include <kanhe/client/peers.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
@@ -118,6 +119,12 @@ json error_response(const json& id, int code, const std::string& message, json d
 /// A failure inside a tool, reported to the model as a tool result.
 struct ToolError {
     std::string message;
+};
+
+/// A write held for approval instead of recorded (spec v0.20): the tool's
+/// result says so, and what it waits for.
+struct HeldForApproval {
+    json result;
 };
 
 std::string text_arg(const json& arguments, const char* name) {
@@ -285,7 +292,10 @@ public:
             "consenting with kanhe_consent_contract_call. Requests: contracts ask for work "
             "outside the ledger (kanhe_list_requests); answer one your delegations let you "
             "with kanhe_answer_request, once the work is done or has failed, and never claim "
-            "work you did not do.";
+            "work you did not do. Some of your writes may need people's approvals: they are "
+            "then held for approval, not recorded, and the result says who must approve and "
+            "by when (kanhe_list_approvals, kanhe_show_approval). You never approve anything "
+            "yourself: approving is a person's act, done in person with their own tools.";
     }
 
     int run() {
@@ -429,6 +439,10 @@ private:
             return {{"content", json::array({{{"type", "text"}, {"text", text}}})},
                     {"structuredContent", structured},
                     {"isError", false}};
+        } catch (const HeldForApproval& held) {
+            return {{"content", json::array({{{"type", "text"}, {"text", held.result.dump(2)}}})},
+                    {"structuredContent", held.result},
+                    {"isError", false}};
         } catch (const ToolError& e) {
             return tool_error(e.message);
         } catch (const UsageError& e) {
@@ -441,6 +455,28 @@ private:
     static json tool_error(const std::string& message) {
         return {{"content", json::array({{{"type", "text"}, {"text", message}}})},
                 {"isError", true}};
+    }
+
+    /// A session whose writes that need approvals (spec v0.20) are held
+    /// for approval, at the server or in the ledger directory: the tool's
+    /// result says so. An agent prepares; people approve.
+    void prepare(Session& session) const {
+        client::ApprovalMode mode;
+        mode.send = true;
+        mode.preparer = "mcp";
+        mode.sent = [&session](const client::SentForApproval& sent) {
+            json result = {{"recorded", false},
+                           {"held_for_approval", true},
+                           {"statement_id", hex_id(sent.statement)},
+                           {"rules", plain(tally_json(session, sent.tally))},
+                           {"note",
+                            "Held for approval, not recorded: it is recorded once the people its "
+                            "rules name approve it, each in person unless a rule says otherwise, "
+                            "before it lapses. You do not approve it; tell the person accountable "
+                            "for you."}};
+            throw HeldForApproval{std::move(result)};
+        };
+        session.set_approval_mode(std::move(mode));
     }
 
     /// Provenance for a write made through `tool`.
@@ -758,6 +794,7 @@ private:
             json::array({"record_type", "fields"}), writes,
             [this](const Tool& tool, const json& arguments) {
                 Session session(args_);
+                prepare(session);
                 IssueRequest request;
                 request.record_type = text_arg(arguments, "record_type");
                 request.fields = string_map(arguments, "fields");
@@ -830,6 +867,7 @@ private:
             json::array({"record", "role"}), writes,
             [this](const Tool& tool, const json& arguments) {
                 Session session(args_);
+                prepare(session);
                 const protocol::RecordEndorseBody body{
                     session.record_id(text_arg(arguments, "record")), text_arg(arguments, "role")};
                 const protocol::Id id =
@@ -846,6 +884,7 @@ private:
             json::array({"record", "to_state"}), writes,
             [this](const Tool& tool, const json& arguments) {
                 Session session(args_);
+                prepare(session);
                 const protocol::Id record = session.record_id(text_arg(arguments, "record"));
                 const std::string from = session.state().record(record)->state;
                 const protocol::RecordTransitionBody body{record, from,
@@ -963,6 +1002,7 @@ private:
              {"inputs", inputs_property}},
             json::array({"function"}), writes, [this](const Tool& tool, const json& arguments) {
                 Session session(args_);
+                prepare(session);
                 const auto contract = optional_text(arguments, "contract");
                 const auto instance = optional_text(arguments, "instance");
                 if (contract.has_value() == instance.has_value()) {
@@ -1150,6 +1190,7 @@ private:
                                     "operator starts it with --log-key (the ledger's log key)"};
                 }
                 Session session(args_);
+                prepare(session);
                 const RelayReach reach(args_, session);
                 const node::Peer home = peer_named(peers_dir(), text_arg(arguments, "home"));
                 const protocol::Id call = full_id(text_arg(arguments, "call"), "call");
@@ -1289,6 +1330,7 @@ private:
             json::array({"request", "status"}), writes,
             [this](const Tool& tool, const json& arguments) {
                 Session session(args_);
+                prepare(session);
                 const protocol::Id id = session.request_id(text_arg(arguments, "request"));
                 const auto status = parse_answer_status(text_arg(arguments, "status"));
                 if (!status) {
@@ -1325,6 +1367,44 @@ private:
                     out["note"] = "Not recorded: the request stays open.";
                 }
                 return out;
+            });
+
+        // Approvals (spec v0.20): what is held for people's approval. No
+        // tool gives one: approving is a person's act, in person.
+        add("kanhe_list_approvals",
+            "Statements held for approval: each needs the approvals of people its rules name "
+            "(k of n, each in person) before it is recorded. Shows what each does, who signed "
+            "it, its rules, who approved, what is missing, and when it lapses. You cannot "
+            "approve: people do, with their own tools.",
+            {{"approver",
+              {{"type", "string"},
+               {"description", "Only those this actor (id or unique prefix) may approve."}}},
+             {"all",
+              {{"type", "boolean"},
+               {"description", "Also those registered, lapsed, withdrawn, or dropped in the last "
+                               "30 days (default: false)."}}}},
+            json::array(), read_only, [this](const Tool&, const json& arguments) {
+                Session session(args_);
+                std::optional<protocol::Id> approver;
+                if (const auto a = optional_text(arguments, "approver")) {
+                    approver = session.actor_id(*a);
+                }
+                return client::list_held(session, approver, optional_flag(arguments, "all", false),
+                                         0);
+            });
+        add("kanhe_show_approval",
+            "One statement held for approval, checked here against the ledger: what it does, "
+            "its signer, the rules that apply, each approval and whether it counts, what is "
+            "missing, and when it lapses.",
+            {{"statement",
+              {{"type", "string"},
+               {"description", "The held statement's id, or 8 or more of its first hex digits."}}}},
+            json::array({"statement"}), read_only, [this](const Tool&, const json& arguments) {
+                Session session(args_);
+                const protocol::Id id = client::held_id(session, text_arg(arguments, "statement"));
+                const client::ApprovalReview review =
+                    client::review_approval(session, client::fetch_held(session, id), true);
+                return client::review_json(session, review);
             });
 
         add("kanhe_verify_evidence",

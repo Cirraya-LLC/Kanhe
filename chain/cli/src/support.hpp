@@ -95,7 +95,13 @@ void apply_clock_offset();
 class Session : public client::Session {
 public:
     explicit Session(const std::filesystem::path& directory) : client::Session(directory) {}
+    /// With the approval mode from --for-approval, --show-fields, and
+    /// --approval-note, for a command that takes them: what was sent is
+    /// printed, and the command ends there.
     explicit Session(const Args& args);
+    /// Sends what needs approvals for approval even without --for-approval:
+    /// for commands whose statements always need them (guardian settings).
+    void always_for_approval();
 
     using client::Session::checkpoint;
     using client::Session::contract_evidence;
@@ -134,5 +140,8 @@ private:
 /// Reads a line from the terminal without echoing it (a passphrase, a
 /// recovery code); throws if there is no terminal.
 [[nodiscard]] std::string prompt_hidden(const std::string& prompt);
+
+/// Asks a yes-or-no question on the terminal; throws if there is none.
+[[nodiscard]] bool confirm_on_terminal(const std::string& question);
 
 } // namespace kanhe::cli

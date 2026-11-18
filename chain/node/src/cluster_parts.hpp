@@ -32,8 +32,10 @@
 
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/common.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/ledger/ledger.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
 
@@ -64,12 +66,20 @@ constexpr std::uint64_t entry_batch = 1; // [1, at, size, [statement], [sidecar]
 /// without it, as with any unknown kind.
 constexpr std::uint64_t sidecar_contract_consents = 3;
 constexpr std::uint64_t snapshot_pending_call = 4;
+/// [i, approvals, 5]: the approvals a statement travels with (v0.20), an
+/// array of signed approvals encoded. Snapshots carry the statements held
+/// for approval as [name, file, 6], the name under the approvals directory.
+constexpr std::uint64_t sidecar_approvals = 5;
+constexpr std::uint64_t snapshot_held = 6;
 constexpr std::uint64_t entry_checkpoint = 2;  // [2, commitment entry / null, checkpoint]
 constexpr std::uint64_t entry_cosignature = 3; // [3, cosignature, witness public key]
 constexpr std::uint64_t entry_pending = 4;     // [4, [* [name, file / null]]]
 constexpr std::uint64_t entry_timestamp = 5;   // [5, time-stamp token, checkpoint size]
 // [6, verifier key, bytes, checkpoint size]: an open-network cosignature (v0.13)
 constexpr std::uint64_t entry_network_cosignature = 6;
+// [7, [* [name, file / null]]]: statements held for approval (v0.20), as the
+// registrar's pending calls are
+constexpr std::uint64_t entry_held = 7;
 
 /// Entries and vault files per snapshot object.
 constexpr std::uint64_t snapshot_entries = 1000;
@@ -671,7 +681,8 @@ public:
                  i < std::min(files_kept.size(), first + snapshot_vault_files); ++i) {
                 const KeptFile& kept = files_kept[i];
                 if (auto bytes = detail::read_file(path_of(kept))) {
-                    cbor::Array item{kept.kind == KeptFile::Kind::pending_call
+                    cbor::Array item{kept.kind == KeptFile::Kind::pending_call ||
+                                             kept.kind == KeptFile::Kind::held
                                          ? cbor::Value::text(kept.name)
                                          : cbor::Value::bytes(kept.id.bytes()),
                                      cbor::Value::bytes(*bytes)};
@@ -713,6 +724,7 @@ public:
             install_size_ = *(*items)[1].as_uint64();
             install_chunks_ = *(*items)[2].as_uint64();
             install_pending_.clear();
+            install_held_.clear();
             // Ask only for what this ledger lacks.
             obj_id = ledger_->size() >= install_size_ ? install_chunks_ + 1
                                                       : 1 + ledger_->size() / snapshot_entries;
@@ -749,6 +761,14 @@ public:
                         const PendingChange change{*name, bytes};
                         static_cast<void>(keep_pending(std::span(&change, 1)));
                         install_pending_.insert(*name);
+                    }
+                    continue;
+                }
+                if (kind == snapshot_held) {
+                    if (const std::string* name = (*parts)[0].as_text()) {
+                        const HeldChange change{*name, bytes};
+                        static_cast<void>(keep_held(std::span(&change, 1)));
+                        install_held_.insert(*name);
                     }
                     continue;
                 }
@@ -796,6 +816,17 @@ public:
             static_cast<void>(keep_pending(stale));
         }
         install_pending_.clear();
+        // So are its held statements (v0.20).
+        std::vector<HeldChange> gone;
+        for (const std::string& name : held_file_names(directory_)) {
+            if (!install_held_.contains(name)) {
+                gone.push_back(HeldChange{name, std::nullopt});
+            }
+        }
+        if (!gone.empty()) {
+            static_cast<void>(keep_held(gone));
+        }
+        install_held_.clear();
         {
             const std::lock_guard lock(snapshot_mutex_);
             ptr<buffer> b = s.serialize();
@@ -822,10 +853,12 @@ private:
             vault = 0,
             contract_consents = sidecar_contract_consents,
             pending_call = snapshot_pending_call,
+            held = snapshot_held,
         };
         Kind kind = Kind::vault;
         protocol::Id id;
-        /// A pending call's file name.
+        /// A pending call's file name, or a held statement's under the
+        /// approvals directory.
         std::string name;
     };
 
@@ -835,6 +868,8 @@ private:
             return contract_consents_path(directory_, kept.id);
         case KeptFile::Kind::pending_call:
             return pending_calls_directory(directory_) / kept.name;
+        case KeptFile::Kind::held:
+            return approvals_directory(directory_) / kept.name;
         case KeptFile::Kind::vault:
             break;
         }
@@ -904,6 +939,9 @@ private:
         for (const HeldCall& held : held_calls(directory_)) {
             out.push_back({KeptFile::Kind::pending_call, {}, pending_call_name(held.name)});
         }
+        for (std::string& name : held_file_names(directory_)) {
+            out.push_back({KeptFile::Kind::held, {}, std::move(name)});
+        }
         return out;
     }
 
@@ -930,6 +968,16 @@ private:
         auto s = apply_pending_changes(directory_, changes);
         if (!s && s.error().code == Errc::unavailable) {
             failed("cannot keep a registrar's pending calls");
+        }
+        return s;
+    }
+
+    /// Writes or removes statements held for approval (v0.20), as pending
+    /// calls are.
+    Status keep_held(std::span<const HeldChange> changes) {
+        auto s = apply_held_changes(directory_, changes);
+        if (!s && s.error().code == Errc::unavailable) {
+            failed("cannot keep the statements held for approval");
         }
         return s;
     }
@@ -1120,6 +1168,9 @@ private:
         } else if (type == entry_pending && items->size() == 2) {
             auto changes = decode_pending_changes((*items)[1]);
             outcome = changes ? keep_pending(*changes) : Status(std::unexpected(changes.error()));
+        } else if (type == entry_held && items->size() == 2) {
+            auto changes = decode_held_changes((*items)[1]);
+            outcome = changes ? keep_held(*changes) : Status(std::unexpected(changes.error()));
         } else {
             outcome = Status(fail(Errc::malformed, "a cluster entry is malformed"));
         }
@@ -1193,7 +1244,29 @@ private:
             }
             return results;
         }
-        results = ledger_->submit_batch(statements, at);
+        // The approvals each statement travels with (v0.20).
+        ledger::Ledger::Approvals approvals;
+        for (const cbor::Value& v : vaults) {
+            const cbor::Array* parts = v.as_array();
+            const auto kind =
+                parts != nullptr && parts->size() == 3 ? (*parts)[2].as_uint64() : std::nullopt;
+            if (!kind || *kind != sidecar_approvals || !(*parts)[0].as_uint64() ||
+                *(*parts)[0].as_uint64() >= statements.size() ||
+                (*parts)[1].as_bytes() == nullptr) {
+                continue;
+            }
+            const auto approval_list = cbor::decode(*(*parts)[1].as_bytes());
+            auto decoded = approval_list
+                               ? protocol::approval_list_from(*approval_list)
+                               : Result<std::vector<Bytes>>(std::unexpected(approval_list.error()));
+            if (!decoded) {
+                // As the leader decoded them, which it did: never here.
+                continue;
+            }
+            approvals.resize(statements.size());
+            approvals[*(*parts)[0].as_uint64()] = std::move(*decoded);
+        }
+        results = ledger_->submit_batch(statements, at, {}, std::move(approvals));
         for (const cbor::Value& v : vaults) {
             const auto sidecar = vault_sidecar(v, results.size());
             if (!sidecar || !results[sidecar->first]) {
@@ -1257,6 +1330,8 @@ private:
     std::uint64_t install_chunks_ = 0;
     /// The pending calls the snapshot being installed carries, by name.
     std::set<std::string> install_pending_;
+    /// The held statements it carries, by name (v0.20).
+    std::set<std::string> install_held_;
 };
 
 } // namespace kanhe::node::cluster_detail

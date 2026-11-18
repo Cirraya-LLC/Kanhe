@@ -10,13 +10,17 @@
 
 #include <nlohmann/json.hpp>
 
+#include <kanhe/client/approvals.hpp>
 #include <kanhe/client/session.hpp>
 #include <kanhe/client/views.hpp>
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/presence.hpp>
 #include <kanhe/node/api.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/client.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
@@ -330,7 +334,8 @@ protocol::Id Session::submit(const crypto::Signer& signer, protocol::Body body,
                              std::optional<protocol::Provenance> provenance,
                              const std::optional<PresenceRequest>& presence,
                              const SealVault& seal_vault, std::span<const Bytes> consents,
-                             const SealFiles& seal_files) {
+                             const SealFiles& seal_files,
+                             std::span<const protocol::RecordField> fields) {
     const protocol::SignedStatement signed_statement =
         sign(signer, std::move(body), delegation, std::move(provenance), presence);
     std::optional<Bytes> sealed;
@@ -341,7 +346,7 @@ protocol::Id Session::submit(const crypto::Signer& signer, protocol::Body body,
     if (seal_files) {
         files = seal_files(signed_statement.id);
     }
-    return submit_signed(signed_statement, sealed, consents, files);
+    return submit_signed(signed_statement, sealed, consents, files, fields);
 }
 
 protocol::SignedStatement Session::sign(const crypto::Signer& signer, protocol::Body body,
@@ -390,6 +395,17 @@ protocol::SignedStatement Session::sign(const crypto::Signer& signer, protocol::
     if (!remote_) {
         require_primary();
     }
+    // Approvals (v0.20): no passkey is asked for a statement that its signer
+    // alone does not get past its rules, unless it goes for approval.
+    if (presence && !approval_mode_.send) {
+        const auto rules = state().approval_rules(statement);
+        const protocol::Id me = actor.id;
+        if (!std::ranges::all_of(rules, [&](const protocol::AppliedRule& r) {
+                return r.rule.needed == 1 && std::ranges::contains(r.rule.approvers, me);
+            })) {
+            throw ActionError{needs_text(rules)};
+        }
+    }
     if (presence) {
         prove_presence(actor, statement, signer.public_key(), *presence);
     }
@@ -400,27 +416,159 @@ protocol::SignedStatement Session::sign(const crypto::Signer& signer, protocol::
 protocol::Id Session::submit_signed(const protocol::SignedStatement& signed_statement,
                                     const std::optional<Bytes>& sealed,
                                     std::span<const Bytes> consents,
-                                    std::span<const node::SealedFile> files) {
+                                    std::span<const node::SealedFile> files,
+                                    std::span<const protocol::RecordField> fields) {
+    // Approvals (v0.20): a statement whose rules its signer alone does not
+    // meet is sent for approval, or refused with its rules in words.
+    if (!state().statement_index(signed_statement.id)) {
+        const auto rules = state().approval_rules(signed_statement.statement);
+        if (!rules.empty()) {
+            const protocol::Timestamp time = clock_.now();
+            const auto tally = unwrap(
+                state().check_approvals(provider_, signed_statement, {}, time), "its approvals");
+            if (!tally.met(time)) {
+                if (!approval_mode_.send) {
+                    throw ActionError{needs_text(rules)};
+                }
+                return send_for_approval(signed_statement, sealed, consents, files, fields, tally);
+            }
+        }
+    }
+    return register_signed(signed_statement, sealed, consents, files, {});
+}
+
+bool Session::await_statement(const protocol::Id& id) {
+    if (!remote_) {
+        return state().statement_index(id).has_value();
+    }
+    return sync_until([&] { return state().statement_index(id).has_value(); });
+}
+
+std::string Session::needs_text(std::span<const protocol::AppliedRule> rules) const {
+    std::string out = "needs ";
+    for (std::size_t i = 0; i < rules.size(); ++i) {
+        const protocol::AppliedRule& r = rules[i];
+        out += (i == 0 ? "" : ", and ") + rule_text(*this, r.rule);
+        if (r.source != protocol::RuleSource::delegation || rules.size() > 1) {
+            out += " (" + rule_source_text(r) + ")";
+        }
+    }
+    if (!approval_mode_.hint.empty()) {
+        out += ": " + approval_mode_.hint;
+    }
+    return out;
+}
+
+protocol::Id Session::send_for_approval(const protocol::SignedStatement& signed_statement,
+                                        const std::optional<Bytes>& sealed,
+                                        std::span<const Bytes> consents,
+                                        std::span<const node::SealedFile> files,
+                                        std::span<const protocol::RecordField> fields,
+                                        const protocol::ApprovalTally& tally) {
+    const ApprovalMode& mode = approval_mode_;
+    protocol::SubmissionParts parts;
+    parts.vault = sealed;
+    parts.consents.assign(consents.begin(), consents.end());
+    for (const node::SealedFile& f : files) {
+        parts.files.emplace_back(f.index, f.sealed);
+    }
+    std::vector<protocol::RecordField> shown;
+    if (mode.show_fields) {
+        if (fields.empty()) {
+            throw UsageError{"only a record's registration has fields to show its approvers"};
+        }
+        shown.assign(fields.begin(), fields.end());
+    }
+    SentForApproval sent{signed_statement.id, std::nullopt, !shown.empty(), tally, nullptr};
+    if (mode.file) {
+        std::filesystem::path path = *mode.file;
+        if (std::filesystem::is_directory(path)) {
+            path /= short_id(signed_statement.id) + std::string(protocol::approval_file_extension);
+        }
+        protocol::ApprovalFile file;
+        file.statement = signed_statement;
+        if (!parts.empty()) {
+            file.parts = parts;
+        }
+        file.fields = shown;
+        file.note = mode.note;
+        // Owner-only: it may hold fields in clear.
+        write_file(path, unwrap(protocol::encode_approval_file(file), "writing the approval file"),
+                   true);
+        sent.file = path;
+    } else {
+        node::HeldStatement held;
+        held.statement = signed_statement.encoded;
+        if (!parts.empty()) {
+            held.parts = unwrap(protocol::encode_submission_parts(parts), "the submission's parts");
+        }
+        held.fields = shown;
+        held.note = mode.note;
+        if (remote_) {
+            const Bytes body =
+                unwrap(node::encode_hold_request(held), "encoding the statement to hold");
+            const auto response =
+                unwrap(remote_->client.request("POST", "/v1/approvals", body, "application/cbor"),
+                       "reaching " + remote_->url);
+            if (response.status == 200 || response.status == 201) {
+                // Its signer met its rules at the server's clock after all.
+                if (!sync_until(
+                        [&] { return state().statement_index(signed_statement.id).has_value(); })) {
+                    throw ActionError{"the server registered the statement but does not show it"};
+                }
+                return signed_statement.id;
+            }
+            if (response.status != 202) {
+                throw ActionError{"the server at " + remote_->url +
+                                  " refused to hold the statement: " + error_message(response)};
+            }
+            sent.held =
+                nlohmann::json::parse(response.body.begin(), response.body.end(), nullptr, false);
+        } else {
+            require_primary();
+            held.preparer = mode.preparer;
+            const node::ApprovalDesk desk(directory_);
+            auto progress = unwrap(desk.hold(provider_, state(), std::move(held), clock_.now()),
+                                   "holding the statement for approval");
+            if (progress.verdict == node::HeldProgress::Verdict::ready) {
+                return register_signed(signed_statement, sealed, consents, files,
+                                       progress.approvals);
+            }
+            unwrap(node::apply_held_changes(directory_, progress.changes),
+                   "keeping the statement for approval");
+            sent.held = node::held_json(provider_, state(), progress.id, progress.held);
+        }
+    }
+    if (mode.sent) {
+        mode.sent(sent);
+    }
+    throw ActionError{"sent for approval, not registered: " + hex_id(signed_statement.id)};
+}
+
+protocol::Id Session::register_signed(const protocol::SignedStatement& signed_statement,
+                                      const std::optional<Bytes>& sealed,
+                                      std::span<const Bytes> consents,
+                                      std::span<const node::SealedFile> files,
+                                      std::span<const Bytes> approvals) {
     if (remote_) {
         // Signed here; the server registers it, with its private data if
         // any, and the mirror shows it once it re-validated it.
-        if (!consents.empty()) {
-            cbor::Array list;
-            for (const Bytes& c : consents) {
-                list.push_back(cbor::Value::bytes(c));
+        if (!consents.empty() || sealed || !approvals.empty()) {
+            cbor::Map map{{cbor::Value::integer(1), cbor::Value::bytes(signed_statement.encoded)}};
+            if (!consents.empty()) {
+                cbor::Array list;
+                for (const Bytes& c : consents) {
+                    list.push_back(cbor::Value::bytes(c));
+                }
+                map.push_back({cbor::Value::integer(3), cbor::Value::array(std::move(list))});
+            } else if (sealed) {
+                map.push_back({cbor::Value::integer(2), cbor::Value::bytes(*sealed)});
+                if (!files.empty()) {
+                    map.push_back({cbor::Value::integer(4), node::encode_sealed_files(files)});
+                }
             }
-            const Bytes submission =
-                unwrap(cbor::encode(cbor::Value::map(
-                           {{cbor::Value::integer(1), cbor::Value::bytes(signed_statement.encoded)},
-                            {cbor::Value::integer(3), cbor::Value::array(std::move(list))}})),
-                       "encoding the submission");
-            static_cast<void>(
-                call("POST", "/v1/statements", submission, node::submission_content_type));
-        } else if (sealed) {
-            cbor::Map map{{cbor::Value::integer(1), cbor::Value::bytes(signed_statement.encoded)},
-                          {cbor::Value::integer(2), cbor::Value::bytes(*sealed)}};
-            if (!files.empty()) {
-                map.push_back({cbor::Value::integer(4), node::encode_sealed_files(files)});
+            if (!approvals.empty()) {
+                map.push_back({cbor::Value::integer(5), protocol::approval_list_value(approvals)});
             }
             const Bytes submission =
                 unwrap(cbor::encode(cbor::Value::map(std::move(map))), "encoding the submission");
@@ -444,7 +592,9 @@ protocol::Id Session::submit_signed(const protocol::SignedStatement& signed_stat
                "keeping the consents");
     }
     const auto registration =
-        unwrap(ledger_->submit(signed_statement.encoded), "the ledger refused the statement");
+        unwrap(approvals.empty() ? ledger_->submit(signed_statement.encoded)
+                                 : ledger_->submit(signed_statement.encoded, approvals),
+               "the ledger refused the statement");
     if (sealed) {
         std::filesystem::create_directories(vault_path(registration.statement_id).parent_path());
         write_file(vault_path(registration.statement_id), *sealed, true);
@@ -459,6 +609,24 @@ protocol::Id Session::submit_signed(const protocol::SignedStatement& signed_stat
 void Session::prove_presence(const protocol::ActorState& actor, protocol::Statement& statement,
                              const crypto::PublicKey& signing_key,
                              const PresenceRequest& request) const {
+    const auto kid =
+        unwrap(protocol::key_id(provider_, state().hash(), signing_key), "computing the key id");
+    const auto challenge =
+        unwrap(protocol::presence_challenge(provider_, state().hash(), statement, kid),
+               "computing the challenge");
+    statement.presence =
+        prove(actor, signing_key, challenge, request, "Confirm as " + actor.display_name,
+              "On the ledger of \"" + state().organization() + "\":\n" +
+                  body_summary(*this, statement.body, std::nullopt));
+    unwrap(protocol::verify_presence(provider_, state().hash(), statement, kid, actor.presence),
+           request.hardware_key ? "checking the hardware key's proof"
+                                : "checking the passkey response");
+}
+
+protocol::PresenceProof Session::prove(const protocol::ActorState& actor,
+                                       const crypto::PublicKey& signing_key, ByteView challenge,
+                                       const PresenceRequest& request, std::string title,
+                                       std::string summary) const {
     if (actor.kind != protocol::ActorKind::person) {
         throw UsageError{"only people prove presence; \"" + actor.display_name + "\" is " +
                          (actor.is_organization() ? std::string("the organization")
@@ -469,11 +637,6 @@ void Session::prove_presence(const protocol::ActorState& actor, protocol::Statem
                           "\" has no passkey registered (kanhe presence enroll, then kanhe "
                           "actor set-presence)"};
     }
-    const auto kid =
-        unwrap(protocol::key_id(provider_, state().hash(), signing_key), "computing the key id");
-    const auto challenge =
-        unwrap(protocol::presence_challenge(provider_, state().hash(), statement, kid),
-               "computing the challenge");
     if (request.hardware_key) {
         // A second key, not the signing key itself: else whoever holds the
         // signing key "proves" presence too.
@@ -490,14 +653,14 @@ void Session::prove_presence(const protocol::ActorState& actor, protocol::Statem
             throw ActionError{"this hardware key is not registered for \"" + actor.display_name +
                               "\" (kanhe presence enroll --pkcs11, then kanhe actor set-presence)"};
         }
-        statement.presence = protocol::PresenceProof{
+        protocol::PresenceProof proof{
             credential->credential_id,
             {},
             {},
             unwrap(request.hardware_key->sign(challenge), "signing on the token")};
-        unwrap(protocol::verify_presence(provider_, state().hash(), statement, kid, actor.presence),
+        unwrap(protocol::verify_presence_proof(provider_, challenge, proof, actor.presence),
                "checking the hardware key's proof");
-        return;
+        return proof;
     }
     const auto passkey = std::ranges::find(actor.presence, protocol::PresenceMethod::webauthn,
                                            &protocol::PresenceCredential::method);
@@ -506,11 +669,10 @@ void Session::prove_presence(const protocol::ActorState& actor, protocol::Statem
                           "\" has only hardware keys; prove presence with --presence-key"};
     }
     PasskeyRequest ceremony{passkey->rp_id,
-                            challenge,
+                            Bytes(challenge.begin(), challenge.end()),
                             {},
-                            "Confirm as " + actor.display_name,
-                            "On the ledger of \"" + state().organization() + "\":\n" +
-                                body_summary(*this, statement.body, std::nullopt)};
+                            std::move(title),
+                            std::move(summary)};
     for (const protocol::PresenceCredential& c : actor.presence) {
         if (c.method == protocol::PresenceMethod::webauthn && c.rp_id == ceremony.rp_id) {
             ceremony.allow.push_back(c.credential_id);
@@ -520,11 +682,12 @@ void Session::prove_presence(const protocol::ActorState& actor, protocol::Statem
         throw ActionError{"no way to ask \"" + actor.display_name + "\" for a passkey here"};
     }
     PasskeyAssertion assertion = request.passkey(ceremony);
-    statement.presence = protocol::PresenceProof{
+    protocol::PresenceProof proof{
         std::move(assertion.credential_id), std::move(assertion.authenticator_data),
         std::move(assertion.client_data_json), std::move(assertion.signature)};
-    unwrap(protocol::verify_presence(provider_, state().hash(), statement, kid, actor.presence),
+    unwrap(protocol::verify_presence_proof(provider_, challenge, proof, actor.presence),
            "checking the passkey response");
+    return proof;
 }
 
 std::uint64_t Session::entry_index(std::string_view text) const {

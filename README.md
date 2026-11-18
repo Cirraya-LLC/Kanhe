@@ -79,6 +79,12 @@ vectors (`testvectors/`), the [examples](examples/), the tests, and the tools. B
   whose delegation. A person's action carries proof of presence (a passkey, or a USB key and
   its PIN); anything without it is attributed to a machine. AI agents act through MCP with
   their own keys and delegations, their model recorded, and a person accountable for them.
+- **Approvals and guardians.** A delegation can require k of up to 16 named people to approve
+  every statement made under it, each in person and within a set time; a contract action can
+  require approvals too (`requires 2 approvals by directors in person within 7 days`). The
+  organization's own key can be guarded by k of n people, so a stolen root key alone registers
+  nothing. Each approval is the approver's own signature over the exact statement, kept in the
+  log beside it, and shown in the evidence.
 - **Requests and executors.** Contracts decide; they never act on the outside world. A call may
   ask for work outside the ledger (send a notice, call another system): a *request*, which an
   executor (a device or an AI agent with a narrow delegation) or a person answers with a signed
@@ -305,6 +311,7 @@ The `kanhe` tool controls every part of a ledger:
 | Ledger | `init`, `status`, `audit`, `log list`, `log show`, `log export`, `ledger keys`, `ledger genesis`, `ledger rotate-log-key`, `ledger rotate-root-key`, `ledger snapshot create\|show\|remove` |
 | Actors | `actor add`, `actor list`, `actor show`, `actor revoke`, `actor rotate-key`, `actor set-presence`, `presence enroll` |
 | Delegations | `delegation grant`, `delegation list`, `delegation show`, `delegation revoke` |
+| Approvals | `approval list`, `approval show`, `approval give`, `approval submit`, `approval withdraw`; `--for-approval` on every command that signs; `delegation grant --approvals`; `ledger guardians set\|show\|remove` |
 | Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record source list\|prove\|forget`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
 | Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke`, `record recompute` |
 | Claims | `claim issue`, `claim list`, `claim show`, `claim revoke` |
@@ -381,6 +388,33 @@ kanhe record endorse <record-id> --as alice.key --role approver \
 Every verification report shows, for each step a person took, whether they proved presence and
 how (a passkey or a hardware key). The browser verifier shows it too.
 
+
+## Approvals and guardians
+
+Some statements should take more than one person. A delegation can require approvals: every
+statement made under it, or under any delegation beneath it, then needs k of the named people to
+approve it, each in person (a passkey with PIN or biometric, or a hardware key), within a window
+of up to 30 days from when it was prepared. The one who prepares it counts if named.
+
+```sh
+# Purchase orders need 2 of 3 directors.
+kanhe delegation grant --to <clerk-id> --allow record-register --approvals 2 \
+    --approver <chan-id> --approver <lee-id> --approver <ho-id> --as root.key
+# The clerk prepares one; it waits at the server instead of being registered.
+kanhe record issue --type example.org.po/1 --field number=PO-2026-118 --field amount=250000 \
+    --as clerk.key --server URL --for-approval --show-fields
+# Each director checks it against the ledger and approves it on their own machine.
+kanhe approval list --mine --as chan.key --server URL
+kanhe approval give <statement-id> --as chan.key --presence --server URL
+kanhe approval give <statement-id> --as lee.key --presence-key 'pkcs11:...' --server URL   # registered
+```
+
+Without a shared server, `--for-approval FILE` writes an approval file to pass along and
+`approval submit` registers it. **Guardians** guard the organization itself: with
+`kanhe ledger guardians set 2 --guardian <chan-id> --guardian <lee-id> --guardian <ho-id>`, every
+statement the organization signs, its key rotations included, needs two of them, so a stolen
+root key alone can neither register a record as the organization nor take the ledger over. A
+change of guardians needs k of the current and k of the new ones.
 ## Keys on tokens and HSMs
 
 Wherever a command takes a key file, it also takes an RFC 7512 PKCS #11 URI, so a ledger's root

@@ -12,6 +12,8 @@ int main(int argc, char** argv) {
     using namespace kanhe::cli;
     try {
         return dispatch(argc, argv);
+    } catch (const CommandFinished& finished) {
+        return finished.code;
     } catch (const UsageError& e) {
         std::println(stderr, "usage error: {}", e.message);
         return exit_usage;

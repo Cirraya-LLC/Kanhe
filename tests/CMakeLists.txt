@@ -74,6 +74,7 @@ add_executable(kanhe_tests
     ledger/timestamp_test.cpp
     ledger/witness_test.cpp
     node/api_test.cpp
+    node/approvals_api_test.cpp
     node/record_files_test.cpp
     node/credentials_test.cpp
     node/published_test.cpp
@@ -381,6 +382,16 @@ if(TARGET kanhe_crypto_pkcs11)
         # Scripts, approved in person with a hardware key.
         add_test(NAME scripts_end_to_end
             COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/scripts.sh $<TARGET_FILE:kanhe>
+                    ${KANHE_SOFTHSM_MODULE})
+        # Approvals: k of n named people, each in person with a hardware key,
+        # through a server, the ledger directory, and approval files.
+        add_test(NAME approvals_end_to_end
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/approvals.sh $<TARGET_FILE:kanhe>
+                    ${KANHE_SOFTHSM_MODULE})
+        # Guardians: the people whose approvals the organization's own
+        # statements need.
+        add_test(NAME guardians_end_to_end
+            COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/guardians.sh $<TARGET_FILE:kanhe>
                     ${KANHE_SOFTHSM_MODULE})
         # A shipment's chain of custody (examples/), whose driver proves
         # presence with a hardware key: SoftHSM stands in for it.

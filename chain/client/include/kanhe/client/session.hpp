@@ -14,9 +14,13 @@
 #include <variant>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include <kanhe/client/support.hpp>
 #include <kanhe/core/bytes.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/log.hpp>
+#include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
@@ -86,6 +90,45 @@ struct ServerLocation {
 /// A ledger directory, or a server.
 using Location = std::variant<std::filesystem::path, ServerLocation>;
 
+/// What was sent for approval instead of registered (spec v0.20).
+struct SentForApproval {
+    protocol::Id statement;
+    /// The approval file written; none if it is held (at the server, or in
+    /// the ledger directory's held statements).
+    std::optional<std::filesystem::path> file;
+    /// A registration's fields went with it, in clear.
+    bool fields_shown = false;
+    /// The rules that apply, counted at this machine's clock: the signer, if
+    /// it counts, and no approval yet.
+    protocol::ApprovalTally tally;
+    /// Where it is held: the held statement as listed (GET /v1/approvals);
+    /// null for a file.
+    nlohmann::json held;
+};
+
+/// How a session treats a statement whose approval rules (spec v0.20) need
+/// more than its signer: refused, with the rules in words (before a
+/// passkey is asked, when one is), unless `send`; then sent for approval
+/// instead of registered: an approval file written to `file` (a directory:
+/// a file named after the statement in it), or else the statement held at
+/// the server in client mode, or in the ledger directory's held statements.
+/// A statement that needs no approvals is registered as usual.
+struct ApprovalMode {
+    bool send = false;
+    std::optional<std::filesystem::path> file;
+    /// A registration's fields go with it, for approvers to see (in clear).
+    bool show_fields = false;
+    std::optional<std::string> note;
+    /// Who prepared it, for a statement held in the ledger directory.
+    std::string preparer = "cli";
+    /// Added to a refusal, after a colon ("add --for-approval").
+    std::string hint;
+    /// Told what was sent. What follows a registration cannot follow, so the
+    /// action stops after it: by its throwing, or else the session throws an
+    /// ActionError.
+    std::function<void(const SentForApproval&)> sent;
+};
+
 /// Makes the sealed private data of the record `id` names (for record
 /// registrations, which keep it in the vault).
 using SealVault = std::function<Bytes(const protocol::Id& record)>;
@@ -133,12 +176,15 @@ public:
     /// written to the vault here, or sent with the statement in client mode.
     /// With `consents` (a contract call's, in the order it cites them), the
     /// consents' evidence is kept with it the same way.
+    /// With `fields` (a registration's, in the order of its leaves), they
+    /// go to its approvers if the approval mode shows them.
     protocol::Id submit(const crypto::Signer& signer, protocol::Body body,
                         const std::optional<std::string>& delegation,
                         std::optional<protocol::Provenance> provenance = std::nullopt,
                         const std::optional<PresenceRequest>& presence = std::nullopt,
                         const SealVault& seal_vault = {}, std::span<const Bytes> consents = {},
-                        const SealFiles& seal_files = {});
+                        const SealFiles& seal_files = {},
+                        std::span<const protocol::RecordField> fields = {});
 
     /// Builds and signs a statement as `submit` does, without registering
     /// it: to run a contract call first, or for a dry run.
@@ -148,11 +194,45 @@ public:
          std::optional<protocol::Provenance> provenance = std::nullopt,
          const std::optional<PresenceRequest>& presence = std::nullopt);
     /// Registers a statement from `sign`, with its sealed private data or
-    /// its consents' evidence, as `submit` does.
+    /// its consents' evidence, as `submit` does. One whose approval rules
+    /// need approvals is refused or sent for approval (see ApprovalMode).
     protocol::Id submit_signed(const protocol::SignedStatement& statement,
                                const std::optional<Bytes>& sealed = std::nullopt,
                                std::span<const Bytes> consents = {},
-                               std::span<const node::SealedFile> files = {});
+                               std::span<const node::SealedFile> files = {},
+                               std::span<const protocol::RecordField> fields = {});
+    /// Registers a signed statement with the approvals it travels with
+    /// (spec v0.20), in any order, and the rest of its submission: here, or
+    /// through the server. The ledger checks them.
+    protocol::Id register_signed(const protocol::SignedStatement& statement,
+                                 const std::optional<Bytes>& sealed,
+                                 std::span<const Bytes> consents,
+                                 std::span<const node::SealedFile> files,
+                                 std::span<const Bytes> approvals);
+
+    /// Approvals (spec v0.20): how statements that need them are treated.
+    void set_approval_mode(ApprovalMode mode) { approval_mode_ = std::move(mode); }
+    [[nodiscard]] const ApprovalMode& approval_mode() const noexcept { return approval_mode_; }
+    /// The approval rules of `statement`, and their count with its signer
+    /// alone, at this machine's clock; and a refusal in words for one they
+    /// leave unmet ("needs 2 of ... within 7 days").
+    [[nodiscard]] std::string needs_text(std::span<const protocol::AppliedRule> rules) const;
+
+    /// This machine's clock (with any offset applied).
+    [[nodiscard]] protocol::Timestamp now() const { return ledger::SystemClock{}.now(); }
+    /// True once the ledger shows the statement `id` registered: in client
+    /// mode, after syncing the mirror for up to ten seconds (a cluster's
+    /// follower may apply it a moment later).
+    bool await_statement(const protocol::Id& id);
+
+    /// Proves presence for `actor` (a person) over `challenge`: with the
+    /// hardware key `request` names (one of the person's credentials, not
+    /// `signing_key`), or with a passkey, through `request.passkey`, which
+    /// shows `title` and `summary`. Checked against the credentials.
+    [[nodiscard]] protocol::PresenceProof prove(const protocol::ActorState& actor,
+                                                const crypto::PublicKey& signing_key,
+                                                ByteView challenge, const PresenceRequest& request,
+                                                std::string title, std::string summary) const;
 
     /// Resolves an index or (abbreviated) statement id to a log index.
     [[nodiscard]] std::uint64_t entry_index(std::string_view text) const;
@@ -237,6 +317,16 @@ public:
 private:
     void prove_presence(const protocol::ActorState& actor, protocol::Statement& statement,
                         const crypto::PublicKey& signing_key, const PresenceRequest& request) const;
+    /// Sends for approval what `submit_signed` would register (see
+    /// ApprovalMode), and stops the action; a statement the server or the
+    /// directory registers at once (its signer met its rules after all) is
+    /// returned as registered.
+    protocol::Id send_for_approval(const protocol::SignedStatement& statement,
+                                   const std::optional<Bytes>& sealed,
+                                   std::span<const Bytes> consents,
+                                   std::span<const node::SealedFile> files,
+                                   std::span<const protocol::RecordField> fields,
+                                   const protocol::ApprovalTally& tally);
 
     [[nodiscard]] std::optional<protocol::Id> choose_delegation(const protocol::ActorState& actor,
                                                                 const protocol::Body& body) const;
@@ -268,6 +358,7 @@ private:
     ledger::SystemEntropy entropy_;
     std::optional<ledger::PosixFileSystem> fs_;
     std::optional<ledger::Ledger> ledger_;
+    ApprovalMode approval_mode_;
 };
 
 } // namespace kanhe::client

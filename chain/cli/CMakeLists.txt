@@ -54,6 +54,7 @@ kanhe_program(kanhe
     src/commands_chain.cpp
     src/cmd_access.cpp
     src/cmd_actors.cpp
+    src/cmd_approvals.cpp
     src/cmd_cluster.cpp
     src/cmd_contracts.cpp
     src/cmd_credentials.cpp

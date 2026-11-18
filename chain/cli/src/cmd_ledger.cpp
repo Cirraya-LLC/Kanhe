@@ -335,6 +335,15 @@ int cmd_log_show(const Args& args) {
                      to_base64url(s.presence->credential_id).substr(0, 16),
                      verified ? " (user verified)" : "");
     }
+    // The approvals it was registered with (v0.20).
+    for (const Bytes& encoded : entry.approvals) {
+        if (const auto a = protocol::parse_approval(encoded)) {
+            std::println("approved by:   {}, {}, at {} (as claimed)",
+                         session.actor_name(a->approval.approver),
+                         a->approval.presence ? "in person" : "not in person",
+                         format_time(a->approval.approved_at));
+        }
+    }
     std::println("body:\n{}", body_json(s.body).dump(2));
     if (args.has("raw")) {
         std::println("raw COSE_Sign1:\n{}",

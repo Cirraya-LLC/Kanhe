@@ -52,6 +52,9 @@ int cmd_cluster_status(const Args& args);
 int cmd_ledger_genesis(const Args& args);
 int cmd_ledger_rotate_log_key(const Args& args);
 int cmd_ledger_rotate_root_key(const Args& args);
+int cmd_ledger_guardians_set(const Args& args);
+int cmd_ledger_guardians_show(const Args& args);
+int cmd_ledger_guardians_remove(const Args& args);
 
 // Actors and delegations
 int cmd_actor_add(const Args& args);
@@ -64,6 +67,13 @@ int cmd_delegation_grant(const Args& args);
 int cmd_delegation_list(const Args& args);
 int cmd_delegation_show(const Args& args);
 int cmd_delegation_revoke(const Args& args);
+
+// Approvals (spec v0.20)
+int cmd_approval_list(const Args& args);
+int cmd_approval_show(const Args& args);
+int cmd_approval_give(const Args& args);
+int cmd_approval_submit(const Args& args);
+int cmd_approval_withdraw(const Args& args);
 
 // Records
 int cmd_record_issue(const Args& args);

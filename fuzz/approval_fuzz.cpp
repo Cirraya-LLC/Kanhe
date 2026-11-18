@@ -4,9 +4,11 @@
 // Approvals (spec v0.20) come from whoever submits a statement, and reach
 // every verifier inside the log entries of evidence: approval rules (scope
 // key 10), guardian settings' bodies, signed approvals and their proofs of
-// presence, and the lists of approvals a submission and a log entry carry.
-// Reading any of them must refuse what is not one, never crash, and what it
-// accepts must encode back to the same bytes.
+// presence, and the lists of approvals a submission and a log entry carry;
+// and approval files, from whoever passes one on, with the parts of a
+// submission they carry. Reading any of them must refuse what is not one,
+// never crash, and what it accepts must encode back to the same bytes (an
+// approval file: to a file read the same).
 
 #include <algorithm>
 #include <cstddef>
@@ -16,6 +18,7 @@
 #include <variant>
 
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
 #include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/statement.hpp>
@@ -113,6 +116,33 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     if (const auto entry = protocol::decode_log_entry(input)) {
         require_same(protocol::encode_log_entry(*entry), input);
         require(entry->approvals.empty() || !entry->is_state_commitment());
+    }
+
+    // A submission's parts: the same again, and at least one.
+    if (const auto parts = protocol::decode_submission_parts(input)) {
+        require(!parts->empty());
+        require_same(protocol::encode_submission_parts(*parts), input);
+    }
+
+    // An approval file: its approvals for its statement and ledger, no
+    // approver twice; written again (approvals by approver), it reads the
+    // same, and a second write is the first.
+    if (const auto file = protocol::decode_approval_file(provider, input)) {
+        require(file->approvals.size() <= protocol::max_approvals);
+        require(file->statement.statement.type() != protocol::StatementType::genesis);
+        for (const auto& a : file->approvals) {
+            require(a.approval.statement == file->statement.id);
+        }
+        require(file->fields.empty() || std::holds_alternative<protocol::RecordRegisterBody>(
+                                            file->statement.statement.body));
+        const auto written = protocol::encode_approval_file(*file);
+        require(written.has_value());
+        const auto again = protocol::decode_approval_file(provider, *written);
+        require(again.has_value() && again->statement.id == file->statement.id &&
+                again->approvals.size() == file->approvals.size() &&
+                again->fields == file->fields && again->note == file->note &&
+                again->parts == file->parts);
+        require_same(protocol::encode_approval_file(*again), *written);
     }
     return 0;
 }

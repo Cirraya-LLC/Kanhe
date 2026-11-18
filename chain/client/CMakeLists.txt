@@ -9,6 +9,7 @@
 # prints: secrets and approvals come in through callbacks.
 add_library(kanhe_client
     src/access.cpp
+    src/approvals.cpp
     src/backups.cpp
     src/claims.cpp
     src/contract_views.cpp

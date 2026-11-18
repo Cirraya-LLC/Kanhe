@@ -34,8 +34,12 @@
 ///         /v1/state/{id}, /v1/evidence/{record}, /v1/vault/public-key,
 ///         /v1/vault/records/{record}, /v1/contracts?start=&count=,
 ///         /v1/contracts/{contract}, /v1/contracts/instances/{instance},
-///         /v1/contracts/calls, /v1/contracts/calls/{call}
-/// submit: POST /v1/statements (a signed statement), POST /v1/contracts/calls (a call proposal)
+///         /v1/contracts/calls, /v1/contracts/calls/{call},
+///         /v1/approvals?approver=&state=open|all&wait= (statements held for approval, v0.20;
+///         with wait=S, a long poll of up to 25 seconds), /v1/approvals/{id} (its approval file)
+/// submit: POST /v1/statements (a signed statement, or a submission, approvals in key 5),
+///         POST /v1/contracts/calls (a call proposal), POST /v1/approvals (a statement to hold
+///         until its approvals are in), POST /v1/approvals/{id} (one approval)
 /// read or executor: GET /v1/requests?state=&kind=&contract=&instance=&after=&limit=&wait=
 ///         (requests, v0.8: a hint for executors, which check a request in the instance's
 ///         evidence before acting; with wait=S, a long poll of up to 25 seconds)
@@ -44,6 +48,7 @@
 /// executor: GET /v1/requests, GET /v1/contracts/instances/{instance}, and
 ///         POST /v1/statements for answers to requests only
 /// admin:  POST /v1/checkpoint, POST /v1/cosignatures ([cosignature, witness key]),
+///         DELETE /v1/approvals/{id} (withdraws a held statement),
 ///         POST /v1/timestamps ([time-stamp token, checkpoint size]),
 ///         POST /v1/network-cosignatures ([checkpoint size, verifier key, bytes])
 /// peer:   POST /v1/access/requests (a request's evidence), GET /v1/access/deliveries/{request},
@@ -58,7 +63,8 @@ namespace kanhe::node {
 /// The content type of a statement sent with what is kept with it: a
 /// record's registration with its sealed private data, {1: signed
 /// statement, 2: sealed vault file}; or a contract call with the consent
-/// bundles it cites, {1: signed statement, 3: [consent bundles]}.
+/// bundles it cites, {1: signed statement, 3: [consent bundles]}. Any of
+/// them, or the statement alone, may carry its approvals in key 5 (v0.20).
 inline constexpr std::string_view submission_content_type = "application/kanhe-submission+cbor";
 
 /// A ledger directory that is a replica holds this file (JSON).
@@ -200,6 +206,22 @@ public:
     /// The calls the registrar holds, as GET /v1/contracts/calls answers the
     /// home's own staff.
     [[nodiscard]] http::Response registrar_calls() const;
+    /// Statements held for approval (v0.20), for the node's own console, as
+    /// the home's own staff uses the routes: POST /v1/approvals (`body` its
+    /// CBOR), POST /v1/approvals/{id} (one approval), DELETE
+    /// /v1/approvals/{id}; each answers through `respond`.
+    void hold_for_approval(Bytes body, Respond respond);
+    void give_approval(const protocol::Id& statement, Bytes approval, Respond respond);
+    void withdraw_held(const protocol::Id& statement, Respond respond);
+    /// Keeps a decline beside a held statement, a hint for its preparer (who
+    /// and when), which goes nowhere else: the console takes it from a
+    /// person signed in to it, `approver`, whom a rule of the statement names.
+    void decline_held(const protocol::Id& statement, const protocol::Id& approver, Respond respond);
+    /// GET /v1/approvals as the home's own staff sees it: those `approver`
+    /// may approve (all, without one), and with `all` what became of others
+    /// in the last 30 days.
+    [[nodiscard]] http::Response held_for_approval(const std::optional<protocol::Id>& approver,
+                                                   bool all) const;
     /// Keeps a witness's cosignature of one of this ledger's checkpoints, as
     /// POST /v1/cosignatures does for an admin: `body` is [cosignature,
     /// witness public key]. Answers through `respond`, from the writer.

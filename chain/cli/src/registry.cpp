@@ -77,7 +77,8 @@ std::string command_help(const CommandSpec& spec) {
     for (const OptionSpec& option : spec.options) {
         std::string left = "  --" + std::string(option.name);
         if (!option.value.empty()) {
-            left += " " + std::string(option.value);
+            left += option.optional_value ? " [" + std::string(option.value) + "]"
+                                          : " " + std::string(option.value);
         }
         std::string notes;
         if (option.required) {
@@ -261,6 +262,13 @@ int dispatch(int argc, const char* const* argv) {
                 throw UsageError{"option --" + name + " takes no value"};
             }
             value = "";
+        } else if (!value && option->optional_value) {
+            // Its value only if one follows that is not an option.
+            if (i + 1 < tokens.size() && !tokens[i + 1].starts_with("-")) {
+                value = tokens[++i];
+            } else {
+                value = "";
+            }
         } else if (!value) {
             if (i + 1 >= tokens.size()) {
                 throw UsageError{"option --" + name + " needs a value (" +

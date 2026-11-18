@@ -98,6 +98,23 @@ inline const OptionSpec at_option{
     "With --dry-run: run as if the ledger registered the call at TIME (YYYY-MM-DD for its UTC "
     "midnight, or YYYY-MM-DDTHH:MM:SSZ), say to see when a time rule applies"};
 inline const OptionSpec json_option{"json", "", "Print machine-readable JSON"};
+/// Approvals (spec v0.20): what every command that signs takes, for a
+/// statement whose rules need others' approvals.
+inline const OptionSpec for_approval_option{
+    "for-approval",
+    "FILE",
+    "Send it for approval: held at the server (--server) or in the ledger directory, or "
+    "written to FILE (an approval file) when FILE follows",
+    false,
+    false,
+    true};
+inline const OptionSpec show_fields_option{
+    "show-fields", "",
+    "With --for-approval: show a record's fields to its approvers (they travel in clear)"};
+inline const OptionSpec approval_note_option{
+    "approval-note", "TEXT", "With --for-approval: a note for the approvers (1 to 1,000 bytes)"};
+inline const std::vector<OptionSpec> approval_options{for_approval_option, show_fields_option,
+                                                      approval_note_option};
 
 /// How contract commands take arguments.
 #define KANHE_ARGUMENTS_HELP                                                                       \
@@ -168,6 +185,7 @@ inline std::vector<OptionSpec> signing(std::vector<OptionSpec> extra) {
         model_version_option, inputs_option,       script_option,     passphrase_file_option,
         presence_option,      presence_key_option, no_browser_option};
     options.insert(options.end(), extra.begin(), extra.end());
+    options.insert(options.end(), approval_options.begin(), approval_options.end());
     return options;
 }
 

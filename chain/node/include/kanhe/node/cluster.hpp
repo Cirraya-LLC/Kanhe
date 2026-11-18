@@ -36,8 +36,10 @@
 /// the files kept with its statements: [i, bytes] for a vault file,
 /// [i, bytes, 3] for a contract call's consents (kind 2, the consents of
 /// the native asset actions, is reserved: spec v0.9 removed them, and a node ignores
-/// it as any unknown kind). The calls a registrar holds until their consents
-/// are in are replicated too, so a new leader carries on with them.
+/// it as any unknown kind), and [i, approvals, 5] for the approvals a
+/// statement travels with (v0.20). The calls a registrar holds until their
+/// consents are in are replicated too, so a new leader carries on with
+/// them, and so are the statements held for approval.
 namespace kanhe::node {
 
 inline constexpr std::string_view cluster_directory = "cluster";
@@ -144,9 +146,12 @@ public:
     // here. Errc::unavailable means the outcome is unknown (leadership was
     // lost on the way): a client may retry, since every write is idempotent.
 
+    /// `approvals` (one slot per statement, or empty) are the approvals each
+    /// travels with (spec v0.20), replicated with it.
     [[nodiscard]] Result<BatchResult> submit(std::span<const ByteView> statements,
                                              std::span<const std::optional<Sidecar>> sidecars,
-                                             protocol::Timestamp at);
+                                             protocol::Timestamp at,
+                                             std::span<const std::vector<Bytes>> approvals = {});
     /// Signs a checkpoint (and the state commitment before it) and
     /// replicates it; refused while an entry is still on its way.
     [[nodiscard]] Result<protocol::SignedCheckpoint> checkpoint(ledger::LogKeys log_keys);
@@ -161,6 +166,9 @@ public:
                             std::uint64_t size);
     /// Writes or removes the registrar's pending calls on every node.
     [[nodiscard]] Status change_pending(std::span<const PendingChange> changes);
+    /// Writes or removes the statements held for approval on every node
+    /// (spec v0.20; approvals.hpp names them).
+    [[nodiscard]] Status change_held(std::span<const PendingChange> changes);
     [[nodiscard]] Status add_member(const ClusterMember& member);
     [[nodiscard]] Status remove_member(int id);
     /// Hands leadership to another member.

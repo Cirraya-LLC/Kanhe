@@ -2,7 +2,10 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <cstdio>
 #include <print>
+
+#include <kanhe/client/approvals.hpp>
 
 #include "commands.hpp"
 #include "contracts.hpp"
@@ -160,6 +163,20 @@ int cmd_actor_show(const Args& args) {
         }
     }
     std::println("records:       {} issued", records);
+    // Approvals (v0.20): whose statements it approves.
+    for (const auto& [key, d] : session.state().delegations()) {
+        if (!d.revoked && d.scope.approvals &&
+            std::ranges::contains(d.scope.approvals->approvers, protocol::Id(actor.id))) {
+            std::println("approves:      statements of \"{}\" under {} and beneath it ({})",
+                         session.actor_name(d.grantee), short_id(d.id),
+                         client::rule_text(session, *d.scope.approvals));
+        }
+    }
+    if (const protocol::GuardianSetting* g = session.state().guardians();
+        g != nullptr && std::ranges::contains(g->guardians->approvers, protocol::Id(actor.id))) {
+        std::println("guardian:      yes: the organization's guarded statements need {}",
+                     client::rule_text(session, *g->guardians));
+    }
     if (!granted_to.empty()) {
         std::println("\ndelegations received:");
         for (const auto* d : granted_to) {
@@ -265,6 +282,71 @@ int cmd_delegation_grant(const Args& args) {
         throw UsageError{"--functions and --request-kinds limit contract calls: --allow "
                          "contract-call too"};
     }
+    // Scope key 10 (v0.20): k of the named approvers approve each statement
+    // under it, and under every delegation beneath it.
+    if (args.has("approvals") || args.has("approver")) {
+        protocol::ApprovalRule rule;
+        rule.needed = parse_number(args.need("approvals"), "--approvals");
+        if (rule.needed < 1 || rule.needed > protocol::max_rule_approvers) {
+            throw UsageError{"--approvals is 1 to 16"};
+        }
+        rule.without_presence = args.has("approvals-without-presence");
+        for (const std::string& name : args.all("approver")) {
+            const protocol::Id id = session.actor_id(name);
+            const protocol::ActorState& a = *session.state().actor(id);
+            if (a.is_organization()) {
+                throw UsageError{"the organization never approves: it signs"};
+            }
+            if (a.revoked) {
+                throw CommandError{"\"" + a.display_name + "\" has been revoked"};
+            }
+            if (a.kind != protocol::ActorKind::person && !rule.without_presence) {
+                throw UsageError{"\"" + a.display_name +
+                                 "\" is not a person, and only people "
+                                 "approve in person (or allow approvals without presence: "
+                                 "--approvals-without-presence)"};
+            }
+            if (a.kind == protocol::ActorKind::person && a.presence.empty() &&
+                !rule.without_presence) {
+                std::println(stderr,
+                             "note: \"{}\" has no passkey or hardware key registered yet, and "
+                             "approves in person only once one is (kanhe actor set-presence)",
+                             a.display_name);
+            }
+            if (!std::ranges::contains(rule.approvers, id)) {
+                rule.approvers.push_back(id);
+            }
+        }
+        std::ranges::sort(rule.approvers, [](const protocol::Id& a, const protocol::Id& b) {
+            return std::ranges::lexicographical_compare(a.bytes(), b.bytes());
+        });
+        if (rule.approvers.size() < rule.needed || rule.approvers.size() > 16) {
+            throw UsageError{"name at least --approvals and at most 16 approvers (--approver)"};
+        }
+        rule.within =
+            client::parse_window(args.get("approval-within").value_or("7d"), "--approval-within");
+        // Rules add up through a chain, and a statement carries at most 32
+        // approvals.
+        std::uint64_t needed = rule.needed;
+        if (const auto through = args.get("delegation")) {
+            for (const protocol::DelegationState* link =
+                     session.state().delegation(session.delegation_id(*through));
+                 link != nullptr;
+                 link = link->parent ? session.state().delegation(*link->parent) : nullptr) {
+                needed += link->scope.approvals ? link->scope.approvals->needed : 0;
+            }
+        }
+        if (needed > protocol::max_approvals) {
+            std::println(stderr,
+                         "warning: the rules of this chain need {} approvals together, and a "
+                         "statement carries at most 32: unless approvers overlap, nothing "
+                         "under it can ever be registered",
+                         needed);
+        }
+        scope.approvals = std::move(rule);
+    } else if (args.has("approval-within") || args.has("approvals-without-presence")) {
+        throw UsageError{"--approval-within and --approvals-without-presence go with --approvals"};
+    }
     const protocol::DelegationGrantBody body{session.actor_id(args.need("to")), scope};
     const protocol::Id id = session.submit(args, body);
     return report_submitted(
@@ -357,6 +439,24 @@ int cmd_delegation_show(const Args& args) {
     std::println("may delegate:  {}", d.scope.may_delegate ? "yes (only narrower)" : "no");
     std::println("presence:      {}",
                  d.scope.require_presence ? "required (passkey)" : "not required");
+    // Every rule in the chain applies to what is signed under it (v0.20).
+    if (d.scope.approvals) {
+        std::println("approvals:     {}{} (each statement under it, or beneath it)",
+                     client::rule_text(session, *d.scope.approvals),
+                     d.scope.approvals->without_presence ? "" : ", in person");
+    } else {
+        std::println("approvals:     none of its own");
+    }
+    std::size_t links = 0;
+    for (const protocol::DelegationState* link = d.parent ? session.state().delegation(*d.parent)
+                                                          : nullptr;
+         link != nullptr && links < protocol::max_delegation_depth;
+         link = link->parent ? session.state().delegation(*link->parent) : nullptr, ++links) {
+        if (link->scope.approvals) {
+            std::println("also needs:    {} (the delegation {} above it)",
+                         client::rule_text(session, *link->scope.approvals), short_id(link->id));
+        }
+    }
     std::println("granted:       entry #{}", d.granted_at_index);
     std::string chain;
     for (const protocol::Id& id : authority_chain(session, d.id)) {

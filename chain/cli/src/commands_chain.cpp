@@ -210,7 +210,9 @@ std::vector<CommandSpec> chain_commands() {
                {"as", "KEY", "The organization's current root key (file or pkcs11: URI)", true},
                {"new-key", "KEY",
                 "The new log key: its public key file, private key file, or pkcs11: URI", true},
-               passphrase_file_option}),
+               passphrase_file_option,
+               for_approval_option,
+               approval_note_option}),
          cmd_ledger_rotate_log_key,
          "The new key signs every state commitment, checkpoint, and receipt after the rotation;\n"
          "older checkpoints stay valid under the old key. A key used as a log key before cannot\n"
@@ -227,10 +229,70 @@ std::vector<CommandSpec> chain_commands() {
                {"as", "KEY", "The organization's current root key (file or pkcs11: URI)", true},
                {"new-key", "KEY",
                 "The new root key: its public key file, private key file, or pkcs11: URI", true},
-               passphrase_file_option}),
+               passphrase_file_option,
+               for_approval_option,
+               approval_note_option}),
          cmd_ledger_rotate_root_key,
          "Only the organization rotates its root key, signing with the current one. Keep the new\n"
-         "key in an HSM if you can: whoever holds the root key can rotate both keys."},
+         "key in an HSM if you can: whoever holds the root key can rotate both keys, unless\n"
+         "guardians guard them (kanhe ledger guardians set): then a rotation goes for approval\n"
+         "(--for-approval) and is registered once k guardians approve it."},
+        {{"ledger", "guardians", "set"},
+         "Name the guardians, k of whom approve the organization's own statements",
+         "Ledger",
+         "K",
+         1,
+         1,
+         with({ledger_option,
+               {"as", "KEY", "The organization's current root key (file or pkcs11: URI)", true},
+               {"guardian", "ACTOR",
+                "A guardian: a person with a passkey or hardware key registered", true, true},
+               {"within", "TIME",
+                "How long after its issue a guarded statement may be registered (default: 7d; "
+                "1m to 30d)"},
+               {"guard", "TYPE",
+                "Guard only the organization's statements of this type (default: every one)", false,
+                true},
+               {"no-spare", "", "Allow k equal to the number of guardians (not recommended)"},
+               passphrase_file_option,
+               for_approval_option,
+               approval_note_option}),
+         cmd_ledger_guardians_set,
+         "Guardians are people whose approvals the organization's own statements need: a stolen\n"
+         "root key alone then neither registers a record as the organization nor takes the\n"
+         "ledger over. With no --guard (recommended) they guard every statement the organization\n"
+         "signs; whatever --guard lists, they always guard its key rotations, guardian settings,\n"
+         "and every statement about a guardian (its key, passkeys, revocation). Day-to-day work\n"
+         "belongs to delegated actors, whose statements they do not guard.\n\n"
+         "The setting always goes for approval: held at the server (--server) or in the ledger\n"
+         "directory, or written to --for-approval FILE. It is registered once k of the new\n"
+         "guardians approve it, and, when guardians are in effect, k of the current ones too\n"
+         "(one in both sets approves once). Name at least one guardian more than k: if fewer\n"
+         "than k can ever approve again, the guarded statements can never be made again.\n\n"
+         "  kanhe ledger guardians set 2 --guardian 1c9f04b2 --guardian 7a3e55d0 \\\n"
+         "      --guardian b2c4e811 --as root.key"},
+        {{"ledger", "guardians", "show"},
+         "Show the guardians in effect, what they guard, and every setting",
+         "Ledger",
+         "",
+         0,
+         0,
+         with({ledger_option}),
+         cmd_ledger_guardians_show},
+        {{"ledger", "guardians", "remove"},
+         "Remove the guardians (approved by k of them)",
+         "Ledger",
+         "",
+         0,
+         0,
+         with({ledger_option,
+               {"as", "KEY", "The organization's current root key (file or pkcs11: URI)", true},
+               passphrase_file_option,
+               for_approval_option,
+               approval_note_option}),
+         cmd_ledger_guardians_remove,
+         "Goes for approval, as setting them does; registered once k of the guardians in effect\n"
+         "approve it. Then the organization's root key alone signs its statements again."},
 
         // ------------------------------------------------------------------
         {{"actor", "add"},
@@ -341,7 +403,16 @@ std::vector<CommandSpec> chain_commands() {
               {"functions", "NAMES",
                "Comma-separated functions its contract calls may name (default: any)"},
               {"request-kinds", "KINDS",
-               "Its contract calls may only answer requests of these kinds, comma-separated"}}),
+               "Its contract calls may only answer requests of these kinds, comma-separated"},
+              {"approvals", "K",
+               "Every statement under it, or under any delegation beneath it, needs K approvals "
+               "(1 to 16) of the --approver actors"},
+              {"approver", "ACTOR", "An approver, for --approvals", false, true},
+              {"approval-within", "TIME",
+               "Registered within this long of its issue, or never (default: 7d; 1m to 30d)"},
+              {"approvals-without-presence", "",
+               "Approvals without presence count too: an agent's, a device's, a person's key "
+               "alone"}}),
          cmd_delegation_grant,
          "Statement types: actor-register, actor-rotate-key, actor-revoke, actor-set-presence,\n"
          "delegation-grant, delegation-revoke, record-register, record-endorse,\n"
@@ -351,8 +422,15 @@ std::vector<CommandSpec> chain_commands() {
          "those functions, creations included; --request-kinds makes its contract calls\n"
          "answers to requests of those kinds, nothing else (an executor's delegation: see\n"
          "executor add). A delegation granted under it may name only some of them.\n\n"
+         "--approvals K --approver ACTOR... makes every statement under it, and under every\n"
+         "delegation beneath it, need the approvals of K of those actors, each in person\n"
+         "(a passkey with PIN or biometric, or a hardware key) unless\n"
+         "--approvals-without-presence; the grantee counts as one if named and present. Such\n"
+         "statements go for approval (--for-approval on the command that signs them).\n\n"
          "  kanhe delegation grant --to 5d0e7a21 --allow contract-call --contracts 3f2a9c1e \\\n"
-         "      --functions result --request-kinds notify --as root.key"},
+         "      --functions result --request-kinds notify --as root.key\n"
+         "  kanhe delegation grant --to 9e1d4c07 --allow record-register --approvals 2 \\\n"
+         "      --approver 1c9f04b2 --approver 7a3e55d0 --approver b2c4e811 --as root.key"},
         {{"delegation", "list"},
          "List delegations",
          "Delegations",
@@ -379,6 +457,92 @@ std::vector<CommandSpec> chain_commands() {
          1,
          signing({reason_option}),
          cmd_delegation_revoke},
+
+        // ------------------------------------------------------------------
+        {{"approval", "list"},
+         "List the statements held for approval",
+         "Approvals",
+         "",
+         0,
+         0,
+         with({ledger_option,
+               {"mine", "", "Only those you may approve (the actor of --as)"},
+               {"as", "KEY", "With --mine: your key file, its public half, or a pkcs11: URI"},
+               {"approver", "ACTOR", "Only those this actor may approve"},
+               {"all", "",
+                "Also those registered, lapsed, withdrawn, or dropped in the last 30 days"},
+               {"wait", "S",
+                "With --server: if none is listed, wait up to S seconds (at most 25) for one"},
+               passphrase_file_option}),
+         cmd_approval_list,
+         "Lists the statements held at the server (--server) or in the ledger directory until\n"
+         "their approvals are in: what each does, who signed it, the rules that apply, who\n"
+         "approved, what is missing, and when it lapses. The list is the server's word: check\n"
+         "a statement itself with approval show before approving it.\n\n"
+         "  kanhe approval list --mine --as chan.key --server https://ledger.example.org"},
+        {{"approval", "show"},
+         "Show a statement for approval, checked against the ledger",
+         "Approvals",
+         "ID|FILE",
+         1,
+         1,
+         with({ledger_option}),
+         cmd_approval_show,
+         "Shows a statement held at the server or in the ledger directory (by its id, or 8 or\n"
+         "more of its first hex digits), or carried in an approval file: what it does, its\n"
+         "signer, the rules that apply, each approval and whether it counts, what is missing,\n"
+         "and the time left; a record's fields if its preparer showed them, checked against\n"
+         "its field root. Everything is checked here against the ledger itself (its directory,\n"
+         "or a mirror this machine verified), never taken from the server or the file."},
+        {{"approval", "give"},
+         "Approve a statement, in person",
+         "Approvals",
+         "ID|FILE",
+         1,
+         1,
+         with({ledger_option,
+               as_option,
+               passphrase_file_option,
+               presence_option,
+               presence_key_option,
+               no_browser_option,
+               {"out", "FILE",
+                "Write the approval into this approval file instead: a held statement's file "
+                "with it, or a copy of FILE"},
+               {"yes", "", "Approve without asking to confirm"}}),
+         cmd_approval_give,
+         "Checks the statement against the ledger as the ledger will (a rule names you, you\n"
+         "did not sign it, it would be accepted, and it was not issued ahead of this machine's\n"
+         "clock), shows it, asks you to confirm unless --yes, and signs your approval with\n"
+         "proof of presence: --presence (a passkey with PIN or biometric) or --presence-key (a\n"
+         "hardware key). A held statement's approval goes to the server (or the ledger\n"
+         "directory), which registers the statement once every rule is met; a file's goes\n"
+         "into the file (or --out FILE), to pass on or submit.\n\n"
+         "  kanhe approval give 7c41a0e2 --as chan.key --presence --server URL\n"
+         "  kanhe approval give draft.kanheapproval --as lee.key --presence-key 'pkcs11:...'"},
+        {{"approval", "submit"},
+         "Register a statement with the approvals in approval files",
+         "Approvals",
+         "FILE...",
+         1,
+         64,
+         with({ledger_option}),
+         cmd_approval_submit,
+         "Combines the approval files of one statement (each approver's latest approval, the\n"
+         "rest of its submission), checks them against the ledger, leaves out (and names) any\n"
+         "approval that would not count, and registers the statement once every rule is met.\n"
+         "Whoever holds the statement and enough approvals may do this until its window ends."},
+        {{"approval", "withdraw"},
+         "Withdraw a statement held for approval",
+         "Approvals",
+         "ID",
+         1,
+         1,
+         with({ledger_option}),
+         cmd_approval_withdraw,
+         "With --server it needs an admin token. Copies held elsewhere (approval files, its\n"
+         "signer's) stay registrable until the window ends: a signer who must be sure rotates\n"
+         "its key."},
 
         // ------------------------------------------------------------------
         {{"record", "issue"},
@@ -2912,7 +3076,12 @@ std::vector<CommandSpec> chain_commands() {
          "  kanhe_list_requests, kanhe_get_request\n"
          "                                   requests contract calls made, and their answers\n"
          "  kanhe_answer_request          answer a request as its executor (done, failed,\n"
-         "                                   or expired), under the agent's delegation\n\n"
+         "                                   or expired), under the agent's delegation\n"
+         "  kanhe_list_approvals, kanhe_show_approval\n"
+         "                                   statements held for people's approval\n\n"
+         "A write whose approval rules need people's approvals is held for approval (at the\n"
+         "server, or in the ledger directory), not recorded, and the tool says so: the agent\n"
+         "prepares, people approve (kanhe approval give). No tool gives an approval.\n\n"
          "File paths the agent gives (attachments, evidence to verify, a consent's 'out') are\n"
          "taken from the files directory (--files, by default the current one); one outside it,\n"
          "or a link that leads out of it, is refused.\n\n"

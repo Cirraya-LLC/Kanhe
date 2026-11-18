@@ -31,7 +31,8 @@ Json spec_json(const CommandSpec& spec) {
                            {"value", o.value.empty() ? Json(nullptr) : Json(std::string(o.value))},
                            {"help", o.help},
                            {"required", o.required},
-                           {"repeatable", o.repeatable}});
+                           {"repeatable", o.repeatable},
+                           {"value_optional", o.optional_value}});
     }
     return {{"command", join(spec.path)},
             {"summary", spec.summary},

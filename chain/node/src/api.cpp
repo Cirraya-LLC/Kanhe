@@ -22,12 +22,15 @@
 
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/access.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/core/protocol/witness.hpp>
 #include <kanhe/ledger/parallel.hpp>
 #include <kanhe/ledger/verify.hpp>
 #include <kanhe/node/api.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/credentials.hpp>
@@ -228,6 +231,14 @@ enum class Endpoint {
     call_show,
     contract_consent,
     requests,
+    /// Statements held for approval (v0.20): POST and GET /v1/approvals,
+    /// and GET (the approval file), POST (an approval), and DELETE (withdraw)
+    /// /v1/approvals/ID.
+    approvals_hold,
+    approvals_list,
+    approval_file,
+    approval_give,
+    approval_withdraw,
     /// A GET no other route answers, for the extensions' reads.
     extension_read,
 };
@@ -382,6 +393,11 @@ struct LedgerApi::State {
         std::optional<Sidecar> consents = std::nullopt;
         /// The record's attached files, sealed the same way, kept with it.
         std::vector<SealedFile> files = {};
+        /// The approvals it travels with (v0.20), in any order.
+        std::vector<Bytes> approvals = {};
+        /// Told what became of it before it is answered (a statement held
+        /// for approval: then it is held no more).
+        std::function<void(const Result<ledger::Registration>&)> registered = {};
     };
     /// Runs on the writer thread holding the ledger's lock, caught up; or,
     /// if that could not be had, gets the answer to give instead.
@@ -446,6 +462,32 @@ struct LedgerApi::State {
         steady::time_point until;
     };
     std::map<std::string, Lease> leases;
+
+    /// Statements held for approval (v0.20): the desk reads the held files
+    /// and the writer writes them (through the cluster in one). Long polls of
+    /// GET /v1/approvals wait here, each until something matches, its wait
+    /// is over, or the server stops; `seen` is the held files' state it was
+    /// last checked at.
+    std::optional<ApprovalDesk> desk;
+    struct ApprovalQuery {
+        std::optional<protocol::Id> approver;
+        bool all = false;
+        std::chrono::seconds wait{0};
+    };
+    struct ApprovalWaiter {
+        ApprovalQuery query;
+        std::string principal;
+        Done done;
+        steady::time_point until;
+        std::string seen;
+    };
+    std::mutex approval_waiters_mutex;
+    std::vector<ApprovalWaiter> approval_waiters;
+    bool approval_polls_stopped = false;
+    /// tick()'s: when held statements were last swept. The writer's: the
+    /// ledger's size then (a sweep checks approvals again once it grew).
+    steady::time_point approvals_swept{};
+    std::uint64_t approvals_seen_size = 0;
 
     /// The keeper: its scans run on its own thread, a slice of runs at
     /// a time on worker threads, and each slice's calls go to the writer as
@@ -907,14 +949,19 @@ struct LedgerApi::State {
             for (const Submission& s : batch) {
                 views.emplace_back(s.statement);
             }
+            ledger::Ledger::Approvals approvals = approvals_of(batch);
             // The statements stay alive (and their answers wait) until the
             // batch is durable.
             auto held = std::make_shared<std::vector<Submission>>(std::move(batch));
             batch.clear();
             ledger->submit_batch_pipelined(
-                views, [this, held](std::vector<Result<ledger::Registration>> results) {
+                views,
+                [this, held](std::vector<Result<ledger::Registration>> results) {
                     for (std::size_t i = 0; i < held->size(); ++i) {
                         Submission& s = (*held)[i];
+                        if (s.registered) {
+                            s.registered(results[i]);
+                        }
                         auto response = registration_response(results[i]);
                         if (results[i] && s.vault) {
                             response = store_vault(results[i]->statement_id, *s.vault,
@@ -927,10 +974,23 @@ struct LedgerApi::State {
                         finish(s.done, s.principal, std::move(response));
                     }
                     check_waiters(false); // a long poll learns of new requests at once
-                });
+                },
+                std::nullopt, {}, std::move(approvals));
         }
         run_jobs(jobs);
         return true;
+    }
+
+    /// The approvals each statement of a batch travels with (v0.20), one
+    /// slot per statement; none if no statement has any.
+    static ledger::Ledger::Approvals approvals_of(const std::vector<Submission>& batch) {
+        ledger::Ledger::Approvals out;
+        if (std::ranges::any_of(batch, [](const Submission& s) { return !s.approvals.empty(); })) {
+            for (const Submission& s : batch) {
+                out.push_back(s.approvals);
+            }
+        }
+        return out;
     }
 
     /// Once the writer runs out of work: waits for the statements still
@@ -982,13 +1042,17 @@ struct LedgerApi::State {
                         sidecars.emplace_back(std::nullopt);
                     }
                 }
-                auto results = cluster->submit(views, sidecars, clock->now());
+                const ledger::Ledger::Approvals approvals = approvals_of(batch);
+                auto results = cluster->submit(views, sidecars, clock->now(), approvals);
                 for (std::size_t i = 0; i < batch.size(); ++i) {
                     http::Response response;
                     if (!results) {
                         response = error_response(results.error());
                         response.headers.emplace_back("Retry-After", "1");
                     } else {
+                        if (batch[i].registered) {
+                            batch[i].registered((*results)[i]);
+                        }
                         response = registration_response((*results)[i]);
                     }
                     finish(batch[i].done, batch[i].principal, std::move(response));
@@ -2764,23 +2828,62 @@ struct LedgerApi::State {
     /// {1: signed statement, 3: [consent bundles]}: a contract call with the
     /// evidence of the consents it cites, checked and kept before it is
     /// registered.
+    /// With any of these, or alone with the statement, 5: [approvals] (v0.20):
+    /// the approvals it travels with, in any order, which the ledger checks
+    /// and keeps in its log entry.
     void submit_with_vault(http::Request& r, std::string principal, Done& done) {
         auto value = cbor::decode(r.body);
-        if (value && value->find(3) != nullptr) {
-            submit_with_consents(*value, std::move(principal), done);
+        std::vector<Bytes> approvals;
+        if (const cbor::Value* list =
+                value && value->as_map() != nullptr ? value->find(5) : nullptr) {
+            auto decoded = protocol::approval_list_from(*list);
+            if (!decoded) {
+                finish(done, principal, error_response(decoded.error()));
+                return;
+            }
+            approvals = std::move(*decoded);
+        }
+        if (value && value->as_map() != nullptr && value->find(3) != nullptr) {
+            submit_with_consents(*value, std::move(principal), done, std::move(approvals));
             return;
         }
         const cbor::Value* statement = value ? value->find(1) : nullptr;
         const cbor::Value* sealed = value ? value->find(2) : nullptr;
         const cbor::Value* files = value ? value->find(4) : nullptr;
+        const std::size_t keys = 1U + (sealed != nullptr ? 1U : 0U) + (files != nullptr ? 1U : 0U) +
+                                 (approvals.empty() ? 0U : 1U);
+        if (statement != nullptr && statement->as_bytes() != nullptr && sealed == nullptr &&
+            files == nullptr && !approvals.empty() && value->as_map()->size() == keys) {
+            // {1: signed statement, 5: approvals}: a statement with its
+            // approvals alone. A call that cites consents still needs them.
+            auto parsed =
+                protocol::parse_statement(*provider, *statement->as_bytes(), ledger->hash());
+            if (parsed && !ledger->statement_index(parsed->id) &&
+                cites_contract_consents(parsed->statement) &&
+                !std::filesystem::exists(contract_consents_path(options.directory, parsed->id))) {
+                finish(done, principal,
+                       error_response(400, "invalid_argument",
+                                      "send a contract call with the evidence of the consents it "
+                                      "cites, in key 3"));
+                return;
+            }
+            queue_submission({*statement->as_bytes(),
+                              std::move(principal),
+                              std::move(done),
+                              std::nullopt,
+                              std::nullopt,
+                              {},
+                              std::move(approvals)});
+            return;
+        }
         if (statement == nullptr || statement->as_bytes() == nullptr || sealed == nullptr ||
-            sealed->as_bytes() == nullptr ||
-            value->as_map()->size() != (files != nullptr ? 3U : 2U) ||
+            sealed->as_bytes() == nullptr || value->as_map()->size() != keys ||
             !is_sealed_vault(*sealed->as_bytes())) {
             finish(done, principal,
                    error_response(400, "malformed",
                                   "send {1: signed statement, 2: sealed private data, "
-                                  "4: [[index, sealed file], ...] if files are kept}"));
+                                  "4: [[index, sealed file], ...] if files are kept, "
+                                  "5: [approvals] if it needs any}"));
             return;
         }
         auto parsed = protocol::parse_statement(*provider, *statement->as_bytes(), ledger->hash());
@@ -2815,18 +2918,21 @@ struct LedgerApi::State {
             kept = std::move(*decoded);
         }
         queue_submission({*statement->as_bytes(), std::move(principal), std::move(done),
-                          *sealed->as_bytes(), std::nullopt, std::move(kept)});
+                          *sealed->as_bytes(), std::nullopt, std::move(kept),
+                          std::move(approvals)});
     }
 
-    void submit_with_consents(const cbor::Value& value, std::string principal, Done& done) {
+    void submit_with_consents(const cbor::Value& value, std::string principal, Done& done,
+                              std::vector<Bytes> approvals) {
         const cbor::Value* statement = value.find(1);
         const cbor::Value* list = value.find(3);
         const cbor::Array* items = list != nullptr ? list->as_array() : nullptr;
         if (statement == nullptr || statement->as_bytes() == nullptr || items == nullptr ||
-            value.as_map()->size() != 2) {
+            value.as_map()->size() != (approvals.empty() ? 2U : 3U)) {
             finish(done, principal,
                    error_response(400, "malformed",
-                                  "send {1: signed statement, 3: [consent bundles]}"));
+                                  "send {1: signed statement, 3: [consent bundles], 5: "
+                                  "[approvals] if it needs any}"));
             return;
         }
         auto parsed = protocol::parse_statement(*provider, *statement->as_bytes(), ledger->hash());
@@ -2864,8 +2970,472 @@ struct LedgerApi::State {
             return;
         }
         const Sidecar sidecar{Sidecar::Kind::contract_consents, std::move(*encoded)};
-        queue_submission(
-            {*statement->as_bytes(), std::move(principal), std::move(done), std::nullopt, sidecar});
+        queue_submission({*statement->as_bytes(),
+                          std::move(principal),
+                          std::move(done),
+                          std::nullopt,
+                          sidecar,
+                          {},
+                          std::move(approvals)});
+    }
+
+    // ---- statements held for approval (v0.20) --------------------------
+
+    /// Writes or removes held statements: through the cluster (on every
+    /// node, at once), or here.
+    Status keep_held(std::span<const HeldChange> changes) {
+        if (changes.empty()) {
+            return {};
+        }
+        if (cluster) {
+            return cluster->change_held(changes);
+        }
+        return apply_held_changes(options.directory, changes);
+    }
+
+    /// A held statement as GET /v1/approvals lists it, and as POST answers
+    /// 202 with it: its rules, what is missing, and when it lapses.
+    json waiting_json(const HeldProgress& progress) const {
+        json body;
+        ledger->read_state([&](const protocol::LedgerState& s) {
+            body = held_json(*provider, s, progress.id, progress.held);
+        });
+        body["status"] = "waiting";
+        return body;
+    }
+
+    /// What a held statement's parts hold, checked as POST /v1/statements
+    /// checks a submission's: the shape of sealed data and files, and the
+    /// consents a call cites, each against its bundle. A call that cites
+    /// consents comes with them.
+    std::optional<http::Response> check_parts(const HeldStatement& held) const {
+        auto parsed = protocol::parse_statement(*provider, held.statement, ledger->hash());
+        if (!parsed) {
+            return error_response(parsed.error());
+        }
+        if (!held.parts) {
+            if (cites_contract_consents(parsed->statement)) {
+                return error_response(400, "invalid_argument",
+                                      "send a contract call with the evidence of the consents it "
+                                      "cites, in its submission's parts");
+            }
+            return std::nullopt;
+        }
+        auto parts = protocol::decode_submission_parts(*held.parts);
+        if (!parts) {
+            return error_response(parts.error());
+        }
+        if (auto s = protocol::check_submission_parts(parsed->statement, *parts); !s) {
+            return error_response(s.error());
+        }
+        if (parts->vault && !is_sealed_vault(*parts->vault)) {
+            return error_response(400, "malformed", "the private data is not sealed");
+        }
+        if (!parts->files.empty()) {
+            if (cluster) {
+                return error_response(501, "unsupported",
+                                      "a cluster does not keep files yet: send the record "
+                                      "without them");
+            }
+            const auto& body = std::get<protocol::RecordRegisterBody>(parsed->statement.body);
+            for (const auto& [index, sealed] : parts->files) {
+                if (auto s = check_sealed_file(body, SealedFile{index, sealed}); !s) {
+                    return error_response(s.error());
+                }
+            }
+        }
+        if (!parts->consents.empty()) {
+            const auto& call = std::get<protocol::ContractCallBody>(parsed->statement.body);
+            if (auto s = check_call_consents(*provider, ledger->id(), ledger->hash(), call,
+                                             parts->consents, clock->now());
+                !s) {
+                return error_response(s.error());
+            }
+        }
+        return std::nullopt;
+    }
+
+    /// POST /v1/approvals: a statement held until its approvals are in.
+    void hold_request(const http::Request& r, std::string principal, Done& done) {
+        if (r.body.size() > max_held_statement) {
+            finish(done, principal,
+                   error_response(413, "limit_exceeded",
+                                  "a statement held for approval is at most 1 MiB, with what "
+                                  "comes with it"));
+            return;
+        }
+        auto candidate = decode_hold_request(r.body);
+        if (!candidate) {
+            finish(done, principal, error_response(candidate.error()));
+            return;
+        }
+        if (auto bad = check_parts(*candidate)) {
+            finish(done, principal, std::move(*bad));
+            return;
+        }
+        candidate->preparer = principal;
+        queue_locked([this, candidate = std::move(*candidate), principal = std::move(principal),
+                      done = std::move(done)](const http::Response* refusal) mutable {
+            if (refusal != nullptr) {
+                finish(done, principal, *refusal);
+                return;
+            }
+            take_hold(std::move(candidate), std::move(principal), std::move(done));
+        });
+    }
+
+    /// On the writer: holds the statement, or registers it at once if it
+    /// needs no approvals.
+    void take_hold(HeldStatement candidate, std::string principal, Done done) {
+        const protocol::Timestamp now = clock->now();
+        Result<HeldProgress> progress = fail(Errc::unavailable, "no state");
+        ledger->read_state([&](const protocol::LedgerState& s) {
+            progress = desk->hold(*provider, s, std::move(candidate), now);
+        });
+        if (!progress) {
+            ++refused;
+            finish(done, principal, error_response(progress.error()));
+            return;
+        }
+        if (auto s = keep_held(progress->changes); !s) {
+            finish(done, principal, error_response(s.error()));
+            return;
+        }
+        if (progress->verdict == HeldProgress::Verdict::ready) {
+            register_held(*progress, std::move(principal), std::move(done));
+            return;
+        }
+        event("approval-held", hex(progress->id));
+        finish(done, principal, json_response(202, waiting_json(*progress)));
+    }
+
+    /// Registers a statement whose rules are met, with its approvals and the
+    /// rest of its submission, as POST /v1/statements would: answered with
+    /// the registration (201 and its log index). Once registered it is held
+    /// no more.
+    void register_held(const HeldProgress& progress, std::string principal, Done done) {
+        Submission submission{progress.held.statement, std::move(principal), std::move(done)};
+        submission.approvals = progress.approvals;
+        if (progress.held.parts) {
+            auto parts = protocol::decode_submission_parts(*progress.held.parts);
+            if (!parts) {
+                finish(submission.done, submission.principal, error_response(parts.error()));
+                return;
+            }
+            submission.vault = parts->vault;
+            for (auto& [index, sealed] : parts->files) {
+                submission.files.push_back({index, std::move(sealed)});
+            }
+            if (!parts->consents.empty()) {
+                auto encoded = encode_consent_bundles(parts->consents);
+                if (!encoded) {
+                    finish(submission.done, submission.principal, error_response(encoded.error()));
+                    return;
+                }
+                // Kept first: a registered call always has its consents here.
+                if (auto s = store_consents_file(
+                        contract_consents_path(options.directory, progress.id), *encoded);
+                    !s) {
+                    finish(submission.done, submission.principal, error_response(s.error()));
+                    return;
+                }
+                submission.consents =
+                    Sidecar{Sidecar::Kind::contract_consents, std::move(*encoded)};
+            }
+        }
+        submission.registered =
+            [this, id = progress.id](const Result<ledger::Registration>& registration) {
+                if (!registration) {
+                    return;
+                }
+                const std::uint64_t index = registration->index;
+                queue_locked([this, id, index](const http::Response* refusal) {
+                    if (refusal != nullptr) {
+                        return;
+                    }
+                    if (auto s = keep_held(desk->registered(id, index, clock->now())); !s) {
+                        event("approvals-failed", s.error().detail);
+                    }
+                });
+            };
+        queue_submission(std::move(submission));
+    }
+
+    /// POST /v1/approvals/ID: one approval of a held statement.
+    void give_request(const http::Request& r, std::string_view rest, std::string principal,
+                      Done& done) {
+        const auto id = id_from(rest);
+        if (!id) {
+            finish(done, principal,
+                   error_response(400, "invalid_argument", "a statement id is 64 hex digits"));
+            return;
+        }
+        if (r.body.empty() || r.body.size() > protocol::max_approval_size) {
+            finish(done, principal,
+                   error_response(413, "limit_exceeded",
+                                  "send one approval (COSE_Sign1), at most 24,576 bytes"));
+            return;
+        }
+        queue_locked([this, id = *id, approval = r.body, principal = std::move(principal),
+                      done = std::move(done)](const http::Response* refusal) mutable {
+            if (refusal != nullptr) {
+                finish(done, principal, *refusal);
+                return;
+            }
+            take_approval(id, approval, std::move(principal), std::move(done));
+        });
+    }
+
+    /// On the writer: keeps the approval, and once every rule is met,
+    /// registers the statement with every approval kept.
+    void take_approval(const protocol::Id& id, const Bytes& approval, std::string principal,
+                       Done done) {
+        const protocol::Timestamp now = clock->now();
+        Result<HeldProgress> progress = fail(Errc::unavailable, "no state");
+        ledger->read_state([&](const protocol::LedgerState& s) {
+            progress = desk->approve(*provider, s, id, approval, now);
+        });
+        if (!progress) {
+            finish(done, principal, error_response(progress.error()));
+            return;
+        }
+        if (auto s = keep_held(progress->changes); !s) {
+            finish(done, principal, error_response(s.error()));
+            return;
+        }
+        event("approval-given", hex(id));
+        if (progress->verdict == HeldProgress::Verdict::ready) {
+            register_held(*progress, std::move(principal), std::move(done));
+            return;
+        }
+        finish(done, principal, json_response(202, waiting_json(*progress)));
+    }
+
+    /// DELETE /v1/approvals/ID: withdraws a held statement. Copies held
+    /// elsewhere stay registrable until their window ends.
+    void withdraw_request(std::string_view rest, std::string principal, Done& done) {
+        const auto id = id_from(rest);
+        if (!id) {
+            finish(done, principal,
+                   error_response(400, "invalid_argument", "a statement id is 64 hex digits"));
+            return;
+        }
+        queue_locked([this, id = *id, principal = std::move(principal),
+                      done = std::move(done)](const http::Response* refusal) mutable {
+            if (refusal != nullptr) {
+                finish(done, principal, *refusal);
+                return;
+            }
+            auto changes = desk->withdraw(id, clock->now());
+            if (!changes) {
+                finish(done, principal, error_response(changes.error()));
+                return;
+            }
+            if (auto s = keep_held(*changes); !s) {
+                finish(done, principal, error_response(s.error()));
+                return;
+            }
+            event("approval-withdrawn", hex(id));
+            http::Response gone;
+            gone.status = 204;
+            finish(done, principal, std::move(gone));
+        });
+    }
+
+    /// A decline, from the node's own console: a hint for the preparer.
+    void decline_request(const protocol::Id& id, const protocol::Id& approver, Done done) {
+        queue_locked(
+            [this, id, approver, done = std::move(done)](const http::Response* refusal) mutable {
+                if (refusal != nullptr) {
+                    finish(done, "console", *refusal);
+                    return;
+                }
+                Result<std::vector<HeldChange>> changes = fail(Errc::unavailable, "no state");
+                ledger->read_state([&](const protocol::LedgerState& s) {
+                    changes = desk->decline(*provider, s, id, approver, clock->now());
+                });
+                if (!changes) {
+                    finish(done, "console", error_response(changes.error()));
+                    return;
+                }
+                if (auto s = keep_held(*changes); !s) {
+                    finish(done, "console", error_response(s.error()));
+                    return;
+                }
+                finish(done, "console", json_response(200, {{"declined", true}}));
+            });
+    }
+
+    /// GET /v1/approvals/ID: the approval file of a held statement.
+    http::Response approval_file_of(std::string_view rest) const {
+        const auto id = id_from(rest);
+        if (!id) {
+            return error_response(400, "invalid_argument", "a statement id is 64 hex digits");
+        }
+        const auto held = held_statement(options.directory, *id);
+        if (!held) {
+            return error_response(404, "not_found",
+                                  "no statement is held for approval with this id");
+        }
+        auto file = held_approval_file(*provider, ledger->hash(), *held);
+        if (!file) {
+            return error_response(file.error());
+        }
+        return binary("application/cbor", std::move(*file));
+    }
+
+    static std::variant<ApprovalQuery, std::string> parse_approval_query(const http::Request& r) {
+        ApprovalQuery q;
+        for (const auto& [name, value] : r.query) {
+            if (name == "approver") {
+                q.approver = id_from(value);
+                if (!q.approver) {
+                    return std::string("approver is an actor's id, 64 hex digits");
+                }
+            } else if (name == "state") {
+                if (value != "open" && value != "all") {
+                    return std::string("state is open or all");
+                }
+                q.all = value == "all";
+            } else if (name == "wait") {
+                std::uint64_t seconds = 0;
+                const auto [end, ec] =
+                    std::from_chars(value.data(), value.data() + value.size(), seconds);
+                if (ec != std::errc{} || end != value.data() + value.size() || seconds > 25) {
+                    return std::string("wait is 0 to 25 seconds");
+                }
+                q.wait = std::chrono::seconds(seconds);
+            } else {
+                return "unknown parameter " + name;
+            }
+        }
+        return q;
+    }
+
+    /// The held statements a query selects, and with state=all what became
+    /// of others in the last 30 days.
+    json approvals_body(const ApprovalQuery& q) const {
+        json body;
+        ledger->read_state([&](const protocol::LedgerState& s) {
+            body = held_list_json(*provider, s, options.directory, q.approver, q.all, clock->now());
+        });
+        return body;
+    }
+
+    /// The held files' names, sizes, and times: what a long poll compares.
+    std::string held_fingerprint() const {
+        std::string out;
+        for (const std::string& name : held_file_names(options.directory)) {
+            std::error_code ec;
+            const auto path = approvals_directory(options.directory) / name;
+            const auto size = std::filesystem::file_size(path, ec);
+            const auto time = std::filesystem::last_write_time(path, ec);
+            const auto ns =
+                std::chrono::duration_cast<std::chrono::nanoseconds>(time.time_since_epoch());
+            out += name + ":" + std::to_string(size) + ":" + std::to_string(ns.count()) + ";";
+        }
+        return out;
+    }
+
+    /// GET /v1/approvals: the held statements that match at once, or, with a
+    /// wait, once some do (a long poll, as for requests).
+    void approvals_request(const http::Request& r, std::string principal, Done done) {
+        auto parsed = parse_approval_query(r);
+        if (const auto* refusal = std::get_if<std::string>(&parsed)) {
+            finish(done, principal, error_response(400, "invalid_argument", *refusal));
+            return;
+        }
+        auto start = [this, q = std::get<ApprovalQuery>(std::move(parsed)),
+                      principal = std::move(principal), done = std::move(done)]() mutable {
+            if (failed) {
+                finish(done, principal, error_response(503, "unavailable", unusable_message()));
+                return;
+            }
+            json body = approvals_body(q);
+            const std::lock_guard lock(approval_waiters_mutex);
+            if (!body["approvals"].empty() || q.wait.count() == 0 || approval_polls_stopped ||
+                approval_waiters.size() >= max_waiters) {
+                finish(done, principal, json_response(200, body));
+                return;
+            }
+            const auto until = steady::now() + q.wait;
+            approval_waiters.push_back(
+                {std::move(q), std::move(principal), std::move(done), until, held_fingerprint()});
+        };
+        if (ledger->outdated()) {
+            queue_read(std::move(start));
+            return;
+        }
+        start();
+    }
+
+    /// Answers the long polls that something now matches, or whose wait is
+    /// over (all of them if `everyone`). A poll is looked at again only once
+    /// the held files changed since it last was.
+    void check_approval_waiters(bool everyone) {
+        const std::lock_guard lock(approval_waiters_mutex);
+        if (approval_waiters.empty()) {
+            return;
+        }
+        const auto now = steady::now();
+        const std::string fingerprint = held_fingerprint();
+        for (auto it = approval_waiters.begin(); it != approval_waiters.end();) {
+            const bool over = everyone || failed || now >= it->until;
+            if (!over && fingerprint == it->seen) {
+                ++it;
+                continue;
+            }
+            json body = failed ? json() : approvals_body(it->query);
+            if (failed || over || !body["approvals"].empty()) {
+                finish(it->done, it->principal,
+                       failed ? error_response(503, "unavailable", unusable_message())
+                              : json_response(200, body));
+                it = approval_waiters.erase(it);
+            } else {
+                it->seen = fingerprint;
+                ++it;
+            }
+        }
+    }
+
+    /// From tick(): every two seconds while anything is held or remembered,
+    /// the writer sweeps the held statements (on a cluster's leader only).
+    void sweep_approvals() {
+        if (replica || options.read_only || failed || (cluster && !cluster->leads())) {
+            return;
+        }
+        const auto now = steady::now();
+        if (now - approvals_swept < std::chrono::seconds(2)) {
+            return;
+        }
+        approvals_swept = now;
+        if (held_file_names(options.directory).empty()) {
+            return;
+        }
+        queue_locked([this](const http::Response* refusal) {
+            if (refusal != nullptr) {
+                return;
+            }
+            const std::uint64_t size = ledger->size();
+            const bool recheck = size != approvals_seen_size;
+            approvals_seen_size = size;
+            std::vector<HeldChange> changes;
+            ledger->read_state([&](const protocol::LedgerState& s) {
+                changes = desk->sweep(*provider, s, clock->now(), recheck);
+            });
+            if (auto s = keep_held(changes); !s) {
+                event("approvals-failed", s.error().detail);
+            }
+        });
+    }
+
+    /// The server stops: every long poll of GET /v1/approvals is answered.
+    void stop_approval_polls() {
+        {
+            const std::lock_guard lock(approval_waiters_mutex);
+            approval_polls_stopped = true;
+        }
+        check_approval_waiters(true);
     }
 
     // ---- the registrar ------------------------------------------
@@ -4033,6 +4603,22 @@ struct LedgerApi::State {
                 return method_not_allowed("GET");
             }
             found = Routed{Endpoint::requests, Access::read_or_executor};
+        } else if (path == "/v1/approvals") {
+            if (!get && !post) {
+                return method_not_allowed("GET, POST");
+            }
+            found = post ? Routed{Endpoint::approvals_hold, Access::submit}
+                         : Routed{Endpoint::approvals_list, Access::read};
+        } else if (match("/v1/approvals/")) {
+            if (get) {
+                found = Routed{Endpoint::approval_file, Access::read, rest};
+            } else if (post) {
+                found = Routed{Endpoint::approval_give, Access::submit, rest};
+            } else if (r.method == "DELETE") {
+                found = Routed{Endpoint::approval_withdraw, Access::admin, rest};
+            } else {
+                return method_not_allowed("GET, POST, DELETE");
+            }
         } else if (path == "/v1/contracts") {
             if (!get) {
                 return method_not_allowed("GET");
@@ -4183,7 +4769,8 @@ struct LedgerApi::State {
         }
         if (!get && !post && found->endpoint != Endpoint::vault_file_put &&
             found->endpoint != Endpoint::vault_file_delete &&
-            found->endpoint != Endpoint::unpublish) {
+            found->endpoint != Endpoint::unpublish &&
+            found->endpoint != Endpoint::approval_withdraw) {
             const bool posts = found->endpoint == Endpoint::make_checkpoint ||
                                found->endpoint == Endpoint::add_cosignature ||
                                found->endpoint == Endpoint::add_timestamp ||
@@ -4282,6 +4869,8 @@ struct LedgerApi::State {
             return pending_list(principal, scopes);
         case Endpoint::call_show:
             return pending_show(rest, principal, scopes);
+        case Endpoint::approval_file:
+            return approval_file_of(rest);
         case Endpoint::extension_read:
             for (const ApiOptions::Extension& extension : options.extensions) {
                 if (extension.read) {
@@ -4292,6 +4881,10 @@ struct LedgerApi::State {
             }
             return error_response(404, "not_found", "no such route");
         case Endpoint::requests:
+        case Endpoint::approvals_hold:
+        case Endpoint::approvals_list:
+        case Endpoint::approval_give:
+        case Endpoint::approval_withdraw:
         case Endpoint::call_propose:
         case Endpoint::contract_consent:
         case Endpoint::make_checkpoint:
@@ -4356,6 +4949,53 @@ struct LedgerApi::State {
             return;
         }
         submit(r, "console", static_cast<Scopes>(Scope::submit), done);
+    }
+
+    /// An approval route (v0.20) from the node's own console: as from the
+    /// home's own staff (submit and admin), where the API takes writes.
+    void console_write(http::Request r, Done done) {
+        if (failed) {
+            finish(done, "console", error_response(503, "unavailable", unusable_message()));
+            return;
+        }
+        if (options.read_only || replica) {
+            finish(done, "console",
+                   error_response(403, "read_only",
+                                  replica ? "this ledger is a replica; write to its primary"
+                                          : "this server is read-only"));
+            return;
+        }
+        if (cluster && !cluster->leads()) {
+            finish(done, "console", not_leader(r.target));
+            return;
+        }
+        constexpr std::string_view prefix = "/v1/approvals/";
+        if (r.path == "/v1/approvals") {
+            hold_request(r, "console", done);
+        } else if (r.method == "POST") {
+            give_request(r, std::string_view(r.path).substr(prefix.size()), "console", done);
+        } else {
+            withdraw_request(std::string_view(r.path).substr(prefix.size()), "console", done);
+        }
+    }
+
+    void console_decline(const protocol::Id& id, const protocol::Id& approver, Done done) {
+        if (failed || options.read_only || replica || (cluster && !cluster->leads())) {
+            finish(done, "console",
+                   error_response(503, "unavailable", "this server takes no declines now"));
+            return;
+        }
+        decline_request(id, approver, std::move(done));
+    }
+
+    http::Response console_held(const std::optional<protocol::Id>& approver, bool all) const {
+        if (failed) {
+            return error_response(503, "unavailable", unusable_message());
+        }
+        ApprovalQuery q;
+        q.approver = approver;
+        q.all = all;
+        return json_response(200, approvals_body(q));
     }
 
     void serve(http::Request r, Done done, std::string_view address = {}) {
@@ -4438,13 +5078,16 @@ struct LedgerApi::State {
         const bool cluster_write = routed.endpoint == Endpoint::cluster_add ||
                                    routed.endpoint == Endpoint::cluster_remove ||
                                    routed.endpoint == Endpoint::cluster_step_down;
-        const bool writes = routed.endpoint == Endpoint::submit ||
-                            routed.endpoint == Endpoint::make_checkpoint ||
-                            routed.endpoint == Endpoint::add_cosignature ||
-                            routed.endpoint == Endpoint::add_timestamp ||
-                            routed.endpoint == Endpoint::add_network_cosignature ||
-                            routed.endpoint == Endpoint::call_propose ||
-                            routed.endpoint == Endpoint::contract_consent || cluster_write;
+        const bool approval_write = routed.endpoint == Endpoint::approvals_hold ||
+                                    routed.endpoint == Endpoint::approval_give ||
+                                    routed.endpoint == Endpoint::approval_withdraw;
+        const bool writes =
+            routed.endpoint == Endpoint::submit || routed.endpoint == Endpoint::make_checkpoint ||
+            routed.endpoint == Endpoint::add_cosignature ||
+            routed.endpoint == Endpoint::add_timestamp ||
+            routed.endpoint == Endpoint::add_network_cosignature ||
+            routed.endpoint == Endpoint::call_propose ||
+            routed.endpoint == Endpoint::contract_consent || cluster_write || approval_write;
         if (writes && cluster_write && !cluster) {
             finish(done, principal,
                    error_response(404, "not_found", "this node is not in a cluster"));
@@ -4482,12 +5125,24 @@ struct LedgerApi::State {
             requests_request(r, std::move(principal), std::move(done));
             return;
         }
+        if (routed.endpoint == Endpoint::approvals_list) {
+            approvals_request(r, std::move(principal), std::move(done));
+            return;
+        }
         if (writes) {
             if (options.read_only || replica) {
                 finish(done, principal,
                        error_response(403, "read_only",
                                       replica ? "this ledger is a replica; write to its primary"
                                               : "this server is read-only"));
+            } else if (routed.endpoint == Endpoint::approvals_hold) {
+                hold_request(r, std::move(principal), done);
+            } else if (routed.endpoint == Endpoint::approval_give) {
+                give_request(r, std::string_view(r.path).substr(routed.rest), std::move(principal),
+                             done);
+            } else if (routed.endpoint == Endpoint::approval_withdraw) {
+                withdraw_request(std::string_view(r.path).substr(routed.rest), std::move(principal),
+                                 done);
             } else if (routed.endpoint == Endpoint::submit) {
                 submit(r, std::move(principal), scopes, done);
             } else if (routed.endpoint == Endpoint::make_checkpoint) {
@@ -4586,6 +5241,7 @@ Result<std::unique_ptr<LedgerApi>> LedgerApi::open(ApiOptions options,
     if (state->options.registrar) {
         state->calls.emplace(state->options.directory, *state->options.registrar);
     }
+    state->desk.emplace(state->options.directory);
     for (const auto& key : state->options.log_keys) {
         state->log_key_ring.push_back(key.get());
     }
@@ -4661,6 +5317,52 @@ void LedgerApi::instance_evidence(const protocol::Id& instance,
     state_->instance_evidence(instance, std::move(done));
 }
 
+namespace {
+
+/// A request as the node's own console makes it.
+http::Request console_request(std::string method, std::string path, Bytes body,
+                              std::string_view type) {
+    http::Request r;
+    r.method = std::move(method);
+    r.target = path;
+    r.path = std::move(path);
+    if (!type.empty()) {
+        r.headers.emplace_back("content-type", std::string(type));
+    }
+    r.body = std::move(body);
+    return r;
+}
+
+} // namespace
+
+void LedgerApi::hold_for_approval(Bytes body, Respond respond) {
+    state_->console_write(
+        console_request("POST", "/v1/approvals", std::move(body), "application/cbor"),
+        std::move(respond));
+}
+
+void LedgerApi::give_approval(const protocol::Id& statement, Bytes approval, Respond respond) {
+    state_->console_write(console_request("POST", "/v1/approvals/" + to_hex(statement.bytes()),
+                                          std::move(approval), "application/cose"),
+                          std::move(respond));
+}
+
+void LedgerApi::withdraw_held(const protocol::Id& statement, Respond respond) {
+    state_->console_write(
+        console_request("DELETE", "/v1/approvals/" + to_hex(statement.bytes()), {}, {}),
+        std::move(respond));
+}
+
+void LedgerApi::decline_held(const protocol::Id& statement, const protocol::Id& approver,
+                             Respond respond) {
+    state_->console_decline(statement, approver, std::move(respond));
+}
+
+http::Response LedgerApi::held_for_approval(const std::optional<protocol::Id>& approver,
+                                            bool all) const {
+    return state_->console_held(approver, all);
+}
+
 void LedgerApi::submit_submission(Bytes submission, Respond respond) {
     http::Request r;
     r.method = "POST";
@@ -4681,6 +5383,8 @@ void LedgerApi::tick() {
     state_->auto_checkpoint();
     state_->keep();
     state_->poll_requests();
+    state_->sweep_approvals();
+    state_->check_approval_waiters(false);
     for (const ApiOptions::Extension& extension : state_->options.extensions) {
         if (extension.tick) {
             extension.tick();
@@ -4690,6 +5394,7 @@ void LedgerApi::tick() {
 
 void LedgerApi::stopping() {
     state_->stop_polls();
+    state_->stop_approval_polls();
     for (const ApiOptions::Extension& extension : state_->options.extensions) {
         if (extension.stopping) {
             extension.stopping();

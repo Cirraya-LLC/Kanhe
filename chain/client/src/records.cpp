@@ -353,10 +353,12 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
             return files;
         };
     }
+    // Its fields go to its approvers too if the approval mode shows them
+    // (spec v0.20).
     const protocol::Id id = session.submit(
         signer, body, request.delegation, request.provenance, request.presence,
         [&](const protocol::Id& record) { return seal_vault(ledger, record, vault, vault_key); },
-        {}, seal_files);
+        {}, seal_files, vault.fields);
     if (kept_vault != nullptr) {
         *kept_vault = std::move(vault);
     }

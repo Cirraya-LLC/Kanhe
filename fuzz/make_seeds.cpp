@@ -48,6 +48,7 @@
 #include <kanhe/core/cose.hpp>
 #include <kanhe/core/merkle.hpp>
 #include <kanhe/core/protocol/access.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
 #include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
@@ -1518,6 +1519,64 @@ void approval_seeds(const Seeds& seeds) {
                 must(cbor::encode(cbor::Value::map(
                          {{cbor::Value::integer(1), cbor::Value::bytes(signed_record.encoded)},
                           {cbor::Value::integer(5), protocol::approval_list_value(approvals)}})),
+                     "encode"));
+    // Its approval file, with the approval, a note, and a registration's
+    // fields (a record of its own, whose root they give) and parts.
+    protocol::ApprovalFile file;
+    file.statement = signed_record;
+    file.approvals = {signed_approval};
+    file.note = "for the seed";
+    seeds.write("approval_fuzz", "approval-file",
+                must(protocol::encode_approval_file(file), "encode"));
+    std::vector<protocol::RecordField> fields{
+        {"amount", entropy.bytes<16>(), cbor::Value::text("1200")},
+        {"payee", entropy.bytes<16>(), cbor::Value::text("Lee Ka Yan")}};
+    const auto commitment = must(protocol::commit_fields(provider, hash, fields), "commit");
+    const auto shown = must(
+        protocol::sign_statement(
+            clerk, provider, hash,
+            statement(clerk_id, grant,
+                      protocol::RecordRegisterBody{
+                          "example.org.form/1",
+                          Bytes(commitment.root.bytes().begin(), commitment.root.bytes().end()),
+                          commitment.leaves.size(),
+                          {{"scan.pdf", "application/pdf", 3, Bytes(32, 0x24)}},
+                          std::nullopt,
+                          std::nullopt,
+                          {}})),
+        "sign");
+    protocol::ApprovalFile with_fields;
+    with_fields.statement = shown;
+    with_fields.fields = commitment.fields;
+    with_fields.parts = protocol::SubmissionParts{Bytes(40, 0x11), {}, {{0, Bytes(19, 0x22)}}};
+    seeds.write("approval_fuzz", "approval-file-fields",
+                must(protocol::encode_approval_file(with_fields), "encode"));
+    seeds.write("approval_fuzz", "submission-parts",
+                must(protocol::encode_submission_parts(*with_fields.parts), "encode"));
+    // A hold request (POST /v1/approvals), and the held file it becomes with
+    // Chan's approval kept, written by hand: the node is not linked here.
+    seeds.write("held_fuzz", "hold-request",
+                must(cbor::encode(cbor::Value::map(
+                         {{cbor::Value::integer(1), cbor::Value::bytes(signed_record.encoded)},
+                          {cbor::Value::integer(4), cbor::Value::text("for the seed")}})),
+                     "encode"));
+    seeds.write("held_fuzz", "held",
+                must(cbor::encode(cbor::Value::map(
+                         {{cbor::Value::integer(1), cbor::Value::bytes(signed_record.encoded)},
+                          {cbor::Value::integer(5),
+                           cbor::Value::array({cbor::Value::array(
+                               {cbor::Value::bytes(signed_approval.encoded),
+                                cbor::Value::unsigned_integer(2), cbor::Value::boolean(true)})})},
+                          {cbor::Value::integer(6), cbor::Value::text("staff")},
+                          {cbor::Value::integer(7), cbor::Value::unsigned_integer(clock.now())},
+                          {cbor::Value::integer(8),
+                           cbor::Value::unsigned_integer(clock.now() + 7 * 86'400'000ULL)},
+                          {cbor::Value::integer(9), cbor::Value::boolean(false)}})),
+                     "encode"));
+    seeds.write("held_fuzz", "changes",
+                must(cbor::encode(cbor::Value::array({cbor::Value::array(
+                         {cbor::Value::text("held/" + to_hex(signed_record.id.bytes()) + ".cbor"),
+                          cbor::Value::null()})})),
                      "encode"));
     const auto registered = must(ledger.submit(signed_record.encoded, approvals), "submit");
     clock.advance(1000);

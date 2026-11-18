@@ -20,6 +20,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <kanhe/core/protocol/contracts.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/cluster.hpp>
 #include <kanhe/node/contracts.hpp>
 
@@ -837,4 +838,79 @@ TEST_CASE("the Raft log keeps exactly what was written", "[node][cluster][storag
         CHECK(cd::to_bytes((*reopened)->entry_at(4)->get_buf()) == Bytes(5, 4));
     }
     std::filesystem::remove_all(dir);
+}
+
+TEST_CASE("a cluster replicates the statements held for approval, and a statement's approvals",
+          "[node][cluster][approvals]") {
+    Trio trio;
+    REQUIRE(trio.leader() != nullptr);
+
+    // A held statement, written on every node through Raft, then ended.
+    const Bytes statement = trio.record(t0 + 1);
+    const auto parsed = protocol::parse_statement(provider(), statement, trio.w.hash());
+    REQUIRE(parsed);
+    node::HeldStatement held;
+    held.statement = statement;
+    held.preparer = "staff";
+    held.held_at = t0;
+    held.lapses_at = t0 + day;
+    const std::string name = "held/" + kanhe::to_hex(parsed->id.bytes()) + ".cbor";
+    const node::HeldChange write{name, *node::encode_held_statement(held)};
+    REQUIRE(eventually([&] {
+        Node* now = trio.leader();
+        return now != nullptr && now->cluster->change_held(std::span(&write, 1)).has_value();
+    }));
+    CHECK(eventually([&] {
+        return std::ranges::all_of(trio.nodes, [&](const auto& n) {
+            return node::held_statement(n->dir, parsed->id).has_value();
+        });
+    }));
+    const node::HeldChange gone{name, std::nullopt};
+    REQUIRE(eventually([&] {
+        Node* now = trio.leader();
+        return now != nullptr && now->cluster->change_held(std::span(&gone, 1)).has_value();
+    }));
+    CHECK(eventually([&] {
+        return std::ranges::none_of(trio.nodes, [&](const auto& n) {
+            return node::held_statement(n->dir, parsed->id).has_value();
+        });
+    }));
+    // A change that names no held statement changes nothing.
+    const node::HeldChange stray{"elsewhere/x.cbor", Bytes{0xa0}};
+    Node* now = trio.leader();
+    REQUIRE(now != nullptr);
+    CHECK_FALSE(now->cluster->change_held(std::span(&stray, 1)));
+
+    // A statement's approvals travel with it: every node applies the same
+    // outcome (here a refusal: no rule asks for them), and the ledger is
+    // unchanged.
+    const std::uint64_t size = now->ledger->size();
+    const std::vector<ByteView> views{ByteView(statement)};
+    const std::vector<std::optional<node::Sidecar>> sidecars(1);
+    const std::vector<std::vector<Bytes>> approvals{{Bytes{0x01, 0x02, 0x03}}};
+    kanhe::Result<node::BatchResult> results = std::unexpected(kanhe::Error{});
+    REQUIRE(eventually([&] {
+        Node* leader = trio.leader();
+        results = leader != nullptr ? leader->cluster->submit(views, sidecars, t0 + 5000, approvals)
+                                    : kanhe::Result<node::BatchResult>(std::unexpected(
+                                          kanhe::Error{Errc::unavailable, "no leader"}));
+        return results.has_value();
+    }));
+    REQUIRE(results->size() == 1);
+    CHECK_FALSE(results->front());
+    CHECK(eventually([&] {
+        return trio.agree() && std::ranges::all_of(trio.nodes, [&](const auto& n) {
+                   return n->ledger->size() == size;
+               });
+    }));
+    // Without them, the same statement registers.
+    const std::vector<std::vector<Bytes>> none(1);
+    REQUIRE(eventually([&] {
+        Node* leader = trio.leader();
+        results = leader != nullptr ? leader->cluster->submit(views, sidecars, t0 + 6000, none)
+                                    : kanhe::Result<node::BatchResult>(std::unexpected(
+                                          kanhe::Error{Errc::unavailable, "no leader"}));
+        return results.has_value();
+    }));
+    CHECK(results->front());
 }

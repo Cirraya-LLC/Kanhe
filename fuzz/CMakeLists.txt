@@ -110,6 +110,9 @@ if(TARGET kanhe_node)
     target_compile_features(executor_state_fuzz PRIVATE cxx_std_26)
     kanhe_add_fuzzer(backup_restore_fuzz kanhe::ledger)
     kanhe_add_fuzzer(pending_call_fuzz kanhe::node)
+    # Statements held for approval: hold requests, held files, their changes.
+    kanhe_add_fuzzer(held_fuzz kanhe::node)
+    target_compile_features(held_fuzz PRIVATE cxx_std_26)
     # Kept files: sealed files and a submission's list of them.
     kanhe_add_fuzzer(record_files_fuzz kanhe::node)
     # Published records' files and requests to publish one.

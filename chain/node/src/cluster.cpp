@@ -372,7 +372,8 @@ ClusterStatus Cluster::status() const {
 
 Result<BatchResult> Cluster::submit(std::span<const ByteView> statements,
                                     std::span<const std::optional<Sidecar>> sidecars,
-                                    protocol::Timestamp at) {
+                                    protocol::Timestamp at,
+                                    std::span<const std::vector<Bytes>> approvals) {
     if (auto s = impl_->settle(); !s) {
         return std::unexpected(s.error());
     }
@@ -390,6 +391,19 @@ Result<BatchResult> Cluster::submit(std::span<const ByteView> statements,
             item.push_back(cbor::Value::unsigned_integer(sidecar_contract_consents));
         }
         vaults.push_back(cbor::Value::array(std::move(item)));
+    }
+    // The approvals each statement travels with (v0.20): [i, list, 5].
+    for (std::size_t i = 0; i < approvals.size() && i < statements.size(); ++i) {
+        if (approvals[i].empty()) {
+            continue;
+        }
+        auto encoded_approvals = cbor::encode(protocol::approval_list_value(approvals[i]));
+        if (!encoded_approvals) {
+            return std::unexpected(encoded_approvals.error());
+        }
+        vaults.push_back(cbor::Value::array({cbor::Value::unsigned_integer(i),
+                                             cbor::Value::bytes(std::move(*encoded_approvals)),
+                                             cbor::Value::unsigned_integer(sidecar_approvals)}));
     }
     auto entry = cbor::encode(cbor::Value::array(
         {cbor::Value::unsigned_integer(entry_batch), cbor::Value::unsigned_integer(at),
@@ -504,6 +518,25 @@ Status Cluster::change_pending(std::span<const PendingChange> changes) {
     }
     auto entry = cbor::encode(cbor::Value::array(
         {cbor::Value::unsigned_integer(entry_pending), pending_changes_value(changes)}));
+    if (!entry) {
+        return std::unexpected(entry.error());
+    }
+    auto outcome = impl_->replicate(*entry);
+    if (!outcome) {
+        return std::unexpected(outcome.error());
+    }
+    if (const auto* status = std::get_if<Status>(&*outcome)) {
+        return *status;
+    }
+    return {};
+}
+
+Status Cluster::change_held(std::span<const PendingChange> changes) {
+    if (changes.empty()) {
+        return {};
+    }
+    auto entry = cbor::encode(cbor::Value::array(
+        {cbor::Value::unsigned_integer(entry_held), held_changes_value(changes)}));
     if (!entry) {
         return std::unexpected(entry.error());
     }

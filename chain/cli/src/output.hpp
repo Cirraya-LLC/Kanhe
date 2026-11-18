@@ -18,4 +18,14 @@ namespace kanhe::cli {
 int report_submitted(const Args& args, const client::Session& session,
                      const protocol::Id& statement, const Json& extra, const std::string& text);
 
+/// The rules that apply to a statement, counted (spec v0.20): each with its
+/// source, k, approvers, window, what counted, what is missing, and when it
+/// lapses.
+[[nodiscard]] Json tally_json(const client::Session& session, const protocol::ApprovalTally& tally);
+
+/// Prints what was sent for approval instead of registered: where it is,
+/// the rules in words and what each still needs, and when it lapses.
+void print_sent_for_approval(const Args& args, const client::Session& session,
+                             const client::SentForApproval& sent);
+
 } // namespace kanhe::cli

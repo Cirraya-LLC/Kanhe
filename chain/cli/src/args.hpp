@@ -19,6 +19,13 @@ using kanhe::UsageError;
 /// Any other failure, with a message for the user.
 using CommandError = kanhe::ActionError;
 
+/// Ends a command early, its output printed, with this exit code: a
+/// statement sent for approval instead of registered stops the command that
+/// signed it, since what it would do next needs it registered.
+struct CommandFinished {
+    int code = 0;
+};
+
 struct CommandSpec;
 
 /// The arguments of one command, already validated against its spec.

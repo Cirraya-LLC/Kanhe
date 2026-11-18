@@ -76,12 +76,14 @@ line 1 | contains '"supportedVersions":\["2026-07-28"' || fail "discover"
 line 1 | contains '"resultType":"complete"' || fail "discover resultType"
 line 2 | contains '"name":"kanhe_issue_record"' || fail "tools/list"
 for tool in call_contract list_pending_calls fetch_instance propose_contract_call consent_contract_call \
-    list_requests get_request answer_request; do
+    list_requests get_request answer_request list_approvals show_approval; do
     line 2 | contains "\"name\":\"kanhe_$tool\"" || fail "tools/list: $tool"
 done
 line 2 | contains '"cacheScope":"private"' || fail "tools/list caching"
 # Spec v0.9 removed native assets: no tool reads them any more.
 if line 2 | contains -E '"name":"kanhe_[a-z_]*asset'; then fail "tools/list: an asset tool"; fi
+# Approving is a person's act (spec v0.20): no tool gives an approval.
+if line 2 | contains -E '"name":"kanhe_[a-z_]*(approve|give)'; then fail "tools/list: a tool approves"; fi
 line 3 | contains '"responsible":"Alice Inspector"' || fail "whoami responsible"
 line 3 | contains 'record-register' || fail "whoami delegations"
 line 4 | contains '"isError":false' || fail "issue"
@@ -455,6 +457,37 @@ line 3 | contains 'works through a server' || fail "peer tools need a ledger dir
 if served mcp --as agent.key --log-key log.key < /dev/null > out.txt 2>&1; then fail "--log-key with --server"; fi
 contains 'goes with a ledger directory' out.txt || fail "--log-key with --server"
 run mcp --help | contains -- '--server'
+
+# --- Approvals (spec v0.20): an agent prepares, a person approves ---------------------------
+run key generate --out drafter.key > /dev/null
+DRAFTER="$(run actor add --ledger ledger --as root.key --kind agent --name "Form Drafter" \
+    --key drafter.key --responsible "$ALICE" --model claude-opus-5-5 | id_from)"
+run delegation grant --ledger ledger --as root.key --to "$DRAFTER" --allow record-register \
+    --record-types example.form/1 --approvals 1 --approver "$ALICE" --approvals-without-presence \
+    > /dev/null
+{
+    call 1 kanhe_issue_record '{"record_type":"example.form/1","fields":{"amount":"1200"},"inputs":"form 7"}'
+    call 2 kanhe_list_approvals '{}'
+    call 3 kanhe_list_approvals "{\"approver\":\"$ALICE\"}"
+    call 4 kanhe_list_approvals "{\"approver\":\"$DRAFTER\"}"
+} > approval-requests.jsonl
+run mcp --ledger ledger --as drafter.key < approval-requests.jsonl > responses.txt 2> /dev/null
+line 1 | contains '"isError":false' || fail "held, not an error"
+[ "$(result 1 "['held_for_approval']")" = True ] || fail "held for approval"
+[ "$(result 1 "['recorded']")" = False ] || fail "not recorded"
+HELD="$(result 1 "['statement_id']")"
+[ "$(result 1 "['rules'][0]['missing']")" = 1 ] || fail "what it waits for"
+[ "$(result 2 "['approvals'][0]['id']")" = "$HELD" ] || fail "listed"
+[ "$(result 3 "['approvals'][0]['rules'][0]['k']")" = 1 ] || fail "for Alice to approve"
+[ "$(result 4 "['approvals']")" = "[]" ] || fail "not for its signer"
+call 1 kanhe_show_approval "{\"statement\":\"${HELD:0:12}\"}" |
+    run mcp --ledger ledger --as drafter.key > responses.txt 2> /dev/null
+[ "$(result 1 "['missing']")" = "[1]" ] || fail "shown, checked here"
+[ "$(result 1 "['summary']")" != "" ] || fail "what it does"
+# Alice approves it with her key alone, which this rule allows: registered.
+run approval give "$HELD" --ledger ledger --as alice.key --yes --json | json 'd["registered"]' |
+    contains -x True || fail "approved by a person"
+run record show "$HELD" --ledger ledger > /dev/null
 
 run mcp --help | contains 'kanhe_consent_contract_call'
 run mcp --help | contains 'kanhe_answer_request'

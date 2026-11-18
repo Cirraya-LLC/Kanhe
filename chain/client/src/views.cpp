@@ -208,6 +208,25 @@ Json delegation_json(const Session& session, const protocol::DelegationState& d)
     for (const protocol::Id& id : authority_chain(session, d.id)) {
         chain.push_back(actor_ref(session, id));
     }
+    // Every rule in the chain applies to what is signed under it (v0.20):
+    // its own first, then each grantor's in turn.
+    Json rules = Json::array();
+    std::size_t links = 0;
+    for (const protocol::DelegationState* link = &d;
+         link != nullptr && links < protocol::max_delegation_depth;
+         link = link->parent ? session.state().delegation(*link->parent) : nullptr, ++links) {
+        if (link->scope.approvals) {
+            Json approvers = Json::array();
+            for (const protocol::Id& a : link->scope.approvals->approvers) {
+                approvers.push_back(actor_ref(session, a));
+            }
+            rules.push_back({{"delegation", id_json(link->id)},
+                             {"needed", link->scope.approvals->needed},
+                             {"approvers", std::move(approvers)},
+                             {"within_ms", link->scope.approvals->within},
+                             {"without_presence", link->scope.approvals->without_presence}});
+        }
+    }
     return {{"id", id_json(d.id)},
             {"grantor", actor_ref(session, d.grantor)},
             {"grantee", actor_ref(session, d.grantee)},
@@ -216,7 +235,8 @@ Json delegation_json(const Session& session, const protocol::DelegationState& d)
             {"revoked", d.revoked},
             {"active", delegation_active(d, ledger::SystemClock{}.now())},
             {"granted_at_index", d.granted_at_index},
-            {"authority", std::move(chain)}};
+            {"authority", std::move(chain)},
+            {"approval_rules", std::move(rules)}};
 }
 
 std::vector<std::string> next_states(const protocol::RecordState& record) {
@@ -491,6 +511,18 @@ Json entry_json(const Session& session, std::uint64_t index) {
              {"algorithm", crypto::name(statement.envelope.algorithm)},
              {"kid", id_json(statement.kid)}};
     out["statement"] = statement_json(statement.statement);
+    // The approvals it was registered with (v0.20), by approver, as the
+    // ledger accepted them: each approver's claim of when, and whether in
+    // person.
+    Json approvals = Json::array();
+    for (const Bytes& encoded : entry.approvals) {
+        if (const auto a = protocol::parse_approval(encoded)) {
+            approvals.push_back({{"approver", actor_ref(session, a->approval.approver)},
+                                 {"approved_at", iso_time(a->approval.approved_at)},
+                                 {"in_person", a->approval.presence.has_value()}});
+        }
+    }
+    out["approvals"] = std::move(approvals);
     return out;
 }
 
@@ -609,6 +641,23 @@ Json actor_detail_json(const Session& session, const protocol::ActorState& actor
     out["delegations_received"] = std::move(to);
     out["delegations_granted"] = std::move(by);
     out["records_issued"] = records;
+    // Approvals (v0.20): the delegations whose rules name it, and whether it
+    // is a guardian of the organization.
+    Json approves = Json::array();
+    for (const auto& [key, d] : session.state().delegations()) {
+        if (!d.revoked && d.scope.approvals &&
+            std::ranges::contains(d.scope.approvals->approvers, protocol::Id(actor.id))) {
+            approves.push_back({{"delegation", id_json(d.id)},
+                                {"grantee", actor_ref(session, d.grantee)},
+                                {"needed", d.scope.approvals->needed},
+                                {"of", d.scope.approvals->approvers.size()},
+                                {"within_ms", d.scope.approvals->within}});
+        }
+    }
+    out["approves"] = std::move(approves);
+    const protocol::GuardianSetting* guardians = session.state().guardians();
+    out["guardian"] = guardians != nullptr && std::ranges::contains(guardians->guardians->approvers,
+                                                                    protocol::Id(actor.id));
     return out;
 }
 

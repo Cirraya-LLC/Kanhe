@@ -21,6 +21,9 @@ struct OptionSpec {
     std::string_view help;
     bool required = false;
     bool repeatable = false;
+    /// The value may be left out: it is the next word only if one follows
+    /// that is not an option (or as --name=VALUE); else empty.
+    bool optional_value = false;
 };
 
 struct CommandSpec {
