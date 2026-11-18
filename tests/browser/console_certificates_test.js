@@ -37,10 +37,10 @@ function freePort() {
 }
 
 async function tap(page, what) {
-  await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+  await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
   await page.getByText("Checked in this browser").waitFor();
   if (what) await page.getByText(what, { exact: true }).first().waitFor();
-  await page.getByRole("button", { name: "Approve with your passkey" }).click();
+  await page.getByRole("button", { name: "Confirm with your passkey" }).click();
 }
 
 (async () => {

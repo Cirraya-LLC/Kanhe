@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -301,6 +302,24 @@ void Console::handle(const http::Request& request, Respond respond) const {
         }
         return;
     }
+    // An approval given, declined, or withdrawn (spec v0.20): the node
+    // answers once its writer has.
+    if (approvals_write_path(request)) {
+        try {
+            if (auto refused = refuse(request)) {
+                respond(std::move(*refused));
+                return;
+            }
+            if (!ready()) {
+                respond(error(503, "unavailable", "this console keeps no users or sessions"));
+                return;
+            }
+            approvals_write(request, std::move(respond));
+        } catch (const std::exception&) {
+            respond(error(500, "internal", "the console could not answer; see its files"));
+        }
+        return;
+    }
     if (request.path == "/console/api/proof" && request.method == "POST") {
         try {
             if (auto refused = refuse(request)) {
@@ -335,16 +354,8 @@ void Console::handle(const http::Request& request, Respond respond) const {
                     respond(std::move(*answer));
                     return;
                 }
-                Signing signing = std::get<Signing>(std::move(signed_or));
-                auto body = std::move(signing.body);
-                const bool submission = signing.submission;
-                submitter()(std::move(body), submission,
-                            [this, signing = std::move(signing),
-                             respond = std::move(respond)](http::Response registered) {
-                                registered_now(signing, registered);
-                                secure(registered);
-                                respond(std::move(registered));
-                            });
+                // Registered, or held for approval (spec v0.20).
+                send_signed(std::get<Signing>(std::move(signed_or)), std::move(respond));
                 return;
             }
             auto plan = recovery_plan(request);
@@ -352,17 +363,9 @@ void Console::handle(const http::Request& request, Respond respond) const {
                 respond(std::move(*answer));
                 return;
             }
-            auto recovery = std::make_shared<const Recovery>(std::get<Recovery>(std::move(plan)));
-            submitter()(
-                recovery->statement, false,
-                [this, recovery, respond = std::move(respond)](const http::Response& registered) {
-                    try {
-                        respond(finish_recovery(*recovery, registered));
-                    } catch (const std::exception&) {
-                        respond(
-                            error(500, "internal", "the console could not answer; see its files"));
-                    }
-                });
+            // Registered, or sent for the guardians' approval (spec v0.20).
+            send_recovery(std::make_shared<const Recovery>(std::get<Recovery>(std::move(plan))),
+                          std::move(respond));
         } catch (const std::exception&) {
             respond(error(500, "internal", "the console could not answer; see its files"));
         }
@@ -494,6 +497,22 @@ http::Response Console::route(const http::Request& request) const {
     }
     if (request.path.starts_with("/console/api/records/")) {
         return ready() ? record_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
+    if (request.path == "/console/api/approvals" ||
+        request.path.starts_with("/console/api/approvals/")) {
+        if (!ready()) {
+            return error(503, "unavailable", "this console keeps no users or sessions");
+        }
+        if (approvals_write_path(request)) {
+            return wait_for([this, &request](std::function<void(http::Response)> respond) {
+                approvals_write(request, std::move(respond));
+            });
+        }
+        return approvals_route(request);
+    }
+    if (request.path == "/console/api/guardians") {
+        return ready() ? guardians_route(request)
                        : error(503, "unavailable", "this console keeps no users or sessions");
     }
     if (request.path == "/console/api/scripts" ||

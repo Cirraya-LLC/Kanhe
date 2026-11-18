@@ -7,6 +7,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <filesystem>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -16,6 +18,8 @@
 #include <kanhe/client/views.hpp>
 #include <kanhe/console/console.hpp>
 #include <kanhe/core/protocol/state.hpp>
+#include <kanhe/core/protocol/statement.hpp>
+#include <kanhe/node/approvals.hpp>
 
 #include "responses.hpp"
 
@@ -52,7 +56,48 @@ http::Response Console::home_route(const Signed& who) const {
     if (served == nullptr) {
         return no_ledger(services_.keys);
     }
+    // What follows statements sent for approval and registered since.
+    follow_up();
     nlohmann::json out;
+    // What waits for this person's approval, and what they sent for it
+    // (spec v0.20): counts for Home, the list on its own screen.
+    const People people = load_people(services_.directory);
+    const User* user = people.find(who.user);
+    std::optional<protocol::Id> actor;
+    if (user != nullptr && !user->actor.empty()) {
+        if (const auto bytes = from_hex(user->actor)) {
+            if (auto id = protocol::to_id(*bytes)) {
+                actor = *id;
+            }
+        }
+    }
+    const std::filesystem::path ledger_dir = services_.directory.parent_path();
+    nlohmann::json approvals;
+    served->read_state([&](const protocol::LedgerState& state) {
+        std::size_t waiting = 0;
+        std::size_t sent = 0;
+        for (const auto& [id, held] : node::held_statements(ledger_dir)) {
+            if (actor && node::may_approve(*services_.provider, state, held, *actor)) {
+                ++waiting;
+            }
+            // Theirs, or (for an owner) the organization's.
+            const auto parsed =
+                protocol::parse_statement(*services_.provider, held.statement, state.hash());
+            const protocol::ActorState* by = parsed && parsed->statement.actor_id
+                                                 ? state.actor(*parsed->statement.actor_id)
+                                                 : nullptr;
+            const bool theirs =
+                by != nullptr && ((actor && parsed->statement.actor_id == actor) ||
+                                  (who.role == Role::owner && by->is_organization()));
+            sent += theirs ? 1U : 0U;
+        }
+        if (actor) {
+            for (const nlohmann::json& p : proposals_json(state, actor, std::nullopt, "en")) {
+                waiting += p.value("may_approve", false) ? 1U : 0U;
+            }
+        }
+        approvals = {{"waiting", waiting}, {"sent", sent}};
+    });
     served->read_state([&](const protocol::LedgerState& state) {
         std::size_t open_requests = 0;
         for (const auto& [key, request] : state.requests()) {
@@ -69,6 +114,7 @@ http::Response Console::home_route(const Signed& who) const {
               {"instances", state.instances().size()},
               {"open_requests", open_requests}}}};
     });
+    out["approvals"] = std::move(approvals);
     out["backup"] = backup_view();
     return json(200, out);
 }

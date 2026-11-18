@@ -33,6 +33,7 @@
 #include <kanhe/client/session.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/client/witness.hpp>
+#include <kanhe/console/activity.hpp>
 #include <kanhe/console/backups.hpp>
 #include <kanhe/console/console.hpp>
 #include <kanhe/console/keystore.hpp>
@@ -43,13 +44,16 @@
 #include <kanhe/console/setup.hpp>
 #include <kanhe/console/users.hpp>
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/exchange.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/core/protocol/witness.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/ledger/environment.hpp>
 #include <kanhe/ledger/verify.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/executor.hpp>
 #include <kanhe/node/keeper.hpp>
@@ -1298,6 +1302,8 @@ TEST_CASE("a lost passkey is replaced with the recovery code", "[console][recove
     // A recovery is finished only by its own route.
     auto begun = begin();
     CHECK(begun["user"] == "Alice");
+    // Without guardians, nobody else approves it.
+    CHECK(begun["approvals"]["needed"] == false);
     CHECK(f.w.keys.unlocked());
     const auto phone = passkey(7);
     CHECK(finish(begun, phone, "/console/api/enroll/finish").status == 404);
@@ -2227,6 +2233,577 @@ TEST_CASE("the console's tasks are all waited for, those they start too", "[cons
         tasks.run([&] { ++ended; });
     }
     CHECK(ended.load() == 17);
+}
+
+namespace {
+
+nlohmann::json json_of(const http::Response& r) {
+    return nlohmann::json::parse(body(r));
+}
+
+/// The node's held statements (spec v0.20) as the console's approval hooks
+/// reach them: an ApprovalDesk on the ledger, its files in the ledger's
+/// folder; a statement whose rules are met is registered with its
+/// approvals, as POST /v1/approvals and /v1/approvals/ID answer.
+struct HeldAtNode {
+    kanhe::ledger::Ledger& ledger;
+    kanhe::ledger::Clock& clock;
+    std::filesystem::path dir;
+    kanhe::node::ApprovalDesk desk;
+
+    HeldAtNode(kanhe::ledger::Ledger& on, kanhe::ledger::Clock& at, std::filesystem::path in)
+        : ledger(on), clock(at), dir(std::move(in)), desk(dir) {}
+
+    static http::Response answer(int status, const nlohmann::json& value) {
+        http::Response r;
+        r.status = status;
+        const std::string text = value.dump();
+        r.body.assign(text.begin(), text.end());
+        return r;
+    }
+
+    http::Response progress_answer(kanhe::Result<kanhe::node::HeldProgress> progress) {
+        if (!progress) {
+            return answer(409, {{"error", {{"message", progress.error().detail}}}});
+        }
+        REQUIRE(kanhe::node::apply_held_changes(dir, progress->changes));
+        if (progress->verdict == kanhe::node::HeldProgress::Verdict::ready) {
+            const auto registered = ledger.submit(progress->held.statement, progress->approvals);
+            if (!registered) {
+                return answer(409, {{"error", {{"message", registered.error().detail}}}});
+            }
+            REQUIRE(kanhe::node::apply_held_changes(
+                dir, desk.registered(progress->id, registered->index, clock.now())));
+            return answer(201, {{"statement_id", kanhe::to_hex(registered->statement_id.bytes())},
+                                {"index", registered->index}});
+        }
+        nlohmann::json held;
+        ledger.read_state([&](const kanhe::protocol::LedgerState& s) {
+            held = kanhe::node::held_json(provider(), s, progress->id, progress->held);
+        });
+        held["status"] = "waiting";
+        return answer(202, held);
+    }
+
+    void serve(console::Console& web) {
+        web.set_approvals(console::ApprovalHooks{
+            [this](kanhe::Bytes hold_request, auto respond) {
+                auto candidate = kanhe::node::decode_hold_request(hold_request);
+                REQUIRE(candidate);
+                candidate->preparer = "console";
+                kanhe::Result<kanhe::node::HeldProgress> progress =
+                    kanhe::fail(kanhe::Errc::unavailable, "no state");
+                ledger.read_state([&](const kanhe::protocol::LedgerState& s) {
+                    progress = desk.hold(provider(), s, std::move(*candidate), clock.now());
+                });
+                respond(progress_answer(std::move(progress)));
+            },
+            [this](const kanhe::protocol::Id& statement, kanhe::Bytes approval, auto respond) {
+                kanhe::Result<kanhe::node::HeldProgress> progress =
+                    kanhe::fail(kanhe::Errc::unavailable, "no state");
+                ledger.read_state([&](const kanhe::protocol::LedgerState& s) {
+                    progress = desk.approve(provider(), s, statement, approval, clock.now());
+                });
+                respond(progress_answer(std::move(progress)));
+            },
+            [this](const kanhe::protocol::Id& statement, auto respond) {
+                auto changes = desk.withdraw(statement, clock.now());
+                if (!changes) {
+                    respond(answer(404, {{"error", {{"message", changes.error().detail}}}}));
+                    return;
+                }
+                REQUIRE(kanhe::node::apply_held_changes(dir, *changes));
+                http::Response gone;
+                gone.status = 204;
+                respond(std::move(gone));
+            },
+            [this](const kanhe::protocol::Id& statement, const kanhe::protocol::Id& approver,
+                   auto respond) {
+                kanhe::Result<std::vector<kanhe::node::HeldChange>> changes =
+                    kanhe::fail(kanhe::Errc::unavailable, "no state");
+                ledger.read_state([&](const kanhe::protocol::LedgerState& s) {
+                    changes = desk.decline(provider(), s, statement, approver, clock.now());
+                });
+                if (!changes) {
+                    respond(answer(409, {{"error", {{"message", changes.error().detail}}}}));
+                    return;
+                }
+                REQUIRE(kanhe::node::apply_held_changes(dir, *changes));
+                respond(answer(200, {{"declined", true}}));
+            }});
+    }
+};
+
+/// A ledger whose owner Alice endorses records under a delegation that needs
+/// 2 of Chan, Lee, and Ho to approve within 7 days (spec v0.20); each a user
+/// of the console, with a passkey on the ledger and a key the console keeps;
+/// the node's held statements as HeldAtNode keeps them.
+struct ApprovalsWorld {
+    struct Person {
+        std::string name;
+        kanhe::crypto::openssl::KeyPair key;
+        kanhe::test::SoftPasskey passkey;
+        protocol::Id id{};
+        std::string token{};
+    };
+
+    kanhe::test::World ledger;
+    TempDirectory dir;
+    std::filesystem::path state = dir.path / "console";
+    kanhe::ledger::SeededEntropy entropy{41};
+    console::Sessions sessions{state, provider(), ledger.clock(), entropy};
+    console::KeyStore keys{state};
+    console::Console web{
+        console::Services{state, &provider(), &ledger.clock(), &entropy, &sessions, &keys}};
+    HeldAtNode held_at{ledger.ledger(), ledger.clock(), dir.path};
+    Person alice{"Alice", kanhe::test::key("alice"), passkey(21), {}, {}};
+    Person chan{"Chan Tai Man", kanhe::test::key("chan"), passkey(22), {}, {}};
+    Person lee{"Lee Ka Yan", kanhe::test::key("lee"), passkey(23), {}, {}};
+    Person ho{"Ho Wing", kanhe::test::key("ho"), passkey(24), {}, {}};
+    protocol::Id record;
+    protocol::Id delegation;
+    std::string bob;
+    std::string vera;
+
+    ApprovalsWorld() {
+        std::filesystem::create_directories(state);
+        web.set_origins(console::loopback_origins(7470));
+        web.set_ledger(&ledger.ledger());
+        // As POST /v1/statements answers.
+        web.set_submitter([this](kanhe::Bytes statement, bool, auto respond) {
+            const auto registered = ledger.ledger().submit(statement);
+            respond(registered
+                        ? answer(201, {{"statement_id", hex(registered->statement_id)},
+                                       {"index", registered->index}})
+                        : answer(422, {{"error", {{"message", registered.error().detail}}}}));
+        });
+        held_at.serve(web);
+        static_cast<void>(keys.initialize(entropy));
+        keys.seal(std::string(console::root_key_name), ledger.org());
+        console::People people;
+        for (Person* p : {&alice, &chan, &lee, &ho}) {
+            p->id = ledger.ok(ledger.org(), ledger.statement(ledger.org_id(), std::nullopt,
+                                                             protocol::ActorRegisterBody{
+                                                                 protocol::ActorKind::person,
+                                                                 p->name, p->key.public_key(),
+                                                                 std::nullopt, std::nullopt}));
+            const protocol::PresenceCredential credential{
+                p->passkey.rp_id, p->passkey.credential_id, p->passkey.public_key, "laptop"};
+            ledger.ok(ledger.org(),
+                      ledger.statement(ledger.org_id(), std::nullopt,
+                                       protocol::ActorSetPresenceBody{p->id, {credential}}));
+            std::string key_name = "person-" + p->name.substr(0, p->name.find(' '));
+            std::ranges::transform(key_name, key_name.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            keys.seal(key_name, p->key);
+            people.users.push_back({p->name,
+                                    p == &alice ? console::Role::owner : console::Role::member,
+                                    ledger.clock().now(),
+                                    {credential},
+                                    hex(p->id),
+                                    key_name});
+        }
+        people.users.push_back({"Bob", console::Role::member, ledger.clock().now(), {}, {}, {}});
+        people.users.push_back({"Vera", console::Role::viewer, ledger.clock().now(), {}, {}, {}});
+        console::save_people(state, people);
+        // Alice endorses and revokes in person, with 2 of the 3 approving.
+        protocol::Scope scope;
+        scope.statement_types = {protocol::StatementType::record_endorse,
+                                 protocol::StatementType::record_revoke};
+        scope.require_presence = true;
+        protocol::ApprovalRule rule;
+        rule.needed = 2;
+        rule.approvers = {chan.id, lee.id, ho.id};
+        std::ranges::sort(rule.approvers, {}, [](const protocol::Id& id) { return hex(id); });
+        rule.within = 7 * 86'400'000;
+        scope.approvals = rule;
+        delegation = ledger.grant(ledger.org(), ledger.org_id(), std::nullopt, alice.id, scope);
+        record = ledger.ok(ledger.org(),
+                           ledger.statement(ledger.org_id(), std::nullopt,
+                                            ledger.record_body(kanhe::test::document_type)));
+        for (Person* p : {&alice, &chan, &lee, &ho}) {
+            p->token = sessions.create(p->name);
+        }
+        bob = sessions.create("Bob");
+        vera = sessions.create("Vera");
+    }
+
+    static std::string hex(const protocol::Id& id) { return kanhe::to_hex(id.bytes()); }
+
+    static http::Response answer(int status, const nlohmann::json& value) {
+        return HeldAtNode::answer(status, value);
+    }
+
+    http::Response send(std::string method, const std::string& path, const nlohmann::json& body,
+                        const std::string& token) {
+        auto r = request(std::move(method), path, "localhost:7470", "http://localhost:7470");
+        r.headers.emplace_back("authorization", "Bearer " + token);
+        const std::string text = body.dump();
+        r.body.assign(text.begin(), text.end());
+        return web.handle(r);
+    }
+
+    http::Response post(const std::string& path, const nlohmann::json& body,
+                        const std::string& token) {
+        return send("POST", path, body, token);
+    }
+
+    http::Response get(const std::string& path, const std::string& token) {
+        auto r = request("GET", path, "localhost:7470");
+        r.headers.emplace_back("authorization", "Bearer " + token);
+        return web.handle(r);
+    }
+
+    /// Prepares an intent for `who`; the answer, which must be 200.
+    nlohmann::json prepare(const nlohmann::json& intent, const Person& who) {
+        const auto prepared = post("/console/api/prepare", intent, who.token);
+        INFO(body(prepared));
+        REQUIRE(prepared.status == 200);
+        return json_of(prepared);
+    }
+
+    /// The tap confirming what `prepared` holds, with what goes along for
+    /// approvers.
+    http::Response confirm(const nlohmann::json& prepared, const Person& who,
+                           const nlohmann::json& extra = nlohmann::json::object()) {
+        const auto challenge =
+            *kanhe::from_base64url(prepared["public_key"]["challenge"].get<std::string>());
+        const auto proof = who.passkey.sign(provider(), challenge);
+        nlohmann::json tap{{"prepared", prepared["prepared"]},
+                           {"credential_id", kanhe::to_base64url(proof.credential_id)},
+                           {"authenticator_data", kanhe::to_base64url(proof.authenticator_data)},
+                           {"client_data_json", kanhe::to_base64url(proof.client_data_json)},
+                           {"signature", kanhe::to_base64url(proof.signature)}};
+        tap.update(extra);
+        return post("/console/api/approve", tap, who.token);
+    }
+
+    /// The tap approving someone else's statement, `id`, as `prepared`
+    /// holds it, with `with`'s passkey.
+    http::Response give(const std::string& id, const nlohmann::json& prepared,
+                        const kanhe::test::SoftPasskey& with, const std::string& token) {
+        const auto challenge =
+            *kanhe::from_base64url(prepared["public_key"]["challenge"].get<std::string>());
+        const auto proof = with.sign(provider(), challenge);
+        return post("/console/api/approvals/" + id + "/approve",
+                    {{"prepared", prepared["prepared"]},
+                     {"credential_id", kanhe::to_base64url(proof.credential_id)},
+                     {"authenticator_data", kanhe::to_base64url(proof.authenticator_data)},
+                     {"client_data_json", kanhe::to_base64url(proof.client_data_json)},
+                     {"signature", kanhe::to_base64url(proof.signature)}},
+                    token);
+    }
+
+    /// `who` approves `id` in person: prepared, then tapped.
+    http::Response approve_as(const std::string& id, const Person& who) {
+        const auto prepared =
+            post("/console/api/approvals/" + id + "/prepare", nlohmann::json::object(), who.token);
+        INFO(body(prepared));
+        REQUIRE(prepared.status == 200);
+        return give(id, json_of(prepared), who.passkey, who.token);
+    }
+
+    /// Alice's endorsement, sent for approval: its id.
+    std::string endorse_for_approval(const std::string& role) {
+        const auto prepared =
+            prepare({{"action", "record.endorse"}, {"record", hex(record)}, {"role", role}}, alice);
+        const auto sent = confirm(prepared, alice, {{"note", "for the audit"}});
+        INFO(body(sent));
+        REQUIRE(sent.status == 202);
+        return json_of(sent)["id"].get<std::string>();
+    }
+
+    bool registered(const std::string& id) {
+        return ledger.ledger().statement_index(*protocol::to_id(*kanhe::from_hex(id))).has_value();
+    }
+};
+
+} // namespace
+
+TEST_CASE("what someone may do: a delegation's approval rule, in words and in its scope",
+          "[console][people][approvals]") {
+    const auto a = *protocol::to_id(kanhe::Bytes(32, 0xaa));
+    const auto b = *protocol::to_id(kanhe::Bytes(32, 0x0b));
+    console::Permissions p;
+    p.endorse = true;
+    p.approvals = protocol::ApprovalRule{1, {a, b, a}, 7 * 86'400'000, false};
+    const auto scope = console::scope_of(p);
+    REQUIRE(scope.approvals);
+    // As a scope encodes it: ascending, each once.
+    CHECK(scope.approvals->approvers == std::vector<protocol::Id>{b, a});
+    CHECK(console::permissions_of(scope).approvals == scope.approvals);
+    const auto words = console::permissions_json(console::permissions_of(scope));
+    CHECK(words["approvals"]["k"] == 1);
+    CHECK(words["approvals"]["approvers"].size() == 2);
+    CHECK(console::scope_json(scope)["approvals"]["within"] == 7 * 86'400'000);
+    // From the page: refused when fewer people than must approve, or
+    // outside 1 minute to 30 days.
+    auto rule_of = [&](std::uint64_t k, const nlohmann::json& approvers, std::uint64_t within) {
+        nlohmann::json may{{"endorse", true}};
+        may["approvals"] = {{"k", k}, {"approvers", approvers}, {"within", within}};
+        return console::parse_permissions(may);
+    };
+    const auto both = nlohmann::json::array({kanhe::to_hex(a.bytes()), kanhe::to_hex(b.bytes())});
+    const auto one = nlohmann::json::array({kanhe::to_hex(a.bytes())});
+    const auto read = rule_of(2, both, 86'400'000);
+    REQUIRE(read);
+    REQUIRE(read->approvals);
+    CHECK(read->approvals->needed == 2);
+    CHECK_FALSE(rule_of(3, one, 86'400'000));
+    CHECK_FALSE(rule_of(1, one, 1000));
+    CHECK_FALSE(rule_of(1, nlohmann::json::array({"xyz"}), 86'400'000));
+    p.approvals->needed = 3;
+    CHECK_THROWS_AS(console::scope_of(p), std::invalid_argument);
+}
+
+TEST_CASE("approvals: sent for approval, approved by two in person, then registered",
+          "[console][approvals]") {
+    ApprovalsWorld w;
+    // Before the tap, the page is told who must approve it.
+    const auto prepared = w.prepare(
+        {{"action", "record.endorse"}, {"record", w.hex(w.record)}, {"role", "checked"}}, w.alice);
+    const auto needs = prepared["summary"]["approvals"];
+    CHECK(needs["needed"] == true);
+    REQUIRE(needs["rules"].size() == 1);
+    CHECK(needs["rules"][0]["source"] == "delegation");
+    CHECK(needs["rules"][0]["k"] == 2);
+    CHECK(needs["rules"][0]["approvers"].size() == 3);
+    CHECK(needs["rules"][0]["missing"] == 2);
+    CHECK(needs["rules"][0]["signer_counts"] == false);
+    // Her tap sends it for approval: held, not registered.
+    const auto sent = w.confirm(prepared, w.alice, {{"note", "for the audit"}});
+    INFO(body(sent));
+    REQUIRE(sent.status == 202);
+    const std::string id = json_of(sent)["id"].get<std::string>();
+    CHECK(json_of(sent)["note"] == "for the audit");
+    CHECK(json_of(sent)["missing"] == nlohmann::json::array({2}));
+    CHECK_FALSE(w.registered(id));
+
+    // Alice sees it sent; Chan sees it waiting; Home counts both.
+    const auto mine = json_of(w.get("/console/api/approvals", w.alice.token));
+    REQUIRE(mine["sent"].size() == 1);
+    CHECK(mine["sent"][0]["id"] == id);
+    CHECK(mine["waiting"].empty());
+    const auto chans = json_of(w.get("/console/api/approvals", w.chan.token));
+    REQUIRE(chans["waiting"].size() == 1);
+    CHECK(chans["waiting"][0]["signer"]["name"] == "Alice");
+    CHECK(chans["sent"].empty());
+    CHECK(json_of(w.get("/console/api/home", w.chan.token))["approvals"]["waiting"] == 1);
+    CHECK(json_of(w.get("/console/api/home", w.alice.token))["approvals"]["sent"] == 1);
+    CHECK(json_of(w.get("/console/api/approvals", w.bob))["waiting"].empty());
+    CHECK(w.get("/console/api/approvals", "khs_nobody").status == 401);
+
+    // Its bytes, for the page: the id recomputed from them is its id.
+    const auto view = json_of(w.get("/console/api/approvals/" + id, w.chan.token));
+    CHECK(view["may_approve"] == true);
+    CHECK(view["summary"]["type"] == "record-endorse");
+    CHECK(view["summary"]["role"] == "checked");
+    const auto parsed = protocol::parse_statement(
+        provider(), *kanhe::from_base64url(view["statement"].get<std::string>()),
+        kanhe::crypto::HashAlg::sha256);
+    REQUIRE(parsed);
+    CHECK(w.hex(parsed->id) == id);
+    // Alice signed it: hers to withdraw, not to approve.
+    const auto own = json_of(w.get("/console/api/approvals/" + id, w.alice.token));
+    CHECK(own["may_approve"] == false);
+    CHECK(own["may_withdraw"] == true);
+    CHECK(w.get("/console/api/approvals/" + std::string(64, '0'), w.chan.token).status == 404);
+    CHECK(w.get("/console/api/approvals/xyz", w.chan.token).status == 400);
+
+    // Who may not prepare an approval: its signer, a viewer, someone who
+    // acts as no one; and none for a statement not held.
+    const std::string prepare = "/console/api/approvals/" + id + "/prepare";
+    CHECK(w.post(prepare, nlohmann::json::object(), w.alice.token).status == 409);
+    CHECK(w.post(prepare, nlohmann::json::object(), w.vera).status == 403);
+    CHECK(w.post(prepare, nlohmann::json::object(), w.bob).status == 409);
+    CHECK(w.post("/console/api/approvals/" + std::string(64, '0') + "/prepare",
+                 nlohmann::json::object(), w.chan.token)
+              .status == 404);
+
+    // The approval's challenge is its own, over exactly this statement.
+    const auto chan_prepared = json_of(w.post(prepare, nlohmann::json::object(), w.chan.token));
+    const auto payload = protocol::decode_approval_payload(
+        *kanhe::from_base64url(chan_prepared["payload"].get<std::string>()));
+    REQUIRE(payload);
+    CHECK(payload->approver == w.chan.id);
+    CHECK(w.hex(payload->statement) == id);
+    CHECK_FALSE(payload->presence);
+    const auto kid =
+        protocol::key_id(provider(), kanhe::crypto::HashAlg::sha256, w.chan.key.public_key());
+    REQUIRE(kid);
+    CHECK(
+        protocol::approval_challenge(provider(), kanhe::crypto::HashAlg::sha256, *payload, *kid) ==
+        *kanhe::from_base64url(chan_prepared["public_key"]["challenge"].get<std::string>()));
+    CHECK(chan_prepared["public_key"]["userVerification"] == "required");
+    // Another's passkey does not approve it; a prepared approval is taken
+    // once.
+    CHECK(w.give(id, chan_prepared, w.lee.passkey, w.chan.token).status == 403);
+    CHECK(w.give(id, chan_prepared, w.chan.passkey, w.chan.token).status == 404);
+    // A passkey that did not verify the person does not either.
+    auto unverified = w.chan.passkey;
+    unverified.flags = 0x01;
+    CHECK(w.give(id, json_of(w.post(prepare, nlohmann::json::object(), w.chan.token)), unverified,
+                 w.chan.token)
+              .status == 403);
+
+    // Chan approves in person: one more is needed. Once is enough.
+    const auto first = w.approve_as(id, w.chan);
+    INFO(body(first));
+    REQUIRE(first.status == 202);
+    CHECK(json_of(first)["missing"] == nlohmann::json::array({1}));
+    REQUIRE(json_of(first)["approvals"].size() == 1);
+    CHECK(json_of(first)["approvals"][0]["presence"] == "passkey");
+    CHECK(json_of(first)["approvals"][0]["user_verified"] == true);
+    CHECK(w.post(prepare, nlohmann::json::object(), w.chan.token).status == 409);
+    CHECK(json_of(w.get("/console/api/approvals", w.chan.token))["waiting"].empty());
+
+    // Lee declines: a hint for Alice, nothing on the ledger.
+    CHECK(w.post("/console/api/approvals/" + id + "/decline", nlohmann::json::object(), w.lee.token)
+              .status == 200);
+    const auto declined = json_of(w.get("/console/api/approvals/" + id, w.alice.token));
+    REQUIRE(declined["held"]["declines"].size() == 1);
+    CHECK(declined["held"]["declines"][0]["approver"]["name"] == "Lee Ka Yan");
+    CHECK(w.post("/console/api/approvals/" + id + "/decline", nlohmann::json::object(), w.bob)
+              .status == 409);
+
+    // Ho approves: registered, with both approvals in its log entry.
+    const auto done = w.approve_as(id, w.ho);
+    INFO(body(done));
+    REQUIRE(done.status == 201);
+    CHECK(json_of(done)["statement_id"] == id);
+    CHECK(w.registered(id));
+    const auto index = json_of(done)["index"].get<std::uint64_t>();
+    const auto entry = protocol::decode_log_entry(*w.ledger.ledger().entry(index));
+    REQUIRE(entry);
+    CHECK(entry->approvals.size() == 2);
+    const protocol::RecordState* r = w.ledger.ledger().state().record(w.record);
+    REQUIRE(r->endorsements.size() == 1);
+    CHECK(r->endorsements[0].role == "checked");
+    // What became of it, in Alice's list.
+    const auto after = json_of(w.get("/console/api/approvals", w.alice.token));
+    REQUIRE(after["sent"].size() == 1);
+    CHECK(after["sent"][0]["state"] == "registered");
+    CHECK(json_of(w.get("/console/api/home", w.alice.token))["approvals"]["sent"] == 0);
+}
+
+TEST_CASE("approvals: withdrawn by whoever sent it, and refused when locked",
+          "[console][approvals]") {
+    ApprovalsWorld w;
+    const std::string id = w.endorse_for_approval("reviewed");
+    auto withdraw = [&](const std::string& token) {
+        return w.send("DELETE", "/console/api/approvals/" + id, nlohmann::json::object(), token);
+    };
+    // Not Chan's to withdraw, nor a viewer's.
+    CHECK(withdraw(w.chan.token).status == 403);
+    CHECK(withdraw(w.vera).status == 403);
+    // From another site's page: refused before anything.
+    auto foreign = request("DELETE", "/console/api/approvals/" + id, "localhost:7470",
+                           "https://attacker.example");
+    foreign.headers.emplace_back("authorization", "Bearer " + w.alice.token);
+    CHECK(w.web.handle(foreign).status == 403);
+    // Locked, the console approves nothing.
+    w.keys.lock();
+    CHECK(
+        w.post("/console/api/approvals/" + id + "/prepare", nlohmann::json::object(), w.chan.token)
+            .status == 423);
+    // Alice withdraws it: held no more, and listed as withdrawn.
+    REQUIRE(withdraw(w.alice.token).status == 200);
+    CHECK(withdraw(w.alice.token).status == 404);
+    const auto mine = json_of(w.get("/console/api/approvals", w.alice.token));
+    REQUIRE(mine["sent"].size() == 1);
+    CHECK(mine["sent"][0]["state"] == "withdrawn");
+    CHECK(json_of(w.get("/console/api/approvals", w.chan.token))["waiting"].empty());
+    CHECK_FALSE(w.registered(id));
+}
+
+TEST_CASE("guardians: set by an owner, approved by the new guardians, then in effect",
+          "[console][approvals][guardians]") {
+    ApprovalsWorld w;
+    const auto hex = [&](const protocol::Id& id) {
+        return w.hex(id);
+    };
+    const auto three = nlohmann::json::array({hex(w.chan.id), hex(w.lee.id), hex(w.ho.id)});
+    // Only an owner sets them.
+    CHECK(w.post("/console/api/prepare",
+                 {{"action", "guardians.set"}, {"k", 2}, {"guardians", three}, {"within_days", 7}},
+                 w.chan.token)
+              .status == 403);
+    // No guardian to spare: refused unless the owner accepts it; a guardian
+    // who is not a person; too few.
+    CHECK(w.post("/console/api/prepare",
+                 {{"action", "guardians.set"}, {"k", 3}, {"guardians", three}, {"within_days", 7}},
+                 w.alice.token)
+              .status == 409);
+    CHECK(w.post("/console/api/prepare",
+                 {{"action", "guardians.set"},
+                  {"k", 1},
+                  {"guardians", nlohmann::json::array({hex(w.chan.id), hex(w.ledger.org_id())})},
+                  {"within_days", 7}},
+                 w.alice.token)
+              .status == 409);
+    CHECK(w.post("/console/api/prepare",
+                 {{"action", "guardians.set"}, {"k", 4}, {"guardians", three}, {"within_days", 7}},
+                 w.alice.token)
+              .status == 400);
+    CHECK(w.post("/console/api/prepare",
+                 {{"action", "guardians.set"}, {"k", 2}, {"guardians", three}, {"within_days", 31}},
+                 w.alice.token)
+              .status == 400);
+    CHECK(w.post("/console/api/prepare", {{"action", "guardians.remove"}}, w.alice.token).status ==
+          409);
+
+    // 2 of 3, guarding everything: the organization's statement, which the
+    // new guardians approve before it takes effect.
+    const auto prepared = w.prepare(
+        {{"action", "guardians.set"}, {"k", 2}, {"guardians", three}, {"within_days", 7}}, w.alice);
+    const auto summary = prepared["summary"];
+    CHECK(summary["type"] == "ledger-set-guardians");
+    CHECK(summary["by_organization"] == true);
+    CHECK(summary["guardians"]["k"] == 2);
+    CHECK(summary["guarded"].is_null());
+    REQUIRE(summary["approvals"]["rules"].size() == 1);
+    CHECK(summary["approvals"]["rules"][0]["source"] == "new_guardians");
+    CHECK(summary["approvals"]["needed"] == true);
+    const auto sent = w.confirm(prepared, w.alice);
+    INFO(body(sent));
+    REQUIRE(sent.status == 202);
+    const std::string id = json_of(sent)["id"].get<std::string>();
+    auto shown = json_of(w.get("/console/api/guardians", w.alice.token));
+    CHECK(shown["in_effect"].is_null());
+    REQUIRE(shown["waiting"].size() == 1);
+    CHECK(shown["may_change"] == true);
+    CHECK(shown["organization_work"].size() == 5);
+    CHECK(json_of(w.get("/console/api/guardians", w.chan.token))["may_change"] == false);
+    // An owner sees the organization's statement among what was sent.
+    CHECK(json_of(w.get("/console/api/approvals", w.alice.token))["sent"].size() == 1);
+
+    REQUIRE(w.approve_as(id, w.chan).status == 202);
+    const auto done = w.approve_as(id, w.lee);
+    INFO(body(done));
+    REQUIRE(done.status == 201);
+    shown = json_of(w.get("/console/api/guardians", w.alice.token));
+    REQUIRE(shown["in_effect"].is_object());
+    CHECK(shown["in_effect"]["k"] == 2);
+    CHECK(shown["in_effect"]["guardians"].size() == 3);
+    CHECK(shown["in_effect"]["guarded"].is_null());
+    CHECK(shown["history"].size() == 1);
+    // Each guardian's People row says so.
+    const auto people = json_of(w.get("/console/api/people", w.alice.token));
+    for (const auto& u : people["users"]) {
+        CHECK(u["guardian"] == (u["name"] != "Alice" && u["actor"].is_string()));
+    }
+
+    // Their removal now needs the guardians in effect.
+    const auto removal = w.prepare({{"action", "guardians.remove"}}, w.alice);
+    REQUIRE(removal["summary"]["approvals"]["rules"].size() == 1);
+    CHECK(removal["summary"]["approvals"]["rules"][0]["source"] == "guardians");
+    // Day-to-day work goes on: Alice's endorsement under her own
+    // delegation waits for her approvers only, not the guardians.
+    const auto endorsing = w.prepare(
+        {{"action", "record.endorse"}, {"record", w.hex(w.record)}, {"role", "seen"}}, w.alice);
+    REQUIRE(endorsing["summary"]["approvals"]["rules"].size() == 1);
+    CHECK(endorsing["summary"]["approvals"]["rules"][0]["source"] == "delegation");
 }
 
 #if defined(BO_PROGRAM)
@@ -4026,6 +4603,369 @@ TEST_CASE("backups: sealed for the recovery code, written once a day, restored w
     CHECK(removed.size() == 29);
     CHECK(std::filesystem::exists(many.path / names.back()));
     CHECK(std::filesystem::exists(many.path / "someone-elses.cexbackup"));
+}
+
+namespace {
+
+/// The actor a console user acts as, in hex.
+std::string actor_of(FirstRunWorld& f, const std::string& token, const std::string& name) {
+    const auto people = answer_of(f.w.get("/console/api/people", token));
+    for (const auto& u : people["users"]) {
+        if (u["name"] == name && u["actor"].is_string()) {
+            return u["actor"].get<std::string>();
+        }
+    }
+    FAIL("no actor for " + name);
+    return {};
+}
+
+/// A person the owner approves in three taps (their actor, their passkey,
+/// what they may do): their session and their actor's id.
+std::pair<std::string, std::string> add_person(FirstRunWorld& f, const std::string& owner,
+                                               const std::string& name,
+                                               const kanhe::test::SoftPasskey& key,
+                                               const nlohmann::json& may) {
+    const auto invited =
+        f.w.post_as("/console/api/people", {{"invite", name}, {"role", "member"}}, owner);
+    REQUIRE(invited.status == 200);
+    const std::string link = answer_of(invited)["link"].get<std::string>();
+    const auto enrolled = f.w.enroll(key, link.substr(link.find("khi_")), name);
+    REQUIRE(enrolled.status == 200);
+    const std::string token = answer_of(enrolled)["session"].get<std::string>();
+    const std::vector<nlohmann::json> steps{
+        {{"action", "person.register"}, {"user", name}},
+        {{"action", "person.presence"}, {"user", name}},
+        {{"action", "person.delegate"}, {"user", name}, {"may", may}}};
+    for (const nlohmann::json& intent : steps) {
+        const auto prepared = f.w.post_as("/console/api/prepare", intent, owner);
+        INFO(body(prepared));
+        REQUIRE(prepared.status == 200);
+        const auto done = approve(f.w, owner, answer_of(prepared), f.alice);
+        INFO(body(done));
+        REQUIRE(done.status == 201);
+    }
+    return {token, actor_of(f, owner, name)};
+}
+
+} // namespace
+
+TEST_CASE("people: a delegation that needs approvals, and who approves for whom",
+          "[console][people][approvals]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string alice = actor_of(f, owner, "Alice");
+    // Too many approvals for the people named: not prepared.
+    nlohmann::json may{{"endorse", true}};
+    may["approvals"] = {
+        {"k", 2}, {"approvers", nlohmann::json::array({alice})}, {"within", 86'400'000}};
+    CHECK(f.w.post_as("/console/api/prepare",
+                      {{"action", "person.delegate"}, {"user", "Alice"}, {"may", may}}, owner)
+              .status == 400);
+    // Bob endorses only once Alice approves, within a day.
+    may["approvals"]["k"] = 1;
+    const auto [bob, bob_actor] = add_person(f, owner, "Bob", passkey(3), may);
+    static_cast<void>(bob);
+    const auto people = answer_of(f.w.get("/console/api/people", owner));
+    nlohmann::json bob_row;
+    nlohmann::json alice_row;
+    for (const auto& u : people["users"]) {
+        (u["name"] == "Bob" ? bob_row : alice_row) = u;
+    }
+    REQUIRE(bob_row["delegations"].size() == 1);
+    CHECK(bob_row["delegations"][0]["approvals"]["k"] == 1);
+    CHECK(bob_row["delegations"][0]["approvals"]["approvers"] == nlohmann::json::array({alice}));
+    CHECK(bob_row["approves_for"].empty());
+    REQUIRE(alice_row["approves_for"].size() == 1);
+    CHECK(alice_row["approves_for"][0]["grantee"] == bob_actor);
+    CHECK(alice_row["approves_for"][0]["grantee_name"] == "Bob");
+    CHECK(alice_row["guardian"] == false);
+    // Who may be named: the ledger's people and machines, never the
+    // organization.
+    for (const auto& a : people["actors"]) {
+        CHECK(a["kind"].is_number());
+    }
+}
+
+TEST_CASE("a contract's proposal waits for approvals, listed for those who may approve it",
+          "[console][approvals][instances]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    f.w.clock.set(kanhe::ledger::SystemClock{}.now());
+    const auto bob_key = passkey(2);
+    const auto [bob, bob_actor] = add_person(f, owner, "Bob", bob_key, {{"act", true}});
+    const std::string alice = actor_of(f, owner, "Alice");
+    const std::string contract = deploy(f, owner, golden_source("approvals"));
+    const std::string ours = kanhe::to_hex(served.session.state().ledger_id().bytes());
+    const std::string thing = act(f, owner,
+                                  {{"action", "contract.create"},
+                                   {"contract", contract},
+                                   {"function", "create"},
+                                   {"values",
+                                    {{"amount", "HKD 2_000_000"},
+                                     {"directors", nlohmann::json::array({alice, bob_actor})},
+                                     {"we", ours}}}});
+    // Alice disburses above the line: kept as a proposal, her approval
+    // counted.
+    const auto proposing = f.w.post_as(
+        "/console/api/prepare",
+        {{"action", "contract.call"}, {"instance", thing}, {"function", "disburse"}}, owner);
+    INFO(body(proposing));
+    REQUIRE(proposing.status == 200);
+    const auto proposed_events = answer_of(proposing)["summary"]["dry_run"]["events"];
+    CHECK(std::ranges::contains(proposed_events, nlohmann::json("propose")));
+    REQUIRE(approve(f.w, owner, answer_of(proposing), f.alice).status == 201);
+
+    // Bob may approve it, and his approval completes it; Alice, who
+    // proposed it, may not again.
+    const auto bobs = answer_of(f.w.get("/console/api/approvals", bob));
+    REQUIRE(bobs["proposals"].size() == 1);
+    const nlohmann::json proposal = bobs["proposals"][0];
+    CHECK(proposal["function"] == "disburse");
+    CHECK(proposal["instance"] == thing);
+    CHECK(proposal["may_approve"] == true);
+    CHECK(proposal["completes"] == true);
+    CHECK(proposal["by"]["id"] == alice);
+    REQUIRE(proposal["approvals"].size() == 1);
+    CHECK(proposal["approvals"][0]["in_person"] == true);
+    CHECK(answer_of(f.w.get("/console/api/approvals", owner))["proposals"].empty());
+    CHECK(answer_of(f.w.get("/console/api/home", bob))["approvals"]["waiting"] == 1);
+    const auto page = answer_of(f.w.get("/console/api/instances/" + thing, owner));
+    REQUIRE(page["proposals"].size() == 1);
+    CHECK(page["proposals"][0]["may_approve"] == false);
+    CHECK(page["proposals"][0]["code"].get<std::string>().starts_with("bo:approved"));
+
+    // A proposal the thing does not keep is refused before any tap.
+    CHECK(f.w.post_as("/console/api/prepare",
+                      {{"action", "contract.approve"},
+                       {"instance", thing},
+                       {"function", "disburse"},
+                       {"arguments", "a0"}},
+                      bob)
+              .status == 409);
+    // Bob's approval, his own call of approve, confirmed in person.
+    const auto approving = f.w.post_as("/console/api/prepare",
+                                       {{"action", "contract.approve"},
+                                        {"instance", thing},
+                                        {"function", "disburse"},
+                                        {"arguments", proposal["arguments_cbor"]},
+                                        {"language", "en"}},
+                                       bob);
+    INFO(body(approving));
+    REQUIRE(approving.status == 200);
+    CHECK(answer_of(approving)["summary"]["function"] == "approve");
+    const auto approve_events = answer_of(approving)["summary"]["dry_run"]["events"];
+    CHECK(std::ranges::contains(approve_events, nlohmann::json("approve")));
+    const auto done = approve(f.w, bob, answer_of(approving), bob_key);
+    INFO(body(done));
+    REQUIRE(done.status == 201);
+    CHECK(answer_of(f.w.get("/console/api/instances/" + thing, owner))["instance"]["status"] ==
+          "disbursed");
+    CHECK(answer_of(f.w.get("/console/api/approvals", bob))["proposals"].empty());
+}
+
+namespace {
+
+/// `token`'s approval of the held statement `id`, with `key`'s tap.
+http::Response give_held(FirstRunWorld& f, const std::string& id, const std::string& token,
+                         const kanhe::test::SoftPasskey& key) {
+    const auto prepared =
+        f.w.post_as("/console/api/approvals/" + id + "/prepare", nlohmann::json::object(), token);
+    INFO(body(prepared));
+    REQUIRE(prepared.status == 200);
+    const auto options = answer_of(prepared);
+    const auto challenge =
+        *kanhe::from_base64url(options["public_key"]["challenge"].get<std::string>());
+    const auto proof = key.sign(provider(), challenge);
+    return f.w.post_as("/console/api/approvals/" + id + "/approve",
+                       {{"prepared", options["prepared"]},
+                        {"credential_id", kanhe::to_base64url(proof.credential_id)},
+                        {"authenticator_data", kanhe::to_base64url(proof.authenticator_data)},
+                        {"client_data_json", kanhe::to_base64url(proof.client_data_json)},
+                        {"signature", kanhe::to_base64url(proof.signature)}},
+                       token);
+}
+
+/// A first run with Bob and Carol, and 2 of Alice, Bob, and Carol set as the
+/// organization's guardians (guarding everything), approved by Bob and
+/// Carol; the node's held statements as HeldAtNode keeps them.
+struct GuardedWorld {
+    FirstRunWorld f;
+    Served served{f};
+    HeldAtNode held_at{served.session.ledger(), f.w.clock, f.w.dir.path};
+    std::string owner;
+    kanhe::test::SoftPasskey bob_key = passkey(2);
+    kanhe::test::SoftPasskey carol_key = passkey(3);
+    std::string bob;
+    std::string carol;
+    std::string alice_actor;
+
+    GuardedWorld() {
+        held_at.serve(f.w.web);
+        owner = f.made["session"].get<std::string>();
+        bob = add_person(f, owner, "Bob", bob_key, {{"endorse", true}}).first;
+        carol = add_person(f, owner, "Carol", carol_key, {{"endorse", true}}).first;
+        alice_actor = actor_of(f, owner, "Alice");
+        const auto set = f.w.post_as(
+            "/console/api/prepare",
+            {{"action", "guardians.set"},
+             {"k", 2},
+             {"guardians", nlohmann::json::array({alice_actor, actor_of(f, owner, "Bob"),
+                                                  actor_of(f, owner, "Carol")})},
+             {"within_days", 7}},
+            owner);
+        INFO(body(set));
+        REQUIRE(set.status == 200);
+        const auto sent = approve(f.w, owner, answer_of(set), f.alice);
+        INFO(body(sent));
+        REQUIRE(sent.status == 202);
+        const std::string setting = answer_of(sent)["id"].get<std::string>();
+        REQUIRE(give_held(f, setting, bob, bob_key).status == 202);
+        REQUIRE(give_held(f, setting, carol, carol_key).status == 201);
+        REQUIRE(answer_of(f.w.get("/console/api/guardians", owner))["in_effect"].is_object());
+    }
+};
+
+} // namespace
+
+TEST_CASE("a lost passkey's recovery waits for the guardians, and is done once they approve",
+          "[console][recover][guardians]") {
+    GuardedWorld g;
+    FirstRunWorld& f = g.f;
+    const std::string code = f.made["recovery_code"].get<std::string>();
+    // Before the new passkey is made, the screen is told who must approve.
+    const auto began = f.w.post("/console/api/recover/begin", {{"recovery_code", code}});
+    INFO(body(began));
+    REQUIRE(began.status == 200);
+    const auto begun = answer_of(began);
+    REQUIRE(begun["approvals"]["needed"] == true);
+    REQUIRE(begun["approvals"]["rules"].size() == 1);
+    CHECK(begun["approvals"]["rules"][0]["source"] == "guardians");
+    CHECK(begun["approvals"]["rules"][0]["k"] == 2);
+    CHECK(begun["approvals"]["rules"][0]["missing"] == 2);
+    // The new passkey's tap sends it for their approval.
+    const auto phone = passkey(7);
+    const auto challenge =
+        *kanhe::from_base64url(begun["public_key"]["challenge"].get<std::string>());
+    const auto sent =
+        f.w.post("/console/api/recover/finish",
+                 {{"ceremony", begun["ceremony"]},
+                  {"attestation_object", kanhe::to_base64url(phone.attestation(provider()))},
+                  {"client_data_json",
+                   kanhe::to_base64url(phone.client_data("webauthn.create", challenge))}});
+    INFO(body(sent));
+    REQUIRE(sent.status == 202);
+    const auto waiting = answer_of(sent);
+    CHECK(waiting["held"] == true);
+    CHECK(waiting["user"] == "Alice");
+    CHECK(waiting["approvals"]["needed"] == true);
+    const std::string id = waiting["id"].get<std::string>();
+    // Nothing changed yet: the lost passkey is still the owner's, in the
+    // console and on the ledger, and the new one signs in nowhere.
+    auto passkeys_of_alice = [&] {
+        const auto people = console::load_people(f.w.state);
+        const console::User* alice = people.find("Alice");
+        REQUIRE(alice != nullptr);
+        return alice->passkeys;
+    };
+    REQUIRE(passkeys_of_alice().size() == 1);
+    CHECK(passkeys_of_alice()[0].credential_id == f.alice.credential_id);
+    CHECK(f.w.sign_in(phone).status == 401);
+    const auto follow_up = f.w.state / "follow-ups" / (id + ".json");
+    CHECK(std::filesystem::exists(follow_up));
+    // Bob sees it waiting for him; the owner sees it among what was sent.
+    const auto bobs = answer_of(f.w.get("/console/api/approvals", g.bob));
+    REQUIRE(bobs["waiting"].size() == 1);
+    CHECK(bobs["waiting"][0]["id"] == id);
+    CHECK(bobs["waiting"][0]["type"] == "actor-set-presence");
+    const auto sent_list = answer_of(f.w.get("/console/api/approvals", g.owner))["sent"];
+    CHECK(std::ranges::any_of(sent_list, [&](const nlohmann::json& h) { return h["id"] == id; }));
+
+    // Bob and Carol approve it: registered.
+    REQUIRE(give_held(f, id, g.bob, g.bob_key).status == 202);
+    const auto done = give_held(f, id, g.carol, g.carol_key);
+    INFO(body(done));
+    REQUIRE(done.status == 201);
+    const auto* actor = g.served.session.ledger().state().actor(
+        *kanhe::protocol::to_id(*kanhe::from_hex(g.alice_actor)));
+    REQUIRE(actor != nullptr);
+    REQUIRE(actor->presence.size() == 1);
+    CHECK(actor->presence[0].credential_id == phone.credential_id);
+
+    // A restart meanwhile: what follows comes from the console's own file.
+    console::Console restarted{console::Services{f.w.state, &provider(), &f.w.clock, &f.w.entropy,
+                                                 &f.w.sessions, &f.w.keys, compiler()}};
+    restarted.set_origins(console::loopback_origins(7470));
+    restarted.set_ledger(&g.served.session.ledger());
+    auto listing = request("GET", "/console/api/approvals", "localhost:7470");
+    listing.headers.emplace_back("authorization", "Bearer " + g.bob);
+    REQUIRE(restarted.handle(listing).status == 200);
+    CHECK_FALSE(std::filesystem::exists(follow_up));
+    // The new passkey is the owner's only one; the lost one signs in no
+    // more, and the owner's old session ended.
+    REQUIRE(passkeys_of_alice().size() == 1);
+    CHECK(passkeys_of_alice()[0].credential_id == phone.credential_id);
+    CHECK(f.w.get("/console/api/session", g.owner).status == 401);
+    CHECK(f.w.sign_in(f.alice).status == 401);
+    CHECK(f.w.sign_in(phone).status == 200);
+    std::vector<std::string> actions;
+    for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+        actions.push_back(a.action);
+    }
+    CHECK(std::ranges::contains(actions, std::string("recovery.held")));
+    CHECK(std::ranges::contains(actions, std::string("recovery.done")));
+}
+
+TEST_CASE("a machine's grant sent for the guardians' approval is set up once they approve",
+          "[console][automation][guardians]") {
+    GuardedWorld g;
+    FirstRunWorld& f = g.f;
+    // An AI agent answering to Alice: registered by her at once (her own
+    // delegation), then what it may do, which the organization signs.
+    const auto registering = f.w.post_as("/console/api/prepare",
+                                         {{"action", "machine.register"},
+                                          {"name", "helper"},
+                                          {"agent", true},
+                                          {"model", "a-model"},
+                                          {"responsible", "Alice"},
+                                          {"then", {{"may", {{"register", true}}}}}},
+                                         g.owner);
+    INFO(body(registering));
+    REQUIRE(registering.status == 200);
+    CHECK(answer_of(registering)["summary"]["approvals"]["needed"] == false);
+    const auto registered = approve(f.w, g.owner, answer_of(registering), f.alice);
+    INFO(body(registered));
+    REQUIRE(registered.status == 201);
+    const std::string machine = answer_of(registered)["statement_id"].get<std::string>();
+    const auto granting = f.w.post_as(
+        "/console/api/prepare",
+        {{"action", "machine.delegate"}, {"actor", machine}, {"may", {{"register", true}}}},
+        g.owner);
+    INFO(body(granting));
+    REQUIRE(granting.status == 200);
+    CHECK(answer_of(granting)["summary"]["approvals"]["needed"] == true);
+    CHECK(answer_of(granting)["summary"]["approvals"]["rules"][0]["source"] == "guardians");
+    const auto held = approve(f.w, g.owner, answer_of(granting), f.alice);
+    INFO(body(held));
+    REQUIRE(held.status == 202);
+    const std::string grant = answer_of(held)["id"].get<std::string>();
+    // Not yet set up: its grant waits.
+    CHECK(answer_of(f.w.get("/console/api/automation", g.owner))["set_up"].empty());
+    REQUIRE(give_held(f, grant, g.bob, g.bob_key).status == 202);
+    REQUIRE(give_held(f, grant, g.carol, g.carol_key).status == 201);
+    // Then it is listed, and its key is handed out once.
+    const auto listed = answer_of(f.w.get("/console/api/automation", g.owner))["set_up"];
+    REQUIRE(listed.size() == 1);
+    CHECK(listed[0]["actor"] == machine);
+    CHECK(listed[0]["delegation"] == grant);
+    CHECK(listed[0]["agent"] == true);
+    const auto setup = f.w.post_as(
+        "/console/api/automation/setup",
+        {{"actor", machine}, {"delegation", grant}, {"passphrase", "a long passphrase"}}, g.owner);
+    INFO(body(setup));
+    CHECK(setup.status == 200);
+    CHECK(answer_of(f.w.get("/console/api/automation", g.owner))["set_up"].empty());
 }
 
 #endif

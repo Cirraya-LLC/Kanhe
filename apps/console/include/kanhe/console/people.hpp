@@ -33,6 +33,11 @@ struct Permissions {
     /// may do (only within what the granter may do).
     bool people = false;
     std::optional<protocol::Timestamp> until;
+    /// Needs approvals (spec v0.20): what they sign under the delegation is
+    /// registered only once k of these people approve it, within the
+    /// window. Without presence, approvals that are not in person count too
+    /// (which lets agents and devices approve).
+    std::optional<protocol::ApprovalRule> approvals;
 
     // As read from a delegation (not chosen in the form):
     bool in_person = true;
@@ -61,5 +66,12 @@ struct Permissions {
 
 /// A delegation's scope as the page and its checks compare it.
 [[nodiscard]] nlohmann::json scope_json(const protocol::Scope& scope);
+
+/// An approval rule as the page and its checks compare it: {k, approvers
+/// (ids in hex, ascending), within (ms), without_presence}.
+[[nodiscard]] nlohmann::json rule_json(const protocol::ApprovalRule& rule);
+/// From the page's form ({k, approvers, within, without_presence}), sorted
+/// as a scope encodes it; nullopt if it is not one (counts, limits).
+[[nodiscard]] std::optional<protocol::ApprovalRule> parse_rule(const nlohmann::json& value);
 
 } // namespace kanhe::console

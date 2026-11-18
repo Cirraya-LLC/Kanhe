@@ -355,6 +355,17 @@ a.button {
     border-radius: 8px;
 }
 
+/* What waits for approval, and what was sent: one card each. */
+ul.approvals {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+ul.approvals h3 {
+    margin: 0.25rem 0;
+}
+
 .kind-field {
     display: flex;
     flex-wrap: wrap;

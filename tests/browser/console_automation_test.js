@@ -69,10 +69,10 @@ async function personIn(browser, name, options = {}) {
 }
 
 async function tap(page, what) {
-  await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+  await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
   await page.getByText("Checked in this browser").waitFor();
   if (what) await page.getByText(what, { exact: true }).first().waitFor();
-  await page.getByRole("button", { name: "Approve with your passkey" }).click();
+  await page.getByRole("button", { name: "Confirm with your passkey" }).click();
 }
 
 (async () => {
@@ -204,8 +204,8 @@ async function tap(page, what) {
     await check.waitFor();
     assert.ok(await check.evaluate((s) => s.classList.contains("focused")), "the action the link names");
     await check.getByRole("button", { name: "Prepare" }).click();
-    await b.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
-    const approve = b.getByRole("button", { name: "Approve with your passkey" });
+    await b.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
+    const approve = b.getByRole("button", { name: "Confirm with your passkey" });
     const box = await approve.boundingBox();
     assert.ok(box.height >= 44, `a target of ${box.height} px`);
     assert.ok(await b.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),

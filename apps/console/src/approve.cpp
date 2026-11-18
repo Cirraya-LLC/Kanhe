@@ -1,14 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Cirraya
 
-// Approving with a passkey, one tap per statement. The console builds the
+// Confirming with a passkey, one tap per statement. The console builds the
 // statement a signed-in person asked for and holds it for two minutes; the
 // page shows it and has the person's passkey sign its presence challenge;
 // the console checks that proof as the ledger will, opens the person's
 // sealed key, signs, submits, and forgets the key. The ledger itself refuses
 // the statement without the proof when the person's delegation requires it.
+// A statement whose approval rules (spec v0.20) need others too is sent for
+// approval instead: held at the node until they approve it (approvals.cpp).
 
+#include <algorithm>
 #include <chrono>
+#include <functional>
 #include <future>
 #include <memory>
 #include <mutex>
@@ -28,17 +32,21 @@
 #include <kanhe/console/setup.hpp>
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state.hpp>
+#include <kanhe/node/approvals.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/peers.hpp>
 #include <kanhe/node/record_files.hpp>
 #include <kanhe/node/sources.hpp>
 
 #include "responses.hpp"
+#include "summaries.hpp"
 
 namespace kanhe::console {
 
@@ -97,7 +105,10 @@ std::variant<protocol::Body, std::string> body_of_intent(const nlohmann::json& i
     return std::string("the console cannot prepare this action");
 }
 
-nlohmann::json describe(const protocol::Statement& s, const protocol::LedgerState& state) {
+} // namespace
+
+nlohmann::json describe_statement(const protocol::Statement& s,
+                                  const protocol::LedgerState& state) {
     nlohmann::json out{{"type", std::string(protocol::name(protocol::type_of(s.body)))}};
     if (const auto* e = std::get_if<protocol::RecordEndorseBody>(&s.body)) {
         out["record"] = to_hex(e->record.bytes());
@@ -164,9 +175,63 @@ nlohmann::json describe(const protocol::Statement& s, const protocol::LedgerStat
         }
         out["scope"] = scope_json(grant->scope);
         out["may"] = permissions_json(permissions_of(grant->scope));
+        if (grant->scope.approvals) {
+            // Who approves what the grantee signs (spec v0.20), by name.
+            nlohmann::json approvers = nlohmann::json::array();
+            for (const protocol::Id& named : grant->scope.approvals->approvers) {
+                const auto* approver = state.actor(named);
+                approvers.push_back(
+                    {{"id", to_hex(named.bytes())},
+                     {"name", approver != nullptr ? nlohmann::json(approver->display_name)
+                                                  : nlohmann::json()}});
+            }
+            out["approvers"] = std::move(approvers);
+        }
     } else if (const auto* withdrawn = std::get_if<protocol::DelegationRevokeBody>(&s.body)) {
         out["delegation"] = to_hex(withdrawn->delegation.bytes());
         out["reason"] = withdrawn->reason ? nlohmann::json(*withdrawn->reason) : nlohmann::json();
+    } else if (const auto* rotated = std::get_if<protocol::ActorRotateKeyBody>(&s.body)) {
+        out["subject"] = to_hex(rotated->actor.bytes());
+        out["key"] = to_hex(rotated->key.bytes);
+        if (const auto* subject = state.actor(rotated->actor)) {
+            out["subject_name"] = subject->display_name;
+        }
+    } else if (const auto* revoked = std::get_if<protocol::ActorRevokeBody>(&s.body)) {
+        out["subject"] = to_hex(revoked->actor.bytes());
+        out["reason"] = revoked->reason ? nlohmann::json(*revoked->reason) : nlohmann::json();
+        if (const auto* subject = state.actor(revoked->actor)) {
+            out["subject_name"] = subject->display_name;
+        }
+    } else if (const auto* log_key = std::get_if<protocol::LedgerRotateLogKeyBody>(&s.body)) {
+        out["key"] = to_hex(log_key->key.bytes);
+    } else if (const auto* set = std::get_if<protocol::LedgerSetGuardiansBody>(&s.body)) {
+        // The guardians (spec v0.20) with their names, or none; and what they
+        // guard (null: everything the organization signs).
+        out["guardians"] = set->guardians ? rule_json(*set->guardians) : nlohmann::json();
+        nlohmann::json names = nlohmann::json::array();
+        if (set->guardians) {
+            for (const protocol::Id& named : set->guardians->approvers) {
+                const auto* guardian = state.actor(named);
+                names.push_back(guardian != nullptr ? guardian->display_name
+                                                    : to_hex(named.bytes()));
+            }
+        }
+        out["guardian_names"] = names;
+        nlohmann::json guarded;
+        if (set->guarded) {
+            guarded = nlohmann::json::array();
+            for (const protocol::StatementType t : *set->guarded) {
+                guarded.push_back(std::string(protocol::name(t)));
+            }
+        }
+        out["guarded"] = guarded;
+    } else if (const auto* moved = std::get_if<protocol::RecordTransitionBody>(&s.body)) {
+        out["record"] = to_hex(moved->record.bytes());
+        out["from_state"] = moved->from_state;
+        out["to_state"] = moved->to_state;
+        if (const auto* record = state.record(moved->record)) {
+            out["record_type"] = record->record_type;
+        }
     } else if (const auto* c = std::get_if<protocol::ContractCallBody>(&s.body)) {
         out["function"] = c->function;
         out["contract"] =
@@ -191,6 +256,121 @@ nlohmann::json describe(const protocol::Statement& s, const protocol::LedgerStat
         }
     }
     return out;
+}
+
+nlohmann::json registration_terms(const protocol::RecordRegisterBody& g) {
+    nlohmann::json summary = nlohmann::json::object();
+    nlohmann::json metadata = nlohmann::json::object();
+    if (g.record_type == protocol::contract_consent_type && g.metadata) {
+        // A consent's terms, which the page checks in the bytes too.
+        if (const auto c = protocol::decode_contract_consent(*g.metadata)) {
+            summary["consent"] = {{"ledger", to_hex(c->ledger.bytes())},
+                                  {"instance", to_hex(c->instance.bytes())},
+                                  {"function", c->function},
+                                  {"arguments", to_hex(c->arguments.bytes())},
+                                  {"head", c->head},
+                                  {"until", c->until}};
+        }
+    } else if (g.record_type == protocol::claim_type && g.metadata) {
+        // A claim's terms, which the page checks in the bytes too.
+        if (const auto c = protocol::decode_claim(*g.metadata)) {
+            summary["claim"] = {
+                {"source", to_hex(c->source.bytes())},
+                {"text", protocol::claim_text(*c)},
+                {"holds", c->holds},
+                {"subject", c->subject ? nlohmann::json(*c->subject) : nlohmann::json()},
+                {"as_of", c->as_of},
+                {"until", c->until ? nlohmann::json(*c->until) : nlohmann::json()},
+                {"answers", c->answers ? nlohmann::json(to_hex(c->answers->second.bytes()))
+                                       : nlohmann::json()}};
+        }
+    } else if (const auto terms =
+                   g.metadata ? access_terms(g.record_type, *g.metadata) : nlohmann::json();
+               !terms.is_null()) {
+        // An access record's terms, which the page checks in the bytes too.
+        summary["access"] = terms;
+    } else if (g.record_type == protocol::script_type && g.metadata) {
+        // A script's approval: its files' digests, which the page checks
+        // in the bytes against those it computed from the files.
+        summary["script_approval"] = script_terms(*g.metadata);
+    } else if (g.metadata) {
+        // Public metadata as the console writes it, text names and values
+        // (null for any other, as the page's own check reads it).
+        const cbor::Map* map = g.metadata->as_map();
+        if (map == nullptr) {
+            metadata = nlohmann::json();
+        } else {
+            for (const auto& entry : *map) {
+                const std::string* key = entry.key.as_text();
+                const std::string* value = entry.value.as_text();
+                if (key == nullptr || value == nullptr) {
+                    metadata = nlohmann::json();
+                    break;
+                }
+                metadata[*key] = *value;
+            }
+        }
+    }
+    summary["metadata"] = metadata;
+    return summary;
+}
+
+namespace {
+
+/// What POST /v1/approvals takes for a statement a confirmation signed
+/// (spec v0.20): the signed statement and the rest of its submission (a
+/// registration's sealed private data and files, or a call's consents), a
+/// registration's fields if they are shown to the approvers, and a note.
+Result<Bytes> hold_request(const Bytes& body, bool submission,
+                           std::vector<protocol::RecordField> fields, const std::string& note) {
+    node::HeldStatement held;
+    if (!submission) {
+        held.statement = body;
+    } else {
+        auto value = cbor::decode(body);
+        if (!value) {
+            return std::unexpected(value.error());
+        }
+        const cbor::Value* statement = value->find(1);
+        if (statement == nullptr || statement->as_bytes() == nullptr) {
+            return fail(Errc::malformed, "a submission without its statement");
+        }
+        held.statement = *statement->as_bytes();
+        protocol::SubmissionParts parts;
+        if (const cbor::Value* vault = value->find(2);
+            vault != nullptr && vault->as_bytes() != nullptr) {
+            parts.vault = *vault->as_bytes();
+        }
+        if (const cbor::Value* bundles = value->find(3);
+            bundles != nullptr && bundles->as_array() != nullptr) {
+            for (const cbor::Value& bundle : *bundles->as_array()) {
+                if (bundle.as_bytes() != nullptr) {
+                    parts.consents.push_back(*bundle.as_bytes());
+                }
+            }
+        }
+        if (const cbor::Value* files = value->find(4)) {
+            auto decoded = node::decode_sealed_files(*files);
+            if (!decoded) {
+                return std::unexpected(decoded.error());
+            }
+            for (node::SealedFile& f : *decoded) {
+                parts.files.emplace_back(f.index, std::move(f.sealed));
+            }
+        }
+        if (!parts.empty()) {
+            auto encoded = protocol::encode_submission_parts(parts);
+            if (!encoded) {
+                return std::unexpected(encoded.error());
+            }
+            held.parts = std::move(*encoded);
+        }
+    }
+    held.fields = std::move(fields);
+    if (!note.empty()) {
+        held.note = note;
+    }
+    return node::encode_hold_request(held);
 }
 
 } // namespace
@@ -220,14 +400,21 @@ http::Response Console::prepare_route(const http::Request& request) const {
         signer.role != Role::owner && signer.role != Role::admin) {
         return error(403, "forbidden", "only an owner or an admin approves people and machines");
     }
+    // The organization's guardians (spec v0.20): the organization signs the
+    // setting, after an owner's passkey.
+    if (action.starts_with("guardians.") && signer.role != Role::owner) {
+        return error(403, "forbidden", "only an owner sets the organization's guardians");
+    }
     // A script is code that makes records: approving it is as deploying
     // rules (and the ledger takes it only from a person in person).
     if ((action == "script.approve" || action == "script.withdraw") && signer.role != Role::owner &&
         signer.role != Role::admin) {
         return error(403, "forbidden", "only an owner or an admin approves or withdraws scripts");
     }
-    const bool calling =
-        action == "contract.create" || action == "contract.call" || action == "request.answer";
+    // An approval of a contract's proposal (Bo, requirements of approvals) is
+    // the person's own call of `approve`, run before the tap as any call.
+    const bool calling = action == "contract.create" || action == "contract.call" ||
+                         action == "request.answer" || action == "contract.approve";
     if (served == nullptr || !submitter()) {
         return error(503, "unavailable", "the console has no ledger to act on");
     }
@@ -291,11 +478,12 @@ http::Response Console::prepare_route(const http::Request& request) const {
         body = protocol::Body{std::move(registration)};
         draft = std::move(d);
     } else if (action.starts_with("person.") || action.starts_with("machine.") ||
-               action == "delegation.revoke") {
-        // A step of approving a person or adding a machine, or revoking
-        // what someone may do.
-        auto step = action.starts_with("machine.") ? machine_step(signer, intent)
-                                                   : person_step(signer, intent);
+               action.starts_with("guardians.") || action == "delegation.revoke") {
+        // A step of approving a person or adding a machine, revoking what
+        // someone may do, or setting the organization's guardians.
+        auto step = action.starts_with("machine.")     ? machine_step(signer, intent)
+                    : action.starts_with("guardians.") ? guardians_step(signer, intent)
+                                                       : person_step(signer, intent);
         if (auto* refused = std::get_if<http::Response>(&step)) {
             return std::move(*refused);
         }
@@ -445,8 +633,14 @@ http::Response Console::prepare_route(const http::Request& request) const {
             s.delegation_id.reset();
         } else {
             s.actor_id = *actor;
-            s.delegation_id = node::choose_delegation(state, *actor, protocol::type_of(s.body),
-                                                      record_type, s.issued_at, contract);
+            // An approval of a proposal names `approve`, which a delegation's
+            // functions must list.
+            const auto* approving = action == "contract.approve"
+                                        ? std::get_if<protocol::ContractCallBody>(&s.body)
+                                        : nullptr;
+            s.delegation_id =
+                node::choose_delegation(state, *actor, protocol::type_of(s.body), record_type,
+                                        s.issued_at, contract, approving);
             if (!s.delegation_id) {
                 problem = "no valid delegation lets " + a->display_name + " do this";
                 return;
@@ -464,10 +658,18 @@ http::Response Console::prepare_route(const http::Request& request) const {
         }
         prepared.kid = *kid;
         prepared.challenge = *challenge;
-        summary = describe(s, state);
+        summary = describe_statement(s, state);
         // Where it comes from: its sources and script, or the script a
         // revocation withdraws.
         summary.update(provenance_summary(state, s));
+        // Whether others must approve it too (spec v0.20): the person's tap
+        // is user-verified, so they count where a rule names them; the
+        // organization never counts.
+        summary["approvals"] = approvals_needed(state, s, !machine.as_organization);
+        if (summary["approvals"]["needed"].get<bool>()) {
+            prepared.for_approval = true;
+            prepared.lapses_at = summary["approvals"]["lapses_at"].get<protocol::Timestamp>();
+        }
         if (calling) {
             // Run as the ledger will run it, with the person's presence: the
             // page shows what it decides, and a call it would not take is
@@ -490,6 +692,10 @@ http::Response Console::prepare_route(const http::Request& request) const {
     }
     if (!problem.empty()) {
         return error(409, "conflict", problem);
+    }
+    if (prepared.for_approval && !approval_hooks().hold) {
+        return error(503, "unavailable",
+                     "this needs others' approvals, and this console cannot send it for approval");
     }
     if (!declined.is_null()) {
         const bool waits = declined.value("verdict", "") == "needs";
@@ -516,47 +722,12 @@ http::Response Console::prepare_route(const http::Request& request) const {
                              {"salt", to_base64url(draft->vault.attachments[i].salt)},
                              {"upload", draft->uploads[i]}});
         }
-        nlohmann::json metadata = nlohmann::json::object();
-        if (g.record_type == protocol::contract_consent_type && g.metadata) {
-            // A consent's terms, which the page checks in the bytes too.
-            if (const auto c = protocol::decode_contract_consent(*g.metadata)) {
-                summary["consent"] = {{"ledger", to_hex(c->ledger.bytes())},
-                                      {"instance", to_hex(c->instance.bytes())},
-                                      {"function", c->function},
-                                      {"arguments", to_hex(c->arguments.bytes())},
-                                      {"head", c->head},
-                                      {"until", c->until}};
-            }
-        } else if (g.record_type == protocol::claim_type && g.metadata) {
-            // A claim's terms, which the page checks in the bytes too.
-            if (const auto c = protocol::decode_claim(*g.metadata)) {
-                summary["claim"] = {
-                    {"source", to_hex(c->source.bytes())},
-                    {"text", protocol::claim_text(*c)},
-                    {"holds", c->holds},
-                    {"subject", c->subject ? nlohmann::json(*c->subject) : nlohmann::json()},
-                    {"as_of", c->as_of},
-                    {"until", c->until ? nlohmann::json(*c->until) : nlohmann::json()},
-                    {"answers", c->answers ? nlohmann::json(to_hex(c->answers->second.bytes()))
-                                           : nlohmann::json()}};
-            }
-        } else if (const auto terms =
-                       g.metadata ? access_terms(g.record_type, *g.metadata) : nlohmann::json();
-                   !terms.is_null()) {
-            // An access record's terms, which the page checks in the bytes too.
-            summary["access"] = terms;
-        } else if (g.record_type == protocol::script_type && g.metadata) {
-            // A script's approval: its files' digests, which the page checks
-            // in the bytes against those it computed from the files.
-            summary["script_approval"] = script_terms(*g.metadata);
-        } else if (g.metadata) {
-            for (const auto& entry : *g.metadata->as_map()) {
-                metadata[*entry.key.as_text()] = *entry.value.as_text();
-            }
-        }
+        // Its terms (a consent's, a claim's, an access record's, a
+        // script's) or its public metadata, which the page checks in the
+        // bytes too.
+        summary.update(registration_terms(g));
         summary["fields"] = fields;
         summary["files"] = files;
-        summary["metadata"] = metadata;
         summary["keep_files"] = draft->keep_files;
     }
     prepared.draft = std::move(draft);
@@ -570,6 +741,14 @@ http::Response Console::prepare_route(const http::Request& request) const {
     prepared.model_version = std::move(machine.model_version);
     prepared.seal_as = std::move(machine.seal_as);
     prepared.seal_over = std::move(machine.seal_over);
+    // A machine's registration names the step that grants it what it may
+    // do: taken by itself if the registration has to wait for approvals.
+    if (action == "machine.register") {
+        if (const auto then = intent.find("then"); then != intent.end() && then->is_object()) {
+            prepared.then = *then;
+            prepared.then["action"] = "machine.delegate";
+        }
+    }
     summary["consents"] = prepared.bundles.size();
     prepared.user = signer.user;
     prepared.key = machine.as_organization ? std::string(root_key_name) : user->key;
@@ -647,7 +826,15 @@ Console::sign_approval(const http::Request& request) const {
     }
     const std::string origin = canonical(*request.header("origin"));
     if (!prepared || prepared->origin != origin) {
-        return error(404, "not_found", "nothing of yours waits for approval under that id");
+        return error(404, "not_found", "nothing of yours waits for confirmation under that id");
+    }
+    // Sent for approval (spec v0.20): a note for those who approve it, and
+    // whether a registration's fields are shown to them.
+    const std::string note = field_text(body, "note");
+    const auto shown = body.find("show_fields");
+    const bool show_fields = shown != body.end() && shown->is_boolean() && shown->get<bool>();
+    if (note.size() > protocol::max_approval_note) {
+        return error(400, "invalid_argument", "a note for the approvers is at most 1,000 bytes");
     }
     protocol::PresenceProof proof;
     for (auto [key, into] : {std::pair{"credential_id", &proof.credential_id},
@@ -674,6 +861,29 @@ Console::sign_approval(const http::Request& request) const {
     std::string problem;
     std::optional<crypto::PublicKey> current_key;
     const crypto::HashAlg hash = served->hash();
+    // What goes for approval instead of to the ledger: the hold request,
+    // with the fields in the order of their leaves if they are shown.
+    const bool for_approval = prepared->for_approval;
+    const protocol::Timestamp lapses_at = prepared->lapses_at;
+    std::vector<protocol::RecordField> fields_shown;
+    if (for_approval && show_fields && prepared->draft && !prepared->draft->vault.fields.empty()) {
+        if (auto commitment =
+                protocol::commit_fields(*services_.provider, hash, prepared->draft->vault.fields)) {
+            fields_shown = std::move(commitment->fields);
+        }
+    }
+    auto sent = [&](Signing signing) -> std::variant<Signing, http::Response> {
+        if (!for_approval) {
+            return signing;
+        }
+        auto request_body = hold_request(signing.body, signing.submission, fields_shown, note);
+        if (!request_body) {
+            return error(500, "internal", "the statement could not be sent for approval");
+        }
+        signing.hold = std::move(*request_body);
+        signing.lapses_at = lapses_at;
+        return signing;
+    };
     const People people = load_people(services_.directory);
     const User* approver = people.find(prepared->user);
     const auto approver_actor = approver != nullptr ? id_of(approver->actor) : std::nullopt;
@@ -721,14 +931,28 @@ Console::sign_approval(const http::Request& request) const {
         if (prepared->new_key && prepared->hand_out) {
             // A machine's key: handed out once, never kept.
             const std::lock_guard lock(mutex_);
-            handed_[to_hex(signed_statement->id.bytes())] =
-                Handed{prepared->new_key,
-                       prepared->user,
-                       prepared->person,
-                       prepared->agent,
-                       prepared->model,
-                       prepared->model_version,
-                       services_.clock->now() + 10 * 60'000};
+            // Sent for approval, it waits for its registration until it
+            // lapses, in memory only.
+            handed_[to_hex(signed_statement->id.bytes())] = Handed{
+                prepared->new_key,
+                prepared->user,
+                prepared->person,
+                prepared->agent,
+                prepared->model,
+                prepared->model_version,
+                std::max<protocol::Timestamp>(services_.clock->now() + 10 * 60'000,
+                                              for_approval ? lapses_at : protocol::Timestamp{0})};
+        } else if (const auto* grant = std::get_if<protocol::DelegationGrantBody>(&statement.body);
+                   grant != nullptr && prepared->activity == "automation.delegate") {
+            // What a machine may do: its key waits for it, until it lapses if
+            // it is sent for approval, and is set up from Automation then.
+            const std::lock_guard lock(mutex_);
+            if (const auto it = handed_.find(to_hex(grant->grantee.bytes())); it != handed_.end()) {
+                it->second.delegation = to_hex(signed_statement->id.bytes());
+                if (for_approval) {
+                    it->second.expires = std::max(it->second.expires, lapses_at);
+                }
+            }
         } else if (prepared->new_key && prepared->seal_as) {
             // The console's own machine key (its credential key): kept under
             // its name, linked to no person; never over a key another
@@ -750,28 +974,31 @@ Console::sign_approval(const http::Request& request) const {
             key_name = "person-" + to_hex(signed_statement->id.bytes()).substr(0, 16);
             services_.keys->seal(key_name, *prepared->new_key);
         }
-        const std::string by = prepared->user;
-        return Signing{
-            std::move(signed_statement->encoded),
-            false,
-            {},
-            [this, by, person = prepared->person, activity = prepared->activity,
-             key_name](const protocol::Id& registered) {
-                if (!key_name.empty()) {
-                    try {
-                        change_people([&](People& users) {
-                            if (User* u = users.find(person); u != nullptr && u->actor.empty()) {
-                                u->actor = to_hex(registered.bytes());
-                                u->key = key_name;
-                            }
-                        });
-                    } catch (const std::exception&) {
-                        // Linked by hand then: console user link.
-                    }
-                }
-                log_activity(by, activity,
-                             {{"user", person}, {"statement", to_hex(registered.bytes())}});
-            }};
+        // What follows its registration: the person linked, the activity
+        // log; and, for a machine an owner sent for approval, the step that
+        // grants it what it may do.
+        nlohmann::json follow{{"by", prepared->user},
+                              {"activity", prepared->activity},
+                              {"detail", {{"user", prepared->person}}}};
+        if (!key_name.empty()) {
+            follow["link"] = {{"user", prepared->person}, {"key", key_name}};
+        }
+        if (for_approval && prepared->hand_out && prepared->then.is_object() &&
+            signer.role == Role::owner) {
+            follow["machine"] = prepared->then;
+        }
+        // Registered at once (its signer met its rules after all), the page
+        // takes the machine's next step itself.
+        nlohmann::json at_once = follow;
+        at_once.erase("machine");
+        Signing signing{std::move(signed_statement->encoded),
+                        false,
+                        {},
+                        [this, at_once](const protocol::Id& registered) {
+                            run_follow_up(registered, at_once);
+                        }};
+        signing.follow = std::move(follow);
+        return sent(std::move(signing));
     }
     if (!prepared->bundles.empty()) {
         // A call citing consents goes with their bundles.
@@ -785,10 +1012,10 @@ Console::sign_approval(const http::Request& request) const {
         if (!encoded) {
             return error(500, "internal", "the submission could not be encoded");
         }
-        return Signing{std::move(*encoded), true, {}};
+        return sent(Signing{std::move(*encoded), true, {}});
     }
     if (!prepared->draft) {
-        return Signing{std::move(signed_statement->encoded), false, {}};
+        return sent(Signing{std::move(signed_statement->encoded), false, {}});
     }
     // A registration: its private data, and its files if the kind keeps
     // them, sealed to the vault key for the record's id, sent along.
@@ -849,7 +1076,7 @@ Console::sign_approval(const http::Request& request) const {
     signing.uploads.insert(signing.uploads.end(), draft.proof_uploads.begin(),
                            draft.proof_uploads.end());
     // A certificate's record: published once registered, its printed fields
-    // disclosed (certifying.cpp).
+    // disclosed (certifying.cpp); if it is held, from its private data then.
     if (std::ranges::any_of(load_kinds(services_.directory), [&](const Kind& k) {
             return k.type == registration.record_type && !k.printed.empty();
         })) {
@@ -857,11 +1084,17 @@ Console::sign_approval(const http::Request& request) const {
                          fields = draft.vault.fields](const protocol::Id& id) {
             publish_certificate(id, type, fields);
         };
+        signing.follow = {{"certificate", registration.record_type}};
     }
     // Its sources' proofs, kept with it once it is registered: its evidence
     // carries them wherever it is served (a proof not kept is kept again
-    // from its page).
-    if (!draft.source_proofs.empty()) {
+    // from its page). Sent for approval, they are kept now, under its id.
+    if (for_approval) {
+        for (const auto& [kept_source, kept_proof] : draft.source_proofs) {
+            static_cast<void>(node::keep_source_proof(services_.directory.parent_path(), record,
+                                                      kept_source, kept_proof));
+        }
+    } else if (!draft.source_proofs.empty()) {
         signing.after = [this, then = std::move(signing.after),
                          proofs = draft.source_proofs](const protocol::Id& id) {
             if (then) {
@@ -873,7 +1106,7 @@ Console::sign_approval(const http::Request& request) const {
             }
         };
     }
-    return signing;
+    return sent(std::move(signing));
 }
 
 http::Response Console::approve_route(const http::Request& request) const {
@@ -882,19 +1115,66 @@ http::Response Console::approve_route(const http::Request& request) const {
         return std::move(*refused);
     }
     // Waits for the ledger's answer (the node itself uses the asynchronous
-    // handle instead); the promise outlives a wait that gives up.
-    Signing signing = std::get<Signing>(std::move(signed_or));
+    // handle instead).
+    auto signing = std::make_shared<Signing>(std::get<Signing>(std::move(signed_or)));
+    return wait_for([this, signing](std::function<void(http::Response)> respond) {
+        send_signed(std::move(*signing), std::move(respond));
+    });
+}
+
+http::Response
+Console::wait_for(const std::function<void(std::function<void(http::Response)>)>& start) {
+    // The promise outlives a wait that gives up.
     auto answered = std::make_shared<std::promise<http::Response>>();
     auto future = answered->get_future();
-    submitter()(std::move(signing.body), signing.submission,
-                [answered](http::Response r) { answered->set_value(std::move(r)); });
+    start([answered](http::Response r) { answered->set_value(std::move(r)); });
     if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-        return error(504, "unavailable", "the ledger did not register it in time");
+        return error(504, "unavailable", "the ledger did not answer in time");
     }
-    http::Response registered = future.get();
-    registered_now(signing, registered);
-    secure(registered);
-    return registered;
+    return future.get();
+}
+
+void Console::send_signed(Signing signing, std::function<void(http::Response)> respond) const {
+    if (!signing.hold) {
+        Bytes body = std::move(signing.body);
+        const bool submission = signing.submission;
+        submitter()(std::move(body), submission,
+                    [this, signing = std::move(signing),
+                     respond = std::move(respond)](http::Response registered) {
+                        registered_now(signing, registered);
+                        secure(registered);
+                        respond(std::move(registered));
+                    });
+        return;
+    }
+    const ApprovalHooks hooks = approval_hooks();
+    if (!hooks.hold) {
+        respond(error(503, "unavailable", "this console cannot send statements for approval"));
+        return;
+    }
+    // Held until its approvals are in (202), or registered at once (201)
+    // if its signer met its rules after all.
+    Bytes body = std::move(*signing.hold);
+    hooks.hold(std::move(body), [this, signing = std::move(signing),
+                                 respond = std::move(respond)](http::Response answer) {
+        if (answer.status == 202) {
+            // Its uploads went with it, sealed; what follows it waits for
+            // its registration, in a file.
+            forget_uploads(signing.uploads);
+            const auto waiting =
+                nlohmann::json::parse(answer.body.begin(), answer.body.end(), nullptr, false);
+            const std::string id = waiting.is_object() ? waiting.value("id", "") : std::string();
+            if (signing.follow.is_object() && !id.empty()) {
+                nlohmann::json what = signing.follow;
+                what["until"] = signing.lapses_at;
+                keep_follow_up(id, std::move(what));
+            }
+        } else {
+            registered_now(signing, answer);
+        }
+        secure(answer);
+        respond(std::move(answer));
+    });
 }
 
 void Console::registered_now(const Signing& signing, const http::Response& registered) const {

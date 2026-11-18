@@ -151,7 +151,7 @@ async function waitRunning() {
     await page.getByRole("button", { name: "Act on this example.document/1 record" }).click();
     await page.getByLabel("Role of the endorsement").fill("cancelled");
     await page.getByRole("button", { name: "Prepare" }).click();
-    await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+    await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
     await page.getByRole("button", { name: "Cancel" }).click();
     await page.getByRole("heading", { name: "Things" }).waitFor();
 
@@ -163,7 +163,7 @@ async function waitRunning() {
     await page.getByText("reviewed").waitFor();
     // The page decoded the bytes and computed their challenge itself.
     await page.getByText("Checked in this browser").waitFor();
-    await page.getByRole("button", { name: "Approve with your passkey" }).click();
+    await page.getByRole("button", { name: "Confirm with your passkey" }).click();
     await page.getByRole("heading", { name: "Done" }).waitFor();
     let shown = JSON.parse(run("record", "show", record, "--json"));
     assert.deepEqual(shown.endorsements.map((e) => e.role), ["reviewed"]);
@@ -181,7 +181,7 @@ async function waitRunning() {
     await page.getByLabel("Role of the endorsement").fill("tampered");
     await page.getByRole("button", { name: "Prepare" }).click();
     await page.getByText("does not match what it asked you to sign").waitFor();
-    assert.equal(await page.getByRole("button", { name: "Approve with your passkey" }).count(), 0);
+    assert.equal(await page.getByRole("button", { name: "Confirm with your passkey" }).count(), 0);
     await page.unroute("**/console/api/prepare");
     shown = JSON.parse(run("record", "show", record, "--json"));
     assert.deepEqual(shown.endorsements.map((e) => e.role), ["reviewed"]);
@@ -198,9 +198,9 @@ async function waitRunning() {
     await page.getByLabel("Role of the endorsement").fill("refused");
     await page.getByRole("button", { name: "Prepare" }).click();
     await page.getByText("Checked in this browser").waitFor();
-    await page.getByRole("button", { name: "Approve with your passkey" }).click();
+    await page.getByRole("button", { name: "Confirm with your passkey" }).click();
     await page.getByText("go back and prepare it again").waitFor();
-    assert.equal(await page.getByRole("button", { name: "Approve with your passkey" }).isDisabled(), true);
+    assert.equal(await page.getByRole("button", { name: "Confirm with your passkey" }).isDisabled(), true);
     await page.unroute("**/console/api/approve");
     await page.getByRole("button", { name: "Cancel" }).click();
     await page.getByRole("heading", { name: "Things" }).waitFor();

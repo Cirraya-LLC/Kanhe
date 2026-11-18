@@ -23,6 +23,7 @@
 #include <kanhe/bo/pack.hpp>
 #include <kanhe/bo/source.hpp>
 #include <kanhe/console/console.hpp>
+#include <kanhe/console/users.hpp>
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/log.hpp>
@@ -246,8 +247,15 @@ http::Response Console::instance_route(const http::Request& request) const {
     const auto asked = request.query.find("language");
     const std::string language = language_of(asked != request.query.end() ? asked->second : "");
     const protocol::Timestamp now = services_.clock->now();
+    // Who reads it: the proposals waiting for approvals say whether they may
+    // approve each.
+    const People people = load_people(services_.directory);
+    const User* reader = people.find(signer.user);
+    const auto reader_actor = reader != nullptr ? id_of(reader->actor) : std::nullopt;
 
     nlohmann::json instance;
+    nlohmann::json proposals = nlohmann::json::array();
+    std::vector<std::pair<std::string, std::string>> names;
     nlohmann::json requests = nlohmann::json::array();
     nlohmann::json due = nlohmann::json::array();
     std::vector<std::uint64_t> history;
@@ -299,6 +307,21 @@ http::Response Console::instance_route(const http::Request& request) const {
         }
         history.assign(i->history.begin(), i->history.end());
         state_bytes = Bytes(i->state.bytes().begin(), i->state.bytes().end());
+        // Proposals waiting for approvals (Bo), and the names of the people
+        // the contract's words name by their ids.
+        proposals = proposals_json(state, reader_actor, *id, language);
+        const auto add = [&](const nlohmann::json& person) {
+            if (person.is_object() && person.contains("name") && person["name"].is_string()) {
+                names.emplace_back(person["id"].get<std::string>(),
+                                   person["name"].get<std::string>());
+            }
+        };
+        for (const nlohmann::json& p : proposals) {
+            add(p["by"]);
+            for (const nlohmann::json& person : p["approvals"]) {
+                add(person);
+            }
+        }
         // The time rules due now on this instance, as a keeper would find
         // them; the person may call them.
         node::DueOptions options;
@@ -371,11 +394,28 @@ http::Response Console::instance_route(const http::Request& request) const {
         calls = (*answer)["calls"];
         words = answer->value("state", nlohmann::json());
     }
+    // The contract's words name people by their actor ids: here by name.
+    if (words.is_object() && words.contains("proposals") && words["proposals"].is_array()) {
+        for (nlohmann::json& p : words["proposals"]) {
+            if (!p.is_object() || !p.contains("text") || !p["text"].is_string()) {
+                continue;
+            }
+            std::string text = p["text"].get<std::string>();
+            for (const auto& [hex, name] : names) {
+                for (std::size_t at = text.find(hex); at != std::string::npos;
+                     at = text.find(hex, at + name.size())) {
+                    text.replace(at, hex.size(), name);
+                }
+            }
+            p["text"] = text;
+        }
+    }
     return json(200, {{"instance", std::move(instance)},
                       {"history", std::move(calls_made)},
                       {"requests", std::move(requests)},
                       {"due", std::move(due)},
                       {"held", held_on(*id)},
+                      {"proposals", std::move(proposals)},
                       {"registrar", static_cast<bool>(proposer())},
                       {"calls", std::move(calls)},
                       {"state", std::move(words)},
@@ -390,6 +430,63 @@ Console::call_body(const Signed& who, const nlohmann::json& intent,
     std::optional<protocol::Id> contract;
     std::optional<protocol::Id> instance;
     std::optional<std::uint64_t> head;
+    if (action == "contract.approve") {
+        // An approval of a proposal the thing keeps (Bo, requirements of
+        // approvals): `approve` with the proposal's function and its
+        // arguments, as the contract kept them.
+        const auto thing = id_of(intent.value("instance", ""));
+        const auto kept = from_hex(intent.value("arguments", ""));
+        if (!thing || !kept || function.empty()) {
+            return error(400, "invalid_argument",
+                         "an approval names the thing (its full id), and the proposal's function "
+                         "and arguments (their CBOR in hex)");
+        }
+        std::optional<protocol::ContractCallBody> body;
+        std::string problem;
+        served->read_state([&](const protocol::LedgerState& state) {
+            const protocol::InstanceState* i = state.instance(*thing);
+            const protocol::ContractState* c =
+                i != nullptr ? state.contract(protocol::Id(i->contract)) : nullptr;
+            if (i == nullptr || c == nullptr) {
+                problem = "no such thing under rules on this ledger";
+                return;
+            }
+            if (i->final || !c->interface.contains("approve")) {
+                problem = "this thing takes no approvals";
+                return;
+            }
+            const cbor::Value value = i->state.value();
+            const cbor::Value* pending = value.find("pending");
+            const cbor::Array* list = pending != nullptr ? pending->as_array() : nullptr;
+            for (std::size_t n = 0; list != nullptr && n < list->size() && !body; ++n) {
+                const cbor::Array* p = (*list)[n].as_array();
+                if (p == nullptr || p->size() < 2 || (*p)[0].as_text() == nullptr ||
+                    *(*p)[0].as_text() != function) {
+                    continue;
+                }
+                const auto encoded = cbor::encode((*p)[1]);
+                if (!encoded || *encoded != *kept) {
+                    continue;
+                }
+                cbor::Map entries;
+                entries.push_back({cbor::Value::text("function"), cbor::Value::text(function)});
+                entries.push_back({cbor::Value::text("arguments"), (*p)[1]});
+                body = protocol::ContractCallBody{};
+                body->instance = *thing;
+                body->head = i->head;
+                body->function = "approve";
+                body->arguments = cbor::Value::map(std::move(entries));
+            }
+            if (!body) {
+                problem = "that proposal no longer waits on this thing: it was approved, "
+                          "withdrawn, or it lapsed";
+            }
+        });
+        if (!body) {
+            return error(409, "conflict", problem);
+        }
+        return std::move(*body);
+    }
     if (action == "request.answer") {
         const auto request = id_of(intent.value("request", ""));
         const std::string status = intent.value("status", "");

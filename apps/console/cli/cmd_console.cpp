@@ -765,6 +765,21 @@ void serve_console_too(const Args& args, const std::filesystem::path& dir,
         });
         web.set_checkpointer(
             [api = &api](auto respond) { api->checkpoint_now(std::move(respond)); });
+        // Statements held for approval (spec v0.20), as the home's own staff.
+        web.set_approvals(
+            {[api = &api](Bytes body, auto respond) {
+                 api->hold_for_approval(std::move(body), std::move(respond));
+             },
+             [api = &api](const protocol::Id& statement, Bytes approval, auto respond) {
+                 api->give_approval(statement, std::move(approval), std::move(respond));
+             },
+             [api = &api](const protocol::Id& statement, auto respond) {
+                 api->withdraw_held(statement, std::move(respond));
+             },
+             [api = &api](const protocol::Id& statement, const protocol::Id& approver,
+                          auto respond) {
+                 api->decline_held(statement, approver, std::move(respond));
+             }});
         web.set_node_api([api = &api](node::http::Request request, auto respond) {
             api->handle(std::move(request), "relay", std::move(respond));
         });

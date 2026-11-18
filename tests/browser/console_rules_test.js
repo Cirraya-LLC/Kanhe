@@ -197,11 +197,11 @@ async function waitRunning() {
     const built = JSON.parse(run("bo", "build", lending, "--out", path.join(work, "lending.boc"),
                                  "--json"));
     await page.getByRole("button", { name: "Deploy" }).click();
-    await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+    await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
     await page.getByText("Checked in this browser").waitFor();
     await page.getByText("Deploy rules").waitFor();
     await page.getByText(built.code_hash).waitFor();
-    await page.getByRole("button", { name: "Approve with your passkey" }).click();
+    await page.getByRole("button", { name: "Confirm with your passkey" }).click();
     await page.getByRole("heading", { name: "Done" }).waitFor();
     let listed = contracts();
     assert.equal(listed.length, 1);
@@ -217,11 +217,11 @@ async function waitRunning() {
     await page.getByRole("button", { name: "Retire the rules Lending" }).click();
     await page.getByLabel("Reason (optional)").fill("replaced by a new version");
     await page.getByRole("button", { name: "Prepare" }).click();
-    await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+    await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
     await page.getByText("Checked in this browser").waitFor();
     await page.getByText("Retire rules").waitFor();
     await page.getByText("replaced by a new version").waitFor();
-    await page.getByRole("button", { name: "Approve with your passkey" }).click();
+    await page.getByRole("button", { name: "Confirm with your passkey" }).click();
     await page.getByRole("heading", { name: "Done" }).waitFor();
     await page.getByRole("button", { name: "Back to the rules" }).click();
     await page.getByRole("cell", { name: "retired", exact: true }).waitFor();

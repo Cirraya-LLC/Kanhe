@@ -225,6 +225,8 @@ void Console::start_polling(std::chrono::seconds every) {
             poll_peers();
             answer_questions();
             maybe_back_up();
+            // What follows statements sent for approval, once registered.
+            follow_up();
             std::unique_lock lock(poll_mutex_);
             poll_wake_.wait_for(lock, stop, every, [this] { return poll_asked_; });
             poll_asked_ = false;

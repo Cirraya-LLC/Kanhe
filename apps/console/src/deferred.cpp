@@ -36,6 +36,20 @@ bool DeferredApi::open_now() {
         api->add_cosignature(std::move(body), std::move(respond));
     });
     console_->set_checkpointer([api](auto respond) { api->checkpoint_now(std::move(respond)); });
+    // Statements held for approval (spec v0.20), as the home's own staff.
+    console_->set_approvals(
+        {[api](Bytes body, auto respond) {
+             api->hold_for_approval(std::move(body), std::move(respond));
+         },
+         [api](const protocol::Id& statement, Bytes approval, auto respond) {
+             api->give_approval(statement, std::move(approval), std::move(respond));
+         },
+         [api](const protocol::Id& statement, auto respond) {
+             api->withdraw_held(statement, std::move(respond));
+         },
+         [api](const protocol::Id& statement, const protocol::Id& approver, auto respond) {
+             api->decline_held(statement, approver, std::move(respond));
+         }});
     console_->set_node_api([api](node::http::Request request, auto respond) {
         api->handle(std::move(request), "relay", std::move(respond));
     });

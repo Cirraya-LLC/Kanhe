@@ -5,7 +5,9 @@
 // owner (it opens the console's keys), a new passkey is made, and the root
 // key replaces the owner's passkeys on the ledger with it. The lost ones
 // stop signing in, stop proving presence, and stop unlocking the console,
-// and the owner's other sessions end.
+// and the owner's other sessions end. While the organization's guardians
+// guard it (spec v0.20), the statement is sent for their approval instead,
+// and the console's side of it is done once they have approved it.
 
 #include <algorithm>
 #include <cctype>
@@ -26,6 +28,7 @@
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/ledger/storage.hpp>
+#include <kanhe/node/approvals.hpp>
 
 #include "responses.hpp"
 
@@ -80,6 +83,16 @@ std::optional<protocol::Id> actor_of(const User& user) {
     return id ? std::optional(*id) : std::nullopt;
 }
 
+/// The organization's actor, if the state has it.
+std::optional<protocol::Id> organization_of(const protocol::LedgerState& state) {
+    for (const auto& [key, a] : state.actors()) {
+        if (a.is_organization()) {
+            return protocol::Id(a.id);
+        }
+    }
+    return std::nullopt;
+}
+
 } // namespace
 
 http::Response Console::recover_begin(const http::Request& request) const {
@@ -129,6 +142,20 @@ http::Response Console::recover_begin(const http::Request& request) const {
     if (owner == nullptr || owner->actor.empty()) {
         return error(404, "not_found", "name the owner whose passkey was lost");
     }
+    // Whether the guardians must approve it (spec v0.20), said before the
+    // new passkey is made.
+    nlohmann::json needs{{"needed", false}, {"rules", nlohmann::json::array()}};
+    const auto actor = actor_of(*owner);
+    if (const ledger::Ledger* served = ledger(); served != nullptr && actor) {
+        served->read_state([&](const protocol::LedgerState& state) {
+            protocol::Statement s;
+            s.ledger_id = state.ledger_id();
+            s.actor_id = organization_of(state);
+            s.issued_at = now;
+            s.body = protocol::ActorSetPresenceBody{*actor, {}};
+            needs = approvals_needed(state, s, false);
+        });
+    }
     const Bytes challenge = services_.entropy->bytes<32>() | std::ranges::to<Bytes>();
     const auto id = begin({true,
                            challenge,
@@ -144,6 +171,7 @@ http::Response Console::recover_begin(const http::Request& request) const {
     return json(200, {{"ceremony", *id},
                       {"user", owner->name},
                       {"keys", key_state()},
+                      {"approvals", needs},
                       {"public_key",
                        registration_options(challenge, parsed->host, owner->name, {}, true)}});
 }
@@ -189,9 +217,6 @@ Console::recovery_plan(const http::Request& request) const {
         return error(409, "conflict", "this passkey is someone else's");
     }
     recovery.user = owner->name;
-    for (const auto& p : owner->passkeys) {
-        recovery.old_passkeys.push_back(to_base64url(p.credential_id));
-    }
     // The root key replaces the owner's passkeys on the ledger.
     const auto root = services_.keys->open(root_key_name);
     protocol::Statement s;
@@ -220,12 +245,60 @@ Console::recovery_plan(const http::Request& request) const {
     s.issued_at = services_.clock->now();
     s.nonce = services_.entropy->bytes<16>();
     s.body = protocol::ActorSetPresenceBody{*actor, {recovery.passkey}};
+    // While guardians guard it, it is sent for their approval.
+    served->read_state([&](const protocol::LedgerState& state) {
+        recovery.needs = approvals_needed(state, s, false);
+    });
+    recovery.for_approval = recovery.needs.value("needed", false);
+    if (recovery.for_approval) {
+        if (!approval_hooks().hold) {
+            return error(503, "unavailable",
+                         "the guardians must approve this, and this console cannot send it to "
+                         "them");
+        }
+        recovery.lapses_at = recovery.needs["lapses_at"].get<protocol::Timestamp>();
+    }
     auto made = protocol::sign_statement(root, *services_.provider, hash, s);
     if (!made) {
         return error(500, "internal", "signing failed");
     }
     recovery.statement = std::move(made->encoded);
     return recovery;
+}
+
+std::optional<http::Response> Console::apply_recovery(const std::string& user,
+                                                      const protocol::PresenceCredential& passkey,
+                                                      const std::string& prf) const {
+    std::vector<std::string> lost;
+    {
+        const auto lock = ledger::DirectoryLock::acquire(services_.directory, 2000);
+        if (!lock) {
+            return error(503, "unavailable",
+                         "the ledger has the new passkey, but the console could not record it: "
+                         "begin the recovery again");
+        }
+        People people = load_people(services_.directory);
+        User* owner = people.find(user);
+        if (owner == nullptr) {
+            return error(404, "not_found", "that owner was removed meanwhile");
+        }
+        for (const protocol::PresenceCredential& p : owner->passkeys) {
+            if (p.credential_id != passkey.credential_id) {
+                lost.push_back(to_base64url(p.credential_id));
+            }
+        }
+        owner->passkeys = {passkey};
+        save_people(services_.directory, people);
+    }
+    // The lost passkeys unlock nothing any more, and their sessions end.
+    for (const std::string& id : lost) {
+        static_cast<void>(services_.keys->remove_slot({SlotKind::prf, id}));
+    }
+    if (!prf.empty() && services_.keys->unlocked()) {
+        services_.keys->add_slot({SlotKind::prf, to_base64url(passkey.credential_id)}, prf);
+    }
+    static_cast<void>(services_.sessions->end_all(user));
+    return std::nullopt;
 }
 
 http::Response Console::finish_recovery(const Recovery& recovery,
@@ -236,30 +309,9 @@ http::Response Console::finish_recovery(const Recovery& recovery,
         secure(refused);
         return refused;
     }
-    {
-        const auto lock = ledger::DirectoryLock::acquire(services_.directory, 2000);
-        if (!lock) {
-            return error(503, "unavailable",
-                         "the ledger has the new passkey, but the console could not record it: "
-                         "begin the recovery again");
-        }
-        People people = load_people(services_.directory);
-        User* owner = people.find(recovery.user);
-        if (owner == nullptr) {
-            return error(404, "not_found", "that owner was removed meanwhile");
-        }
-        owner->passkeys = {recovery.passkey};
-        save_people(services_.directory, people);
+    if (auto refused = apply_recovery(recovery.user, recovery.passkey, recovery.prf)) {
+        return std::move(*refused);
     }
-    // The lost passkeys unlock nothing any more, and their sessions end.
-    for (const std::string& id : recovery.old_passkeys) {
-        static_cast<void>(services_.keys->remove_slot({SlotKind::prf, id}));
-    }
-    if (!recovery.prf.empty()) {
-        services_.keys->add_slot({SlotKind::prf, to_base64url(recovery.passkey.credential_id)},
-                                 recovery.prf);
-    }
-    static_cast<void>(services_.sessions->end_all(recovery.user));
     return json(200, {{"session", services_.sessions->create(recovery.user)},
                       {"user", recovery.user},
                       {"role", name_of(Role::owner)},
@@ -274,15 +326,60 @@ http::Response Console::recover_finish(const http::Request& request) const {
     }
     // Waits for the ledger's answer, as approve_route does (the node uses
     // the asynchronous handle).
-    const Recovery recovery = std::get<Recovery>(std::move(plan));
-    auto answered = std::make_shared<std::promise<http::Response>>();
-    auto future = answered->get_future();
-    submitter()(recovery.statement, false,
-                [answered](http::Response r) { answered->set_value(std::move(r)); });
-    if (future.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-        return error(504, "unavailable", "the ledger did not register it in time");
+    auto recovery = std::make_shared<const Recovery>(std::get<Recovery>(std::move(plan)));
+    return wait_for([this, recovery](std::function<void(http::Response)> respond) {
+        send_recovery(recovery, std::move(respond));
+    });
+}
+
+void Console::send_recovery(std::shared_ptr<const Recovery> recovery,
+                            std::function<void(http::Response)> respond) const {
+    auto finish = [this, recovery, respond](const http::Response& registered) {
+        try {
+            respond(finish_recovery(*recovery, registered));
+        } catch (const std::exception&) {
+            respond(error(500, "internal", "the console could not answer; see its files"));
+        }
+    };
+    if (!recovery->for_approval) {
+        submitter()(recovery->statement, false, std::move(finish));
+        return;
     }
-    return finish_recovery(recovery, future.get());
+    // The guardians approve it first: held at the node, registered once
+    // they have; the console's side of it follows then (follow_up).
+    const ApprovalHooks hooks = approval_hooks();
+    node::HeldStatement held;
+    held.statement = recovery->statement;
+    auto body = node::encode_hold_request(held);
+    if (!hooks.hold || !body) {
+        respond(error(503, "unavailable", "this console cannot send it for approval"));
+        return;
+    }
+    hooks.hold(std::move(*body), [this, recovery, respond,
+                                  finish = std::move(finish)](http::Response answer) {
+        if (answer.status != 202) {
+            // Registered at once, or refused.
+            finish(answer);
+            return;
+        }
+        const auto waiting =
+            nlohmann::json::parse(answer.body.begin(), answer.body.end(), nullptr, false);
+        const std::string id = waiting.is_object() ? waiting.value("id", "") : std::string();
+        keep_follow_up(id, {{"by", recovery->user},
+                            {"activity", "recovery.done"},
+                            {"recovery", {{"user", recovery->user}}},
+                            {"until", recovery->lapses_at}});
+        if (!recovery->prf.empty()) {
+            const std::lock_guard lock(mutex_);
+            recovery_prf_[id] = recovery->prf;
+        }
+        log_activity(recovery->user, "recovery.held", {{"statement", id}});
+        respond(json(202, {{"held", true},
+                           {"id", id},
+                           {"user", recovery->user},
+                           {"approvals", recovery->needs},
+                           {"lapses_at", recovery->lapses_at}}));
+    });
 }
 
 } // namespace kanhe::console

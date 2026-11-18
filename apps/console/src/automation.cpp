@@ -182,6 +182,34 @@ http::Response Console::automation_route(const http::Request& request) const {
                 }
             }
         });
+        // Machines whose key waits here for this user, with a delegation
+        // signed since (sent for approval, or granted by the console itself
+        // once their registration was approved): set up once it is on the
+        // ledger.
+        nlohmann::json set_up = nlohmann::json::array();
+        {
+            const std::lock_guard lock(mutex_);
+            std::erase_if(handed_, [&](const auto& e) { return e.second.expires <= now; });
+            for (const auto& [actor, h] : handed_) {
+                if (h.user == signer.user && !h.delegation.empty()) {
+                    set_up.push_back({{"actor", actor},
+                                      {"delegation", h.delegation},
+                                      {"name", h.name},
+                                      {"agent", h.agent}});
+                }
+            }
+        }
+        nlohmann::json ready = nlohmann::json::array();
+        served->read_state([&](const protocol::LedgerState& state) {
+            for (const nlohmann::json& m : set_up) {
+                const auto actor = id_of(m["actor"].get<std::string>());
+                const auto delegation = id_of(m["delegation"].get<std::string>());
+                const auto* d = delegation ? state.delegation(*delegation) : nullptr;
+                if (actor && d != nullptr && !d->revoked && protocol::Id(d->grantee) == *actor) {
+                    ready.push_back(m);
+                }
+            }
+        });
         std::vector<nlohmann::json> by_deadline(requests.begin(), requests.end());
         std::ranges::sort(by_deadline, {}, [](const nlohmann::json& r) {
             return r["deadline"].get<protocol::Timestamp>();
@@ -192,6 +220,7 @@ http::Response Console::automation_route(const http::Request& request) const {
                           {"contracts", contracts},
                           {"people", people},
                           {"due", due},
+                          {"set_up", may_change ? ready : nlohmann::json::array()},
                           {"locked", services_.keys == nullptr || !services_.keys->unlocked()},
                           {"may_change", may_change}});
     }

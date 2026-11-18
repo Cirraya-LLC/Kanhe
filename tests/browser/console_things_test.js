@@ -86,10 +86,10 @@ async function waitRunning() {
     const ledgerId = JSON.parse(run("status", "--json")).ledger_id;
 
     const tap = async (what) => {
-      await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+      await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
       await page.getByText("Checked in this browser").waitFor();
       if (what) await page.getByText(what, { exact: true }).first().waitFor();
-      await page.getByRole("button", { name: "Approve with your passkey" }).click();
+      await page.getByRole("button", { name: "Confirm with your passkey" }).click();
       await page.getByRole("heading", { name: "Done" }).waitFor();
     };
     const deploy = async (file) => {

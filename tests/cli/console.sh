@@ -170,6 +170,18 @@ PORT=$(json 'd["port"]' < public.json)
     fail "the sources need a session"
 [ "$(status_of POST "$PORT" "/console/api/records/$(printf '%064d' 0)/source-proofs" \
     "ledger.example.com")" = 403 ] || fail "keeping a source's proof comes from the console"
+# Approvals and guardians: read with a session; given, declined, and
+# withdrawn only from the console's own page.
+[ "$(status_of GET "$PORT" /console/api/approvals "ledger.example.com")" = 401 ] ||
+    fail "the approvals need a session"
+[ "$(status_of GET "$PORT" "/console/api/approvals/$(printf '%064d' 0)" "ledger.example.com")" = 401 ] ||
+    fail "a held statement needs a session"
+[ "$(status_of GET "$PORT" /console/api/guardians "ledger.example.com")" = 401 ] ||
+    fail "the guardians need a session"
+[ "$(status_of POST "$PORT" "/console/api/approvals/$(printf '%064d' 0)/approve" \
+    "ledger.example.com")" = 403 ] || fail "an approval comes from the console"
+[ "$(status_of DELETE "$PORT" "/console/api/approvals/$(printf '%064d' 0)" \
+    "ledger.example.com")" = 403 ] || fail "a withdrawal comes from the console"
 run kanhe-console session list > out.txt
 grep -q "no console sessions" out.txt || fail "console session list"
 [ "$(run kanhe-console session list --json)" = "[]" ] || fail "console session list --json"

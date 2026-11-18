@@ -82,7 +82,7 @@ async function fits(page, name) {
 }
 
 const screens = ["#/", "#/things", "#/new", "#/reports", "#/kinds", "#/rules", "#/parties",
-                 "#/people", "#/automation", "#/scripts", "#/exchange", "#/verify", "#/settings"];
+                 "#/people", "#/automation", "#/scripts", "#/approvals", "#/exchange", "#/verify", "#/settings"];
 
 /// Opens a screen from the menu if it has an entry there, else by its
 /// address; the menu closes again, and the bar stays short.
@@ -142,10 +142,10 @@ async function open(page, hash) {
     await page.getByLabel("subject (required)").fill("A long subject to see how the form wraps on a phone");
     await page.getByLabel("sent").fill("2026-11-10");
     await page.getByRole("button", { name: "Prepare" }).tap();
-    await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+    await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
     await page.getByText("Checked in this browser").waitFor();
     await fits(page, "en-approve");
-    await page.getByRole("button", { name: "Approve with your passkey" }).tap();
+    await page.getByRole("button", { name: "Confirm with your passkey" }).tap();
     await page.getByRole("heading", { name: "Done" }).waitFor();
     await fits(page, "en-done");
 

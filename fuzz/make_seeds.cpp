@@ -671,6 +671,29 @@ void text_seeds(const Seeds& seeds) {
     seeds.write("console_request_fuzz", "source-proofs",
                 "POST /console/api/records/source-proofs HTTP/1.1\r\nHost: localhost:7470\r\n"
                 "Origin: http://localhost:7470\r\nContent-Length: 15\r\n\r\n{\"upload\":\"00\"}");
+    // Approvals and guardians (spec v0.20): read with a session, changed
+    // only from the console's own page.
+    seeds.write(
+        "console_request_fuzz", "approvals",
+        "GET /console/api/approvals?language=zh-Hant-HK HTTP/1.1\r\nHost: localhost:7470\r\n"
+        "Authorization: Bearer khs_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n\r\n");
+    seeds.write("console_request_fuzz", "approval",
+                "GET /console/api/approvals/" + std::string(64, 'a') +
+                    " HTTP/1.1\r\nHost: localhost:7470\r\n\r\n");
+    seeds.write("console_request_fuzz", "approval-prepare",
+                "POST /console/api/approvals/" + std::string(64, 'b') +
+                    "/prepare HTTP/1.1\r\nHost: localhost:7470\r\n"
+                    "Origin: http://localhost:7470\r\nContent-Length: 2\r\n\r\n{}");
+    seeds.write("console_request_fuzz", "approval-approve",
+                "POST /console/api/approvals/" + std::string(64, 'c') +
+                    "/approve HTTP/1.1\r\nHost: localhost:7470\r\n"
+                    "Origin: http://localhost:7470\r\nContent-Length: 36\r\n\r\n"
+                    "{\"prepared\":\"00\",\"signature\":\"AAAA\"}");
+    seeds.write("console_request_fuzz", "approval-withdraw",
+                "DELETE /console/api/approvals/" + std::string(64, 'd') +
+                    " HTTP/1.1\r\nHost: localhost:7470\r\nOrigin: http://localhost:7470\r\n\r\n");
+    seeds.write("console_request_fuzz", "guardians",
+                "GET /console/api/guardians HTTP/1.1\r\nHost: localhost:7470\r\n\r\n");
     seeds.write("console_request_fuzz", "rebinding",
                 "GET /console/ HTTP/1.1\r\nHost: attacker.example:7470\r\n"
                 "Origin: https://attacker.example\r\n\r\n");

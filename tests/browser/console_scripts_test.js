@@ -41,10 +41,10 @@ function freePort() {
 }
 
 async function tap(page, what) {
-  await page.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+  await page.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
   await page.getByText("Checked in this browser").waitFor();
   if (what) await page.getByText(what, { exact: true }).first().waitFor();
-  await page.getByRole("button", { name: "Approve with your passkey" }).click();
+  await page.getByRole("button", { name: "Confirm with your passkey" }).click();
   await page.getByRole("heading", { name: "Done" }).waitFor();
 }
 
@@ -166,7 +166,7 @@ async function tap(page, what) {
       .waitFor();
     await a.locator("#register-script").selectOption({ label: "monthly-report 1.0" });
     await a.getByRole("button", { name: "Prepare" }).click();
-    await a.getByRole("heading", { name: "Approve with your passkey" }).waitFor();
+    await a.getByRole("heading", { name: "Confirm with your passkey" }).waitFor();
     await a.getByText("Made by the script").waitFor();
     await a.getByText("monthly-report 1.0", { exact: true }).waitFor();
     await a.getByText(`record ${otherRecord.slice(0, 12)}... on the ledger ${otherLedger.slice(0, 12)}`).waitFor();

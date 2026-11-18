@@ -568,11 +568,11 @@ http::Response Console::batch_start_route(const http::Request& request) const {
         const auto found = batches_.find(id);
         if (found == batches_.end() || found->second.user != signer.user ||
             found->second.state != "waiting" || found->second.origin != origin) {
-            return error(404, "not_found", "nothing of yours waits for approval under that id");
+            return error(404, "not_found", "nothing of yours waits for confirmation under that id");
         }
         if (found->second.expires <= services_.clock->now()) {
             batches_.erase(found);
-            return error(404, "not_found", "nothing of yours waits for approval under that id");
+            return error(404, "not_found", "nothing of yours waits for confirmation under that id");
         }
         if (std::ranges::any_of(batches_, [](const auto& e) {
                 return e.second.state == "running" || e.second.state == "checking";

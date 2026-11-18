@@ -132,6 +132,25 @@ protocol::Scope scope_of(const Permissions& p) {
     scope.not_after = p.until;
     scope.may_delegate = p.people;
     scope.require_presence = true;
+    if (p.approvals) {
+        // As the scope encodes it: approvers ascending, each once; the
+        // ledger checks who they are when it takes the grant.
+        protocol::ApprovalRule rule = *p.approvals;
+        std::ranges::sort(rule.approvers, {},
+                          [](const protocol::Id& id) { return to_hex(id.bytes()); });
+        rule.approvers.erase(std::ranges::unique(rule.approvers).begin(), rule.approvers.end());
+        if (rule.needed < 1 || rule.needed > protocol::max_rule_approvers ||
+            rule.approvers.size() < rule.needed ||
+            rule.approvers.size() > protocol::max_rule_approvers) {
+            throw std::invalid_argument("approvals: choose at least as many people as must "
+                                        "approve, 1 to 16");
+        }
+        if (rule.within < protocol::min_approval_window ||
+            rule.within > protocol::max_approval_window) {
+            throw std::invalid_argument("approvals come within 1 minute to 30 days");
+        }
+        scope.approvals = std::move(rule);
+    }
     return scope;
 }
 
@@ -160,6 +179,7 @@ Permissions permissions_of(const protocol::Scope& scope) {
     p.until = scope.not_after;
     p.in_person = scope.require_presence;
     p.may_delegate = scope.may_delegate;
+    p.approvals = scope.approvals;
     for (const StatementType t : scope.statement_types) {
         const bool covered =
             t == StatementType::record_register || t == StatementType::record_endorse ||
@@ -192,7 +212,58 @@ nlohmann::json permissions_json(const Permissions& p) {
             {"until", p.until ? nlohmann::json(*p.until) : nlohmann::json()},
             {"in_person", p.in_person},
             {"may_delegate", p.may_delegate},
+            {"approvals", p.approvals ? rule_json(*p.approvals) : nlohmann::json()},
             {"other", p.other}};
+}
+
+nlohmann::json rule_json(const protocol::ApprovalRule& rule) {
+    nlohmann::json approvers = nlohmann::json::array();
+    for (const protocol::Id& a : rule.approvers) {
+        approvers.push_back(hex_of(a));
+    }
+    return {{"k", rule.needed},
+            {"approvers", approvers},
+            {"within", rule.within},
+            {"without_presence", rule.without_presence}};
+}
+
+std::optional<protocol::ApprovalRule> parse_rule(const nlohmann::json& value) {
+    if (!value.is_object()) {
+        return std::nullopt;
+    }
+    const auto k = value.find("k");
+    const auto approvers = value.find("approvers");
+    const auto within = value.find("within");
+    if (k == value.end() || !k->is_number_unsigned() || approvers == value.end() ||
+        !approvers->is_array() || approvers->size() > protocol::max_rule_approvers ||
+        within == value.end() || !within->is_number_unsigned()) {
+        return std::nullopt;
+    }
+    protocol::ApprovalRule rule;
+    rule.needed = k->get<std::uint64_t>();
+    rule.within = within->get<protocol::Timestamp>();
+    for (const auto& a : *approvers) {
+        const auto id = a.is_string() ? id_of(a.get<std::string>()) : std::nullopt;
+        if (!id) {
+            return std::nullopt;
+        }
+        rule.approvers.push_back(*id);
+    }
+    if (const auto open = value.find("without_presence"); open != value.end() && !open->is_null()) {
+        if (!open->is_boolean()) {
+            return std::nullopt;
+        }
+        rule.without_presence = open->get<bool>();
+    }
+    std::ranges::sort(rule.approvers, {},
+                      [](const protocol::Id& id) { return to_hex(id.bytes()); });
+    rule.approvers.erase(std::ranges::unique(rule.approvers).begin(), rule.approvers.end());
+    if (rule.needed < 1 || rule.needed > protocol::max_rule_approvers ||
+        rule.approvers.size() < rule.needed || rule.within < protocol::min_approval_window ||
+        rule.within > protocol::max_approval_window) {
+        return std::nullopt;
+    }
+    return rule;
 }
 
 std::optional<Permissions> parse_permissions(const nlohmann::json& v) {
@@ -243,6 +314,12 @@ std::optional<Permissions> parse_permissions(const nlohmann::json& v) {
         }
         p.until = it->get<protocol::Timestamp>();
     }
+    if (const auto it = v.find("approvals"); it != v.end() && !it->is_null()) {
+        p.approvals = parse_rule(*it);
+        if (!p.approvals) {
+            return std::nullopt;
+        }
+    }
     return p;
 }
 
@@ -279,7 +356,8 @@ nlohmann::json scope_json(const protocol::Scope& scope) {
             {"not_before", scope.not_before ? nlohmann::json(*scope.not_before) : nlohmann::json()},
             {"not_after", scope.not_after ? nlohmann::json(*scope.not_after) : nlohmann::json()},
             {"may_delegate", scope.may_delegate},
-            {"require_presence", scope.require_presence}};
+            {"require_presence", scope.require_presence},
+            {"approvals", scope.approvals ? rule_json(*scope.approvals) : nlohmann::json()}};
 }
 
 // --- The People screen ---------------------------------------------------------
@@ -321,9 +399,30 @@ http::Response Console::people_route(const http::Request& request) const {
                      {"rp_id", p.rp_id}});
             }
             nlohmann::json delegations = nlohmann::json::array();
+            // Whose statements they approve (spec v0.20): delegations whose
+            // rule names them, and the organization's, as a guardian.
+            nlohmann::json approves_for = nlohmann::json::array();
+            bool guardian = false;
             bool on_ledger = false;
             std::size_t presence = 0;
             if (const auto actor = id_of(u.actor); actor && state != nullptr) {
+                for (const auto& [key, d] : state->delegations()) {
+                    if (!d.revoked && d.scope.approvals &&
+                        std::ranges::contains(d.scope.approvals->approvers, *actor)) {
+                        const protocol::ActorState* grantee = state->actor(protocol::Id(d.grantee));
+                        approves_for.push_back(
+                            {{"delegation", hex_of(protocol::Id(d.id))},
+                             {"grantee", hex_of(protocol::Id(d.grantee))},
+                             {"grantee_name", grantee != nullptr
+                                                  ? nlohmann::json(grantee->display_name)
+                                                  : nlohmann::json()},
+                             {"rule", rule_json(*d.scope.approvals)}});
+                    }
+                }
+                if (const protocol::GuardianSetting* g = state->guardians();
+                    g != nullptr && g->guardians) {
+                    guardian = std::ranges::contains(g->guardians->approvers, *actor);
+                }
                 if (const protocol::ActorState* a = state->actor(*actor); a && !a->revoked) {
                     on_ledger = true;
                     for (const auto& p : u.passkeys) {
@@ -363,8 +462,14 @@ http::Response Console::people_route(const http::Request& request) const {
                  {"actor", u.actor.empty() ? nlohmann::json() : nlohmann::json(u.actor)},
                  {"step", step},
                  {"delegations", delegations},
+                 {"approves_for", approves_for},
+                 {"guardian", guardian},
                  {"me", u.name == signer.user}});
         };
+        // Who may be named to approve: the ledger's actors, the organization
+        // aside (people always; agents and devices only where approvals
+        // need not be in person).
+        nlohmann::json actors = nlohmann::json::array();
         if (served != nullptr) {
             served->read_state([&](const protocol::LedgerState& state) {
                 for (const User& u : people.users) {
@@ -375,6 +480,14 @@ http::Response Console::people_route(const http::Request& request) const {
                         contracts.push_back(
                             {{"id", to_hex(protocol::Id(c.id).bytes())},
                              {"name", c.name ? nlohmann::json(*c.name) : nlohmann::json()}});
+                    }
+                }
+                for (const auto& [key, a] : state.actors()) {
+                    if (!a.revoked && !a.is_organization()) {
+                        actors.push_back({{"id", hex_of(protocol::Id(a.id))},
+                                          {"name", a.display_name},
+                                          {"kind", static_cast<int>(*a.kind)},
+                                          {"passkeys", a.presence.size()}});
                     }
                 }
             });
@@ -403,6 +516,7 @@ http::Response Console::people_route(const http::Request& request) const {
                           {"invitations", invitations},
                           {"kinds", kinds},
                           {"contracts", contracts},
+                          {"actors", actors},
                           {"defaults", defaults},
                           {"may_change", may_change}});
     }

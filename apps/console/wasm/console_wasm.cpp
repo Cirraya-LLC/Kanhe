@@ -2,12 +2,14 @@
 // Copyright 2026 Cirraya
 
 // The web console's own checks, in the browser: before a person's passkey
-// approves a statement, the page decodes the bytes it will approve with the
+// confirms a statement, the page decodes the bytes it will sign with the
 // core (not the console's description of them) and computes their presence
 // challenge itself, so a tampered answer cannot obtain a tap for something
 // else. A registration's fields and files are recomputed from what the
-// person typed and chose. Exported as plain C functions; strings are JSON,
-// freed with kanhe_free.
+// person typed and chose. Before a person approves someone else's statement
+// (spec v0.20), the page recomputes that statement's id from its bytes, the
+// fields shown with it, and the approval's own challenge. Exported as plain
+// C functions; strings are JSON, freed with kanhe_free.
 
 #include <algorithm>
 #include <cstdint>
@@ -23,6 +25,8 @@
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/protocol/access.hpp>
+#include <kanhe/core/protocol/approval_file.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
@@ -100,6 +104,18 @@ Json access_terms(std::string_view type, const cbor::Value& metadata) {
     return Json();
 }
 
+/// An approval rule (spec v0.20), as the console's summary writes it.
+Json rule_json(const protocol::ApprovalRule& rule) {
+    Json approvers = Json::array();
+    for (const protocol::Id& a : rule.approvers) {
+        approvers.push_back(to_hex(a.bytes()));
+    }
+    return {{"k", rule.needed},
+            {"approvers", approvers},
+            {"within", rule.within},
+            {"without_presence", rule.without_presence}};
+}
+
 /// A delegation's scope, as the console's summary writes it.
 Json scope_json(const protocol::Scope& scope) {
     Json types = Json::array();
@@ -124,7 +140,8 @@ Json scope_json(const protocol::Scope& scope) {
             {"not_before", scope.not_before ? Json(*scope.not_before) : Json()},
             {"not_after", scope.not_after ? Json(*scope.not_after) : Json()},
             {"may_delegate", scope.may_delegate},
-            {"require_presence", scope.require_presence}};
+            {"require_presence", scope.require_presence},
+            {"approvals", scope.approvals ? rule_json(*scope.approvals) : Json()}};
 }
 
 /// What a statement says, for the person about to approve it: its type and
@@ -271,6 +288,32 @@ Json describe(const protocol::Statement& s) {
     } else if (const auto* v = std::get_if<protocol::DelegationRevokeBody>(&s.body)) {
         out["delegation"] = to_hex(v->delegation.bytes());
         out["reason"] = v->reason ? Json(*v->reason) : Json();
+    } else if (const auto* rotated = std::get_if<protocol::ActorRotateKeyBody>(&s.body)) {
+        // An actor's new key (the organization's root key, when the actor is
+        // the ledger).
+        out["subject"] = to_hex(rotated->actor.bytes());
+        out["key"] = to_hex(rotated->key.bytes);
+    } else if (const auto* revoked = std::get_if<protocol::ActorRevokeBody>(&s.body)) {
+        out["subject"] = to_hex(revoked->actor.bytes());
+        out["reason"] = revoked->reason ? Json(*revoked->reason) : Json();
+    } else if (const auto* log_key = std::get_if<protocol::LedgerRotateLogKeyBody>(&s.body)) {
+        out["key"] = to_hex(log_key->key.bytes);
+    } else if (const auto* guardians = std::get_if<protocol::LedgerSetGuardiansBody>(&s.body)) {
+        // The guardians (spec v0.20), or none; and what they guard (null:
+        // everything the organization signs).
+        out["guardians"] = guardians->guardians ? rule_json(*guardians->guardians) : Json();
+        Json guarded;
+        if (guardians->guarded) {
+            guarded = Json::array();
+            for (const protocol::StatementType t : *guardians->guarded) {
+                guarded.push_back(std::string(protocol::name(t)));
+            }
+        }
+        out["guarded"] = guarded;
+    } else if (const auto* moved = std::get_if<protocol::RecordTransitionBody>(&s.body)) {
+        out["record"] = to_hex(moved->record.bytes());
+        out["from_state"] = moved->from_state;
+        out["to_state"] = moved->to_state;
     } else if (const auto* c = std::get_if<protocol::ContractCallBody>(&s.body)) {
         // A creation names its contract, an action its instance and head; an
         // answer its request and status. The arguments as the page shows them.
@@ -326,6 +369,96 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_presence_challenge(const std::uint8_t* payload,
         return to_c_string({{"ok", false}, {"error", challenge.error().detail}});
     }
     return to_c_string({{"ok", true}, {"challenge", to_base64url(*challenge)}});
+}
+
+/// A statement someone else signed, waiting for approvals (spec v0.20): its
+/// id recomputed from the signed bytes (the hash of exactly what its signer
+/// signed, which an approval names), its key id, and what it says. With
+/// `fields` (a CBOR array of encoded record fields; empty for none), the
+/// fields shown to approvers, checked against the registration's field root
+/// and count, as text where they are text. A ledger's hash is its COSE id.
+EMSCRIPTEN_KEEPALIVE char* kanhe_statement_id(const std::uint8_t* signed_statement,
+                                              std::size_t size, const std::uint8_t* fields,
+                                              std::size_t fields_size, int hash) {
+    const auto alg = crypto::hash_alg_from_cose(hash);
+    if (!alg) {
+        return to_c_string({{"ok", false}, {"error", "not a hash"}});
+    }
+    const auto parsed =
+        protocol::parse_statement(provider(), ByteView(signed_statement, size), *alg);
+    if (!parsed) {
+        return to_c_string({{"ok", false}, {"error", parsed.error().detail}});
+    }
+    if (std::holds_alternative<protocol::GenesisBody>(parsed->statement.body)) {
+        return to_c_string({{"ok", false}, {"error", "a genesis takes no approvals"}});
+    }
+    Json out{{"ok", true},
+             {"id", to_hex(parsed->id.bytes())},
+             {"kid", to_hex(parsed->kid.bytes())},
+             {"statement", describe(parsed->statement)},
+             {"fields", Json()}};
+    if (fields_size == 0) {
+        return to_c_string(out);
+    }
+    const auto list = cbor::decode(ByteView(fields, fields_size));
+    const cbor::Array* items = list ? list->as_array() : nullptr;
+    if (items == nullptr) {
+        return to_c_string({{"ok", false}, {"error", "the fields shown are not a list"}});
+    }
+    std::vector<protocol::RecordField> shown;
+    for (const cbor::Value& item : *items) {
+        const Bytes* leaf = item.as_bytes();
+        auto field = leaf != nullptr
+                         ? protocol::decode_field(*leaf)
+                         : Result<protocol::RecordField>(fail(Errc::malformed, "not a field"));
+        if (!field) {
+            return to_c_string({{"ok", false}, {"error", field.error().detail}});
+        }
+        shown.push_back(std::move(*field));
+    }
+    if (auto checked = protocol::check_shown_fields(provider(), *alg, parsed->statement, shown);
+        !checked) {
+        return to_c_string({{"ok", false}, {"error", checked.error().detail}});
+    }
+    Json named = Json::array();
+    for (const protocol::RecordField& f : shown) {
+        const std::string* text = f.value.as_text();
+        named.push_back({{"name", f.name},
+                         {"value", text != nullptr ? *text : cbor::diagnostic(f.value)},
+                         {"text", text != nullptr}});
+    }
+    out["fields"] = std::move(named);
+    return to_c_string(out);
+}
+
+/// The challenge of an approval's proof of presence (spec v0.20),
+/// HASH("Kanhe approval v1" || kid || A), A the approval's payload without
+/// its proof, computed with the core from the payload the console prepared
+/// for the key `kid`; with what the payload says (its ledger, approver, and
+/// statement), which the page compares with the statement it shows.
+EMSCRIPTEN_KEEPALIVE char* kanhe_approval_challenge(const std::uint8_t* payload, std::size_t size,
+                                                    const std::uint8_t* kid, std::size_t kid_size,
+                                                    int hash) {
+    const auto approval = protocol::decode_approval_payload(ByteView(payload, size));
+    const auto alg = crypto::hash_alg_from_cose(hash);
+    const auto id = protocol::to_id(ByteView(kid, kid_size));
+    if (!approval || !alg || !id) {
+        return to_c_string(
+            {{"ok", false}, {"error", "not an approval's payload, a key id, or a hash"}});
+    }
+    if (approval->presence) {
+        return to_c_string({{"ok", false}, {"error", "the payload carries a proof already"}});
+    }
+    const auto challenge = protocol::approval_challenge(provider(), *alg, *approval, *id);
+    if (!challenge) {
+        return to_c_string({{"ok", false}, {"error", challenge.error().detail}});
+    }
+    return to_c_string({{"ok", true},
+                        {"challenge", to_base64url(*challenge)},
+                        {"ledger", to_hex(approval->ledger.bytes())},
+                        {"approver", to_hex(approval->approver.bytes())},
+                        {"statement", to_hex(approval->statement.bytes())},
+                        {"approved_at", approval->approved_at}});
 }
 
 /// The root of a record's fields, from what the person typed and the salts

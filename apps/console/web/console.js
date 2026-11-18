@@ -240,8 +240,18 @@ async function register(code, name, device) {
 
 /// A lost passkey: the recovery code opens the console, a new passkey is
 /// made here, and the console makes it the owner's only one.
-async function recover(code, name, device) {
+/// Who must approve a recovery while guardians guard it, in words.
+const guardiansMust = (needs) => t("recover.guardians_must", {
+    rules: (needs?.rules ?? []).filter((r) => r.missing > 0).map(ruleText).join(t("approvals.rule_separator")),
+});
+
+async function recover(code, name, device, notice) {
     const begun = await api("POST", "recover/begin", { recovery_code: code, name });
+    // While guardians guard it, they must approve it: said before the new
+    // passkey is made.
+    if (begun.approvals?.needed && notice) {
+        notice.replaceChildren(el("p", { class: "notice", role: "status", text: guardiansMust(begun.approvals) }));
+    }
     const made = await createPasskey(begun.public_key, device);
     return api("POST", "recover/finish", { ceremony: begun.ceremony, ...made });
 }
@@ -530,8 +540,17 @@ function recoverScreen() {
         status(t("status.working"));
         try {
             const answer = await recover(code.value.trim(), name.value.trim(),
-                                         device.value.trim());
+                                         device.value.trim(), notice);
             code.value = "";
+            if (answer.held) {
+                // Sent for the guardians' approval: the new passkey works
+                // once they have approved it.
+                show(el("h1", { text: t("recover.held_title") }),
+                     el("p", { role: "status", text: guardiansMust(answer.approvals) }),
+                     el("p", { text: t("recover.held_then", { time: timeText(answer.lapses_at) }) }),
+                     el("p", { class: "id", text: answer.id }));
+                return;
+            }
             state.flash = t("recover.done");
             signedIn(answer);
         } catch (error) {
@@ -574,8 +593,17 @@ async function homeScreen() {
                       el("dd", { text: String(home.counts[key]) }));
     }
     const backup = home.backup ?? {};
+    // What waits for this person's approval, and what they sent (spec v0.20).
+    const approvals = home.approvals ?? { waiting: 0, sent: 0 };
+    const waitingPart = approvals.waiting || approvals.sent
+        ? el("section", { class: approvals.waiting ? "notice" : null },
+             el("h2", { text: t("approvals.waiting_title") }),
+             el("p", {}, el("a", { href: "#/approvals", text: t("home.approvals_waiting", { n: approvals.waiting }) })),
+             approvals.sent ? el("p", { class: "hint", text: t("home.approvals_sent", { n: approvals.sent }) }) : null)
+        : null;
     show(flash(), keysNotice(), slotNotice(), el("h1", { text: t("home.title") }),
          backup.overdue || backup.problem ? problem(t("home.backup_overdue", { problem: backup.problem ?? "" })) : null,
+         waitingPart,
          el("dl", { class: "facts" },
             el("dt", { text: t("home.organization") }), el("dd", { text: home.ledger.organization }),
             el("dt", { text: t("home.ledger") }), el("dd", { class: "id", text: home.ledger.id })),
@@ -1867,10 +1895,123 @@ async function settingsScreen() {
         });
         parts.push(lock);
     }
+    parts.push(...await guardiansView());
     if (changeable) {
         parts.push(...await tokensView(), ...await activityView());
     }
     show(keysNotice(), ...parts);
+}
+
+/// The organization's guardians (spec v0.20): who must approve what the
+/// organization signs with its top key, and, for an owner, setting them:
+/// prepared here, confirmed by the owner, then approved by the new
+/// guardians (and by the current ones, when changing them) before it takes
+/// effect.
+async function guardiansView() {
+    const g = await api("GET", "guardians").catch(() => null);
+    if (!g) {
+        return [];
+    }
+    const parts = [el("h2", { text: t("guardians.title") }), el("p", { class: "hint", text: t("guardians.intro") })];
+    const guardText = (guarded) => (guarded
+        ? guarded.map((type) => t(`approve.type.${type}`)).join(t("approvals.separator"))
+        : t("guardians.everything"));
+    if (g.in_effect) {
+        const e = g.in_effect;
+        parts.push(el("p", { role: "status", text: t("guardians.in_effect", {
+            k: e.k, n: e.guardians.length, names: e.guardians.map(nameOf).join(t("approvals.separator")),
+            index: e.since }) }),
+                   el("dl", { class: "facts" },
+                      el("dt", { text: t("guardians.guard") }), el("dd", { text: guardText(e.guarded) }),
+                      el("dt", { text: t("guardians.within") }), el("dd", { text: windowText(e.within) })));
+        const few = e.guardians.filter((x) => x.passkeys < 2);
+        if (few.length) {
+            parts.push(el("p", { class: "notice", text: t("guardians.second_passkey", {
+                names: few.map(nameOf).join(t("approvals.separator")) }) }));
+        }
+    } else {
+        parts.push(el("p", { text: t("guardians.none") }));
+    }
+    for (const w of g.waiting) {
+        parts.push(el("p", { class: "notice" }, t("guardians.waiting"), " ",
+                      el("a", { href: `#/approval/${w.id}`, text: t("guardians.open_waiting") })));
+    }
+    if (!g.may_change) {
+        return parts;
+    }
+    // Setting them: who, how many, within how long, what they guard.
+    const notice = el("div", { role: "status" });
+    const boxes = g.people.map((person) => {
+        const box = el("input", { type: "checkbox", value: person.id,
+                                  checked: Boolean(g.in_effect?.guardians.some((x) => x.id === person.id)) });
+        return [box, el("div", {}, el("label", {}, box, " ", t(person.passkeys < 2 ? "guardians.person_one_passkey"
+                                                                                  : "guardians.person", {
+            name: person.name, n: person.passkeys })))];
+    });
+    const count = el("input", { type: "number", id: "guardians-k", min: 1, max: 16, inputmode: "numeric",
+                                value: g.in_effect?.k ?? 2 });
+    const days = el("input", { type: "number", id: "guardians-days", min: 1, max: 30, inputmode: "numeric",
+                               value: g.in_effect ? Math.max(1, Math.round(g.in_effect.within / 86400000)) : 7 });
+    const everything = el("input", { type: "radio", name: "guardians-guard", id: "guardians-everything",
+                                     checked: !g.in_effect?.guarded });
+    const some = el("input", { type: "radio", name: "guardians-guard", id: "guardians-some",
+                               checked: Boolean(g.in_effect?.guarded) });
+    const types = g.types.map((type) => {
+        const box = el("input", { type: "checkbox", value: type,
+                                  checked: Boolean(g.in_effect?.guarded?.includes(type)) });
+        return [box, el("div", {}, el("label", {}, box, " ", t(`approve.type.${type}`)))];
+    });
+    const typesPart = el("div", { hidden: !some.checked }, types.map(([, v]) => v));
+    for (const radio of [everything, some]) {
+        radio.addEventListener("change", () => { typesPart.hidden = !some.checked; });
+    }
+    const spare = el("input", { type: "checkbox", id: "guardians-no-spare" });
+    const prepare = el("button", { type: "submit", class: "primary", text: t("guardians.prepare") });
+    const form = el("form", { novalidate: true },
+        el("fieldset", {}, el("legend", { text: t("guardians.who") }), boxes.map(([, v]) => v)),
+        el("div", { class: "field" }, el("label", { for: "guardians-k", text: t("guardians.k") }), count,
+           el("span", { class: "hint", text: t("guardians.k_hint") })),
+        el("div", { class: "field" }, el("label", { for: "guardians-days", text: t("guardians.within") }), days,
+           el("span", { class: "hint", text: t("guardians.within_hint") })),
+        el("fieldset", {}, el("legend", { text: t("guardians.guard") }),
+           el("div", {}, el("label", { for: "guardians-everything" }, everything, " ", t("guardians.guard_everything"))),
+           el("div", {}, el("label", { for: "guardians-some" }, some, " ", t("guardians.guard_some"))), typesPart),
+        el("div", { class: "notice" },
+           el("p", { text: t("guardians.warning_lockout") }),
+           el("p", { text: t("guardians.warning_spare") }),
+           el("p", { text: t("guardians.warning_passkeys") }),
+           el("p", { text: t("guardians.warning_work", { work: g.organization_work.map((w) => t(`guardians.work.${w}`))
+               .join(t("approvals.separator")) }) })),
+        el("div", {}, el("label", { for: "guardians-no-spare" }, spare, " ", t("guardians.no_spare"))),
+        notice, prepare);
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const chosen = boxes.filter(([box]) => box.checked).map(([box]) => box.value);
+        try {
+            await approveScreen(await api("POST", "prepare", {
+                action: "guardians.set", k: Number(count.value), guardians: chosen,
+                within_days: Number(days.value), no_spare: spare.checked,
+                guarded: some.checked ? types.filter(([box]) => box.checked).map(([box]) => box.value) : null,
+            }));
+        } catch (error) {
+            notice.replaceChildren(problem(error.status === 423 ? t("keys.locked")
+                                                                : t("error.server", { message: error.message })));
+        }
+    });
+    parts.push(el("h3", { text: t(g.in_effect ? "guardians.change_title" : "guardians.set_title") }), form);
+    if (g.in_effect) {
+        const removed = el("div", { role: "status" });
+        const remove = el("button", { type: "button", text: t("guardians.remove") });
+        remove.addEventListener("click", async () => {
+            try {
+                await approveScreen(await api("POST", "prepare", { action: "guardians.remove" }));
+            } catch (error) {
+                removed.replaceChildren(problem(t("error.server", { message: error.message })));
+            }
+        });
+        parts.push(el("p", { class: "hint", text: t("guardians.remove_hint") }), remove, removed);
+    }
+    return parts;
 }
 
 /// API tokens for programs (as `token create|list|revoke`).
@@ -2270,6 +2411,18 @@ async function automationScreen() {
             return withdraw;
         }))],
     ], listed.machines));
+    // Machines whose key waits here, their delegation now on the ledger
+    // (after its approvals): their key, once.
+    if (listed.set_up?.length) {
+        parts.push(el("h2", { text: t("automation.set_up_title") }),
+                   el("p", { class: "hint", text: t("automation.set_up_hint") }),
+                   el("ul", {}, listed.set_up.map((m) => {
+                       const go = el("button", { type: "button", class: "primary", text: t("automation.set_up"),
+                                                 "aria-label": t("automation.set_up_label", { name: m.name }) });
+                       go.addEventListener("click", () => machineSetupScreen(m.actor, m.delegation, m.name, m.agent));
+                       return el("li", {}, `${m.name} `, go);
+                   })));
+    }
     parts.push(notice, executorForm(listed), agentForm(listed));
     show(...parts);
 }
@@ -2278,7 +2431,10 @@ async function automationScreen() {
 /// out its key once.
 async function addMachine(register, delegate, name, agent, notice) {
     try {
-        const prepared = await api("POST", "prepare", register);
+        // The second step goes with the first: if the registration has to
+        // wait for approvals, the console takes it by itself once it is
+        // registered, and the machine is set up from this screen then.
+        const prepared = await api("POST", "prepare", { ...register, then: delegate });
         prepared.progress = { index: 1, of: 2 };
         await approveScreen(prepared, new Map(), async (done) => {
             const second = await api("POST", "prepare", { ...delegate, actor: done.statement_id, name });
@@ -2688,6 +2844,11 @@ function mayWords(d, listed) {
     let text = parts.join("; ");
     if (d.in_person) text += `; ${t("people.may.in_person")}`;
     if (d.until) text += `; ${t("people.may.until", { time: timeText(d.until) })}`;
+    if (d.approvals) {
+        // Others approve what they sign under it (spec v0.20).
+        const named = (id) => (listed.actors ?? []).find((a) => a.id === id) ?? { id };
+        text += `; ${t("people.may.needs", { rule: ruleText({ ...d.approvals, approvers: d.approvals.approvers.map(named) }) })}`;
+    }
     return d.revoked ? t("people.may.withdrawn", { what: text }) : text;
 }
 
@@ -2703,6 +2864,18 @@ async function peopleScreen() {
         ["column.state", (u) => t(`people.step.${u.step}`)],
         ["people.may", (u) => (u.delegations.length ? u.delegations.map((d) => mayWords(d, listed)).join(" | ")
                                                     : t("value.none"))],
+        // Whose statements they approve: a delegation's, or the organization's
+        // as a guardian.
+        ["people.approves_for", (u) => {
+            const lines = (u.approves_for ?? []).map((a) => t("people.approves_line", {
+                name: a.grantee_name ?? short(a.grantee).text,
+                rule: t("approvals.k_of_n", { k: a.rule.k, n: a.rule.approvers.length }),
+            }));
+            if (u.guardian) {
+                lines.unshift(t("people.guardian"));
+            }
+            return lines.length ? lines.join("; ") : t("value.none");
+        }],
         ["column.actions", (u) => {
             if (!listed.may_change) {
                 return "";
@@ -2820,12 +2993,42 @@ function approvePersonScreen(u, listed) {
     const rules = choose(listed.contracts.map((c) => ({ value: c.id, label: c.name ?? `${c.id.slice(0, 12)}...` })),
                          t("people.which_rules"), "rules");
     const [untilField, until] = field("may-until", t("people.until"), t("people.until_hint"), { type: "date" });
+    // Others approve what they sign under it (spec v0.20): how many, of
+    // whom, within how many days; in person only, unless chosen otherwise.
+    const needs = el("input", { type: "checkbox", id: "may-approvals" });
+    const count = el("input", { type: "number", id: "approvals-k", min: 1, max: 16, value: 2, inputmode: "numeric" });
+    const days = el("input", { type: "number", id: "approvals-days", min: 1, max: 30, value: 7, inputmode: "numeric" });
+    const anyway = el("input", { type: "checkbox", id: "approvals-open" });
+    const boxes = new Map();
+    const pick = el("fieldset", {});
+    const drawPeople = () => {
+        pick.replaceChildren(el("legend", { text: t("people.approvers") }),
+            ...(listed.actors ?? []).filter((a) => a.kind === 1 || anyway.checked).map((a) => {
+                const box = boxes.get(a.id) ?? el("input", { type: "checkbox", value: a.id });
+                boxes.set(a.id, box);
+                return el("div", {}, el("label", {}, box, " ",
+                    a.kind === 1 ? a.name : t(a.kind === 2 ? "people.approver_agent" : "people.approver_device", { name: a.name })));
+            }));
+    };
+    drawPeople();
+    anyway.addEventListener("change", drawPeople);
+    const detail = el("div", { hidden: true },
+        el("div", { class: "field" }, el("label", { for: "approvals-k", text: t("people.approvals_k") }), count),
+        pick,
+        el("div", { class: "field" }, el("label", { for: "approvals-days", text: t("people.approvals_days") }), days,
+           el("span", { class: "hint", text: t("people.approvals_days_hint") })),
+        el("div", {}, el("label", { for: "approvals-open" }, anyway, " ", t("people.approvals_open"))),
+        el("p", { class: "hint", text: t("people.approvals_open_warning") }));
+    needs.addEventListener("change", () => { detail.hidden = !needs.checked; });
+    const approvalsPart = el("fieldset", {}, el("legend", { text: t("people.approvals_title") }),
+                             el("div", {}, el("label", { for: "may-approvals" }, needs, " ", t("people.approvals_needed"))),
+                             el("p", { class: "hint", text: t("people.approvals_hint") }), detail);
     const notice = el("div", { role: "status" });
     const go = el("button", { type: "submit", class: "primary", text: t("people.approve_steps", {
         n: { actor: 3, presence: 2, delegation: 1 }[u.step] ?? 1 }) });
     const form = el("form", { novalidate: true },
                     el("fieldset", {}, el("legend", { text: t("people.what_they_may") }), words.map(([, , v]) => v)),
-                    kinds.view, rules.view, untilField, notice, go, " ", backButton(t("approve.cancel")));
+                    kinds.view, rules.view, untilField, approvalsPart, notice, go, " ", backButton(t("approve.cancel")));
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const picked = (c) => (c.all.checked ? null : c.each.filter(([i]) => i.checked).map(([i]) => i.value));
@@ -2833,6 +3036,14 @@ function approvePersonScreen(u, listed) {
         may.kinds = picked(kinds);
         may.contracts = picked(rules);
         may.until = until.value ? Date.parse(`${until.value}T23:59:59Z`) : null;
+        if (needs.checked) {
+            may.approvals = {
+                k: Number(count.value),
+                approvers: [...boxes.entries()].filter(([, box]) => box.checked && box.isConnected).map(([id]) => id),
+                within: Number(days.value) * 86400000,
+                without_presence: anyway.checked,
+            };
+        }
         const steps = [
             ...(u.step === "actor" ? [{ action: "person.register", user: u.name }] : []),
             ...(u.step === "actor" || u.step === "presence" ? [{ action: "person.presence", user: u.name }] : []),
@@ -2872,6 +3083,8 @@ const OUTCOMES = ["done", "fails", "expires"];
 const piece = { kind: "piece" };
 const maybe = { kind: "maybe" };
 const yes = { kind: "yes" };
+/// A whole number from 1: how many approvals a line asks.
+const wholeNumber = { kind: "count" };
 const choice = (values, optional = false) => ({ kind: "choice", values, optional });
 const listOf = (of) => ({ kind: "list", of });
 const group = (context, keys) => ({ kind: "group", context, keys });
@@ -2892,7 +3105,12 @@ const SHEET = group("sheet", [
         ["action", piece], ["by", maybe], ["to", maybe],
         ["inputs", listOf(group("input", [["name", piece], ["type", piece]]))],
         ["requires", listOf(piece)], ["consent_of", listOf(piece)], ["in_person", yes],
-        ["in_person_over", maybe], ["agents_propose", yes], ...EFFECTS,
+        ["in_person_over", maybe],
+        // Requirements of approvals: how many people of the home, of whom,
+        // in person or not, within how long, above what (Bo).
+        ["approvals", listOf(group("approval", [["count", wholeNumber], ["by", maybe], ["in_person", yes],
+                                                ["within", piece], ["guard", maybe]]))],
+        ["agents_propose", yes], ["agents_approve", yes], ...EFFECTS,
     ]))],
     ["rules", listOf(group("rule", [["when", piece], ["do", listOf(piece)], ...EFFECTS]))],
     ["answers", listOf(group("answer", [["kind", piece], ["outcome", choice(OUTCOMES)],
@@ -2943,6 +3161,8 @@ function blank(desc) {
         return null;
     case "yes":
         return false;
+    case "count":
+        return 1;
     case "choice":
         return desc.optional ? null : desc.values[0];
     case "list":
@@ -2963,6 +3183,8 @@ function filled(desc, value) {
     }
     case "yes":
         return value === true;
+    case "count":
+        return Number.isInteger(value) && value > 0 ? value : 1;
     case "piece":
         return typeof value === "string" ? value : "";
     default:
@@ -3093,6 +3315,17 @@ function formPart(desc, holder, key, path, labelKey, redraw) {
             holder[key] = box.checked;
         });
         return el("label", { class: "check", "data-path": path }, box, " ", t(labelKey));
+    }
+    case "count": {
+        const hint = hintOf(labelKey, `${id}-hint`);
+        const input = el("input", { id, type: "number", min: 1, max: 16, value: String(value),
+                                    inputmode: "numeric", "aria-describedby": hint ? `${id}-hint` : null });
+        input.addEventListener("input", () => {
+            const n = Number(input.value);
+            holder[key] = Number.isInteger(n) && n > 0 ? n : 1;
+        });
+        return el("div", { class: "field", "data-path": path },
+                  el("label", { for: id, text: t(labelKey) }), input, hint);
     }
     case "choice": {
         const select = el("select", { id },
@@ -4725,6 +4958,30 @@ async function instanceScreen(id) {
                        el("dt", { text: f.field }), el("dd", { text: f.value })]).flat()));
     }
     const acting = view.may_act && !thing.final;
+    // Proposals waiting for approvals (Bo, requirements of approvals): in
+    // the contract's words, with Approve for those who may.
+    if (view.proposals?.length) {
+        const words = view.state?.proposals ?? [];
+        parts.push(el("h2", { text: t("thing.proposals_title") }),
+                   el("ul", { class: "approvals" }, view.proposals.map((p, n) => {
+                       const notice = el("div");
+                       const approve = el("button", { type: "button", class: "primary", text: t("approvals.approve"),
+                                                      "aria-label": t("approvals.approve_label", { function: p.function }) });
+                       approve.disabled = !acting || !p.may_approve;
+                       approve.addEventListener("click", () => approveProposal(p, notice));
+                       return el("li", { class: "kind" },
+                                 el("h3", { text: t("approvals.proposal_title", { function: p.function,
+                                                                                  rules: thing.contract_name ?? "" }) }),
+                                 el("p", { text: words[n]?.text ?? (p.by ? t("approvals.proposed_by", {
+                                     name: nameOf(p.by), time: timeText(p.proposed_at) }) : t("approvals.proposed_by_agent")) }),
+                                 p.approvals.length ? el("p", { text: t("approvals.so_far", {
+                                     names: p.approvals.map((a) => (a.in_person ? t("approvals.in_person_name", { name: nameOf(a) })
+                                                                                : nameOf(a))).join(t("approvals.separator")) }) }) : null,
+                                 el("p", { class: "hint", text: p.may_approve
+                                     ? t(p.completes ? "approvals.completes" : "approvals.records") : p.reason ?? "" }),
+                                 notice, approve);
+                   })));
+    }
     const calls = view.calls ?? [];
     // The actions, each a form; a call the contract refuses says why.
     const actions = calls.filter((c) => c.kind === "action");
@@ -4883,6 +5140,12 @@ async function loadChecker() {
             describe: (payload) => call("_kanhe_describe_payload", payload),
             challenge: (payload, kid, hash) =>
                 call("_kanhe_presence_challenge", payload, kid, hash),
+            // Someone else's statement, waiting for approvals: its id from
+            // its signed bytes, what it says, and the fields shown with it.
+            statementId: (signedStatement, fields, hash) =>
+                call("_kanhe_statement_id", signedStatement, fields, hash),
+            approvalChallenge: (payload, kid, hash) =>
+                call("_kanhe_approval_challenge", payload, kid, hash),
             verify: (proof, files, ledger) => {
                 module._kanhe_proof_reset();
                 for (const [name, content] of files) {
@@ -5022,6 +5285,133 @@ function sameTerms(a, b) {
     return [...keys].every((k) => canonical(a[k]) === canonical(b[k]));
 }
 
+// --- Approvals: words and checks ------------------------------------------------
+
+/// A window in words: 7 days, 12 hours, 90 minutes.
+function windowText(ms) {
+    const day = 86400000;
+    const hour = 3600000;
+    if (ms % day === 0) {
+        return t("window.days", { n: ms / day });
+    }
+    if (ms % hour === 0) {
+        return t("window.hours", { n: ms / hour });
+    }
+    return t("window.minutes", { n: Math.round(ms / 60000) });
+}
+
+/// An actor as a held statement or a proposal lists it: its name, or the
+/// start of its id.
+const nameOf = (a) => a?.name ?? (a?.id ? `${a.id.slice(0, 12)}...` : "?");
+
+/// A rule in words: "2 of Chan Tai Man, Lee Ka Yan, Ho Wing, within 7 days".
+function ruleText(rule) {
+    return t(rule.without_presence ? "approvals.rule_any" : "approvals.rule", {
+        k: rule.k, names: rule.approvers.map(nameOf).join(t("approvals.separator")),
+        window: windowText(rule.within ?? rule.within_ms),
+    });
+}
+
+/// Where a rule comes from, in words.
+const ruleSource = (r) => t(r.source === "delegation" ? "approvals.source.delegation"
+    : r.source === "new_guardians" ? "approvals.source.new_guardians" : "approvals.source.guardians");
+
+/// How an approval was given, in words.
+function approvalWords(a) {
+    return t(a.presence === "hardware-key" ? "approvals.by_key"
+        : a.presence === "passkey" ? "approvals.by_passkey" : "approvals.by_signature",
+             { name: nameOf(a.approver), time: timeText(a.approved_at) });
+}
+
+/// A held statement's progress (spec v0.20): each rule with what it still
+/// needs, the approvals given and how, declines (hints for whoever sent
+/// it), approvals that stopped counting, and when it lapses or what became
+/// of it.
+function heldProgress(h) {
+    const facts = el("dl", { class: "facts" });
+    const fact = (key, value) => facts.append(el("dt", { text: t(key) }), el("dd", { text: String(value) }));
+    for (const r of h.rules ?? []) {
+        fact("approvals.rule_label", `${ruleText(r)} (${ruleSource(r)})`);
+        fact("approvals.missing", r.missing > 0 ? t("approvals.more", { n: r.missing }) : t("approvals.met"));
+    }
+    if (h.signer_verified && (h.rules ?? []).some((r) => r.signer_counts)) {
+        fact("approvals.signer_counts", t("approvals.signer_counts_line", { name: nameOf(h.signer) }));
+    }
+    for (const a of h.approvals ?? []) {
+        fact("approvals.approved_by", approvalWords(a));
+    }
+    for (const d of h.declines ?? []) {
+        fact("approvals.declined_by", t("approvals.declined_line", { name: nameOf(d.approver), time: timeText(d.at) }));
+    }
+    for (const d of h.dropped ?? []) {
+        fact("approvals.dropped", t("approvals.dropped_line", { name: nameOf(d.approver), reason: d.reason }));
+    }
+    if ((h.state ?? "open") === "open") {
+        fact("approvals.lapses", timeText(h.lapses_at));
+    } else {
+        fact("column.state", t(`approvals.state.${h.state}`, { index: h.index ?? "" }));
+    }
+    if (h.note) {
+        fact("approvals.note", h.note);
+    }
+    return facts;
+}
+
+/// The fields of other statements that their bytes must hold as shown.
+const HELD_KEYS = {
+    "actor-rotate-key": ["subject", "key"],
+    "actor-revoke": ["subject", "reason"],
+    "ledger-rotate-log-key": ["key"],
+    "ledger-set-guardians": ["guardians", "guarded"],
+    "record-transition": ["record", "from_state", "to_state"],
+};
+
+/// A held registration's bytes are the one the console describes: its
+/// type, field count, version, metadata or terms, sources, and its files by
+/// name, size, and type (the files themselves are not here to check).
+function heldRegistrationAgrees(decoded, summary) {
+    const named = (summary.sources ?? []).map(({ ledger, record }) => ({ ledger, record }));
+    const same = (key) => Boolean(decoded[key]) === Boolean(summary[key]) &&
+        (!summary[key] || canonical(decoded[key]) === canonical(summary[key]));
+    const consent = Boolean(decoded.consent) === Boolean(summary.consent) &&
+        (!summary.consent || ["ledger", "instance", "function", "arguments", "head", "until"]
+            .every((k) => decoded.consent[k] === summary.consent[k]));
+    const files = summary.files ?? [];
+    return decoded.record_type === summary.record_type && decoded.field_count === summary.field_count &&
+        (decoded.supersedes ?? null) === (summary.supersedes ?? null) &&
+        canonical(decoded.metadata ?? {}) === canonical(summary.metadata ?? {}) &&
+        canonical(decoded.sources ?? []) === canonical(named) &&
+        sameTerms(decoded.access, summary.access) && consent && same("claim") && same("script_approval") &&
+        decoded.attachments.length === files.length &&
+        files.every((f, i) => decoded.attachments[i].name === f.name && decoded.attachments[i].size === f.size &&
+                               decoded.attachments[i].media_type === f.media_type);
+}
+
+/// What this page decoded of someone else's statement agrees with what the
+/// console says of it.
+function heldAgrees(decoded, summary) {
+    if (!decoded.ok || decoded.type !== summary.type ||
+        (decoded.script ?? null) !== (summary.script ?? null)) {
+        return false;
+    }
+    if (summary.type === "record-register") {
+        return heldRegistrationAgrees(decoded, summary);
+    }
+    if (summary.type === "contract-deploy") {
+        return deployAgrees(decoded, summary);
+    }
+    if (summary.type === "contract-call") {
+        return callAgrees(decoded, summary);
+    }
+    if (PEOPLE_KEYS[summary.type]) {
+        return peopleAgrees(decoded, summary);
+    }
+    if (HELD_KEYS[summary.type]) {
+        return HELD_KEYS[summary.type].every((k) => canonical(decoded[k]) === canonical(summary[k]));
+    }
+    return agrees(decoded, summary);
+}
+
 // --- Acting, approved with a passkey ---------------------------------------------
 
 /// Back to the list (the address is still #/things, so a link would not move).
@@ -5077,40 +5467,11 @@ function actScreen(record) {
          el("p", { class: "id", text: `${record.type} ${record.id}` }), form);
 }
 
-/// What the person approves, as the console prepared it and this page
-/// decoded it, then the tap.
-/// What an approval's `after` answers when it has gone on to another
-/// screen (the next of several taps): the Done screen is not shown.
-const TAKEN = Symbol("taken");
-
-async function approveScreen(prepared, files = new Map(), after = null) {
-    const summary = prepared.summary;
-    const registering = summary.type === "record-register";
+/// What a statement says, for the person about to confirm it or to approve
+/// it: its action and the fields of its body, in the reader's words.
+function statementFacts(summary) {
     const deploying = summary.type === "contract-deploy";
-    const rules = deploying || summary.type === "contract-retire";
     const calling = summary.type === "contract-call";
-    const check = await loadChecker();
-    let challenge = prepared.public_key.challenge;
-    let checkedHere = false;
-    if (check) {
-        const payload = new Uint8Array(fromBase64url(prepared.payload));
-        const decoded = check.describe(payload);
-        const own = check.challenge(payload, new Uint8Array(fromBase64url(prepared.kid)),
-                                    prepared.hash);
-        const matches = (registering ? registrationAgrees(check, decoded, prepared, files)
-            : deploying ? deployAgrees(decoded, summary)
-            : calling ? callAgrees(decoded, summary)
-            : PEOPLE_KEYS[summary.type] ? peopleAgrees(decoded, summary) : agrees(decoded, summary)) &&
-            // The script its provenance names, if any (v0.18).
-            (decoded.script ?? null) === (summary.script ?? null);
-        if (!matches || !own.ok || own.challenge !== challenge) {
-            show(el("h1", { text: t("approve.title") }), problem(t("approve.mismatch")),
-                 backButton(t("nav.things")));
-            return;
-        }
-        challenge = own.challenge;
-        checkedHere = true;
-    }
     const facts = el("dl", { class: "facts" });
     const fact = (key, value) => {
         if (value !== undefined && value !== null) {
@@ -5125,6 +5486,7 @@ async function approveScreen(prepared, files = new Map(), after = null) {
         : consenting ? "approve.type.consent"
         : summary.claim ? (summary.claim.answers ? "approve.type.access_answer" : "approve.type.claim")
         : access ? (access.condition ? "approve.type.access_question" : `approve.type.access_${access.kind}`)
+        : calling && summary.function === "approve" ? "approve.type.proposal-approve"
         : machine ? "approve.type.machine-register" : `approve.type.${summary.type}`));
     if (access) {
         const names = (list) => (list === null ? t("access.all")
@@ -5166,11 +5528,17 @@ async function approveScreen(prepared, files = new Map(), after = null) {
         if (summary.request) {
             fact("approve.answer", t(`thing.answer.${["", "done", "failed", "expired"][summary.status]}`));
         }
-        fact("approve.after", run.status ?? t("value.none"));
+        // What the rules decide, when the console ran the call (not for
+        // someone else's call, waiting for approvals).
+        if (summary.dry_run) {
+            fact("approve.after", run.status ?? t("value.none"));
+        }
         if (run.events?.length) {
             fact("approve.events", run.events.join(", "));
         }
-        fact("column.final", yesNo(run.final));
+        if (summary.dry_run) {
+            fact("column.final", yesNo(run.final));
+        }
         if (run.requests) {
             fact("approve.requests", run.requests);
         }
@@ -5206,7 +5574,7 @@ async function approveScreen(prepared, files = new Map(), after = null) {
             fact("column.contract", (summary.scope.contracts ?? []).join(", "));
             fact("automation.functions", summary.scope.functions?.join(", ") ?? t("access.all"));
         } else {
-            fact("people.may", mayWords(summary.may, { kinds: [], contracts: [] }));
+            fact("people.may", mayWords(summary.may, { kinds: [], contracts: [], actors: summary.approvers ?? [] }));
         }
         fact("automation.in_person", yesNo(summary.scope.require_presence));
     } else if (summary.type === "delegation-revoke") {
@@ -5234,6 +5602,72 @@ async function approveScreen(prepared, files = new Map(), after = null) {
     for (const s of summary.sources ?? []) {
         fact("approve.made_from", sourceText(s));
     }
+    if (summary.type === "ledger-set-guardians") {
+        // The organization's guardians (spec v0.20).
+        if (summary.guardians) {
+            fact("guardians.who", summary.guardian_names.join(t("approvals.separator")));
+            fact("guardians.k", t("guardians.k_of", { k: summary.guardians.k, n: summary.guardians.approvers.length }));
+            fact("guardians.within", windowText(summary.guardians.within));
+            fact("guardians.guard", summary.guarded
+                ? summary.guarded.map((type) => t(`approve.type.${type}`)).join(t("approvals.separator"))
+                : t("guardians.everything"));
+        } else {
+            fact("guardians.who", t("guardians.none_after"));
+        }
+    } else if (summary.type === "actor-rotate-key" || summary.type === "actor-revoke") {
+        fact("approvals.whose", summary.subject_name ?? summary.subject);
+        if (summary.key) {
+            fact("approvals.new_key", `${summary.key.slice(0, 16)}...`);
+        }
+    } else if (summary.type === "ledger-rotate-log-key") {
+        fact("approvals.new_key", `${summary.key.slice(0, 16)}...`);
+    } else if (summary.type === "record-transition") {
+        fact("approvals.moves", t("approvals.moves_line", { from: summary.from_state, to: summary.to_state }));
+    }
+    return facts;
+}
+
+/// What the person confirms, as the console prepared it and this page
+/// decoded it, then the tap.
+/// What an approval's `after` answers when it has gone on to another
+/// screen (the next of several taps): the Done screen is not shown.
+const TAKEN = Symbol("taken");
+
+async function approveScreen(prepared, files = new Map(), after = null) {
+    const summary = prepared.summary;
+    const registering = summary.type === "record-register";
+    const deploying = summary.type === "contract-deploy";
+    const rules = deploying || summary.type === "contract-retire";
+    const calling = summary.type === "contract-call";
+    const check = await loadChecker();
+    let challenge = prepared.public_key.challenge;
+    let checkedHere = false;
+    if (check) {
+        const payload = new Uint8Array(fromBase64url(prepared.payload));
+        const decoded = check.describe(payload);
+        const own = check.challenge(payload, new Uint8Array(fromBase64url(prepared.kid)),
+                                    prepared.hash);
+        const matches = (registering ? registrationAgrees(check, decoded, prepared, files)
+            : deploying ? deployAgrees(decoded, summary)
+            : calling ? callAgrees(decoded, summary)
+            : PEOPLE_KEYS[summary.type] ? peopleAgrees(decoded, summary)
+            // The organization's guardians, and other statements (spec v0.20).
+            : HELD_KEYS[summary.type] ? decoded.ok && decoded.type === summary.type &&
+                HELD_KEYS[summary.type].every((k) => canonical(decoded[k]) === canonical(summary[k]))
+            : agrees(decoded, summary)) &&
+            // The script its provenance names, if any (v0.18).
+            (decoded.script ?? null) === (summary.script ?? null);
+        if (!matches || !own.ok || own.challenge !== challenge) {
+            show(el("h1", { text: t("approve.title") }), problem(t("approve.mismatch")),
+                 backButton(t("nav.things")));
+            return;
+        }
+        challenge = own.challenge;
+        checkedHere = true;
+    }
+    const facts = statementFacts(summary);
+    const consenting = summary.record_type === "kanhe.contract-consent/1";
+    const access = summary.access;
     if (registering) {
         for (const f of summary.fields) {
             facts.append(el("dt", { text: t("register.private_field", { name: f.name }) }),
@@ -5250,7 +5684,28 @@ async function approveScreen(prepared, files = new Map(), after = null) {
                                             { name: f.name, size: sizeText(f.size) }) }));
         }
     }
-    const button = el("button", { type: "button", class: "primary", text: t("approve.button") });
+    // Others must approve it too (spec v0.20): said before the tap, and it
+    // is held until they do instead of registered.
+    const needs = summary.approvals ?? { needed: false, rules: [] };
+    const sending = Boolean(needs.needed);
+    const note = sending ? el("textarea", { id: "approval-note", rows: 2, maxlength: 1000 }) : null;
+    const shown = sending && registering && summary.fields.length
+        ? el("input", { type: "checkbox", id: "approval-show-fields", checked: true }) : null;
+    const sendPart = sending ? el("section", { class: "notice", "aria-labelledby": "approval-needs" },
+        el("p", { id: "approval-needs", text: t("approve.needs", {
+            rules: needs.rules.filter((r) => r.missing > 0)
+                .map((r) => `${ruleText(r)}${r.signer_counts ? t("approvals.you_count") : ""}`)
+                .join(t("approvals.rule_separator")),
+        }) }),
+        el("p", { class: "hint", text: t("approve.needs_hint", { time: timeText(needs.lapses_at) }) }),
+        el("div", { class: "field" }, el("label", { for: "approval-note", text: t("approve.note") }), note,
+           el("span", { class: "hint", text: t("approve.note_hint") })),
+        shown ? el("div", {}, el("label", { for: "approval-show-fields" }, shown, " ", t("approve.show_fields")),
+                   el("p", { class: "hint", text: t("approve.show_fields_hint") })) : null) : null;
+    // A call the contract keeps as a proposal, waiting for approvals (Bo).
+    const proposing = calling && (summary.dry_run?.events ?? []).includes("propose");
+    const button = el("button", { type: "button", class: "primary",
+                                  text: t(sending ? "approve.button_send" : "approve.button") });
     const notice = el("div");
     button.addEventListener("click", async () => {
         button.disabled = true;
@@ -5274,7 +5729,19 @@ async function approveScreen(prepared, files = new Map(), after = null) {
                 authenticator_data: toBase64url(credential.response.authenticatorData),
                 client_data_json: toBase64url(credential.response.clientDataJSON),
                 signature: toBase64url(credential.response.signature),
+                ...(sending ? { note: note.value.trim(), show_fields: Boolean(shown?.checked) } : {}),
             });
+            if (done.status === "waiting") {
+                // Held until enough of them approve: what follows waits too.
+                const machineSteps = summary.type === "actor-register" && summary.kind !== 1;
+                show(el("h1", { text: t("approvals.sent_title_done") }),
+                     el("p", { role: "status", text: t("approvals.sent_done", { time: timeText(done.lapses_at) }) }),
+                     machineSteps || prepared.progress ? el("p", { class: "hint", text: t(machineSteps
+                         ? "approvals.machine_continues" : "approvals.steps_wait") }) : null,
+                     el("p", { class: "id", text: done.id }), heldProgress(done),
+                     goButton(t("approvals.open_list"), "#/approvals"));
+                return;
+            }
             const followed = after ? await after(done).catch((e) => problem(
                 t("error.server", { message: e.message }))) : null;
             if (followed === TAKEN) {
@@ -5283,6 +5750,7 @@ async function approveScreen(prepared, files = new Map(), after = null) {
             show(el("h1", { text: t("approve.done_title") }),
                  el("p", { role: "status", text: t("approve.done", { index: done.index }) }),
                  el("p", { class: "id", text: done.statement_id }), followed,
+                 proposing ? el("p", { class: "notice", text: t("approve.proposed") }) : null,
                  summary.script_approval ? el("p", {}, el("a", { href: `#/script/${done.statement_id}`,
                                                                  text: t("scripts.open") }))
                  : registering && !consenting && !access ? el("p", {}, el("a", { href: `#/thing/${done.statement_id}`,
@@ -5313,7 +5781,240 @@ async function approveScreen(prepared, files = new Map(), after = null) {
          el("p", { text: t("approve.intro") }), facts,
          el("p", { class: "hint", text: t(checkedHere ? "approve.checked_here"
                                                       : "approve.checked_by_console") }),
-         notice, button, " ", backButton(t("approve.cancel")));
+         proposing ? el("p", { class: "notice", text: t("approve.will_propose") }) : null,
+         sendPart, notice, button, " ", backButton(t("approve.cancel")));
+}
+
+// --- Approvals ---------------------------------------------------------------------
+
+/// A held statement in a list: what it is, who sent it and when, its rules,
+/// who approved it, what is missing, and its time left.
+function heldItem(h, time) {
+    const what = t(`approve.type.${h.type}`) === `approve.type.${h.type}` ? h.summary : t(`approve.type.${h.type}`);
+    const left = h.state === "open" && h.lapses_at > time
+        ? t("approvals.time_left", { time: timeText(h.lapses_at) }) : null;
+    return el("li", { class: "kind", "data-statement": h.id },
+              el("h3", {}, el("a", { href: `#/approval/${h.id}`, text: what })),
+              el("p", { text: t("approvals.asked_by", { name: nameOf(h.signer), time: timeText(h.held_at) }) }),
+              left ? el("p", { class: "hint", text: left }) : null,
+              heldProgress(h));
+}
+
+/// Prepares the person's own `approve` of a contract's proposal, then the
+/// confirmation, as any call (Bo).
+async function approveProposal(p, notice) {
+    try {
+        await approveScreen(await api("POST", "prepare", {
+            action: "contract.approve", instance: p.instance, function: p.function,
+            arguments: p.arguments_cbor, language: state.language,
+        }));
+    } catch (error) {
+        callProblem(error, el("form"), notice);
+    }
+}
+
+/// A contract's proposal in a list: the action, who proposed it and when,
+/// who approved it so far, and Approve.
+function proposalItem(p) {
+    const notice = el("div");
+    const approve = el("button", { type: "button", class: "primary", text: t("approvals.approve"),
+                                   "aria-label": t("approvals.approve_label", { function: p.function }) });
+    approve.disabled = !p.may_approve;
+    approve.addEventListener("click", () => approveProposal(p, notice));
+    return el("li", { class: "kind", "data-instance": p.instance },
+              el("h3", {}, el("a", { href: `#/instance/${p.instance}`,
+                                     text: t("approvals.proposal_title", { function: p.function,
+                                                                           rules: p.contract_name ?? short(p.contract).text }) })),
+              el("p", { text: p.by ? t("approvals.proposed_by", { name: nameOf(p.by), time: timeText(p.proposed_at) })
+                                   : t("approvals.proposed_by_agent") }),
+              el("p", { class: "id", text: p.arguments }),
+              p.approvals.length ? el("p", { text: t("approvals.so_far", {
+                  names: p.approvals.map((a) => (a.in_person ? t("approvals.in_person_name", { name: nameOf(a) }) : nameOf(a)))
+                      .join(t("approvals.separator")) }) }) : null,
+              p.may_approve ? el("p", { class: "hint", text: t(p.completes ? "approvals.completes" : "approvals.records") })
+                            : el("p", { class: "hint", text: p.reason ?? "" }),
+              notice, approve);
+}
+
+/// Waiting for your approval, and what you sent for approval.
+async function approvalsScreen() {
+    const listed = await api("GET", `approvals?language=${encodeURIComponent(state.language)}`);
+    const parts = [flash(), el("h1", { text: t("approvals.title") }), el("p", { class: "hint", text: t("approvals.intro") })];
+    parts.push(el("h2", { text: t("approvals.waiting_title") }));
+    if (!listed.actor) {
+        parts.push(el("p", { class: "hint", text: t("approvals.no_actor") }));
+    } else if (listed.waiting.length === 0 && listed.proposals.length === 0) {
+        parts.push(el("p", { text: t("approvals.none_waiting") }));
+    } else {
+        parts.push(el("ul", { class: "approvals" }, listed.waiting.map((h) => heldItem(h, listed.time)),
+                      listed.proposals.map(proposalItem)));
+    }
+    parts.push(el("h2", { text: t("approvals.sent_title") }));
+    const sent = [...listed.sent].sort((a, b) => b.held_at - a.held_at);
+    if (sent.length === 0) {
+        parts.push(el("p", { text: t("approvals.none_sent") }));
+    } else {
+        const notice = el("div", { role: "status" });
+        parts.push(notice, el("ul", { class: "approvals" }, sent.map((h) => {
+            const item = heldItem(h, listed.time);
+            if (h.state === "open") {
+                const withdraw = el("button", { type: "button", text: t("approvals.withdraw"),
+                                                "aria-label": t("approvals.withdraw_label", { what: t(`approve.type.${h.type}`) }) });
+                withdraw.addEventListener("click", async () => {
+                    withdraw.disabled = true;
+                    try {
+                        await api("DELETE", `approvals/${h.id}`);
+                        state.flash = t("approvals.withdrawn");
+                        route();
+                    } catch (error) {
+                        withdraw.disabled = false;
+                        notice.replaceChildren(problem(t("error.server", { message: error.message })));
+                    }
+                });
+                item.append(el("p", { class: "hint", text: t("approvals.withdraw_hint") }), withdraw);
+            }
+            return item;
+        })));
+    }
+    show(...parts);
+}
+
+/// Someone else's statement, waiting for approvals: decoded here from its
+/// bytes (its id recomputed, its shown fields checked against its field
+/// root), compared with what the console says of it, then approved with a
+/// passkey tap, declined, or withdrawn.
+async function approvalScreen(id) {
+    const [view, check] = await Promise.all([api("GET", `approvals/${id}`), loadChecker()]);
+    const held = view.held;
+    const summary = view.summary;
+    if (!summary) {
+        show(el("h1", { text: t("approvals.review_title") }), problem(t("approvals.not_yours", { why: view.why_not ?? "" })),
+             goButton(t("approvals.open_list"), "#/approvals"));
+        return;
+    }
+    let checkedHere = false;
+    let fields = null;
+    let decoded = null;
+    if (check) {
+        const statement = new Uint8Array(fromBase64url(view.statement));
+        const shown = view.fields ? new Uint8Array(fromBase64url(view.fields)) : new Uint8Array(0);
+        const read = check.statementId(statement, shown, view.hash);
+        decoded = read.ok ? read.statement : null;
+        if (!read.ok || read.id !== id || held.id !== id || !heldAgrees(decoded, summary) ||
+            (decoded.actor ?? null) !== (held.signer?.id ?? null) ||
+            (decoded.delegation ?? null) !== (held.delegation ?? null) || decoded.issued_at !== held.issued_at) {
+            show(el("h1", { text: t("approvals.review_title") }), problem(t("approvals.mismatch")),
+                 goButton(t("approvals.open_list"), "#/approvals"));
+            return;
+        }
+        fields = read.fields;
+        checkedHere = true;
+    }
+    const facts = statementFacts(summary);
+    const fact = (key, value) => facts.append(el("dt", { text: t(key) }), el("dd", { text: String(value) }));
+    fact(summary.by_organization ? "approvals.signed_by_org" : "approvals.signed_by", nameOf(held.signer));
+    fact("approvals.issued", timeText(held.issued_at));
+    fact("approvals.sent", timeText(held.held_at));
+    for (const f of fields ?? []) {
+        facts.append(el("dt", { text: t("register.private_field", { name: f.name }) }), el("dd", { text: f.value }));
+    }
+    for (const [name, value] of Object.entries(summary.metadata ?? {})) {
+        facts.append(el("dt", { text: t("register.public_field", { name }) }), el("dd", { text: value }));
+    }
+    for (const f of summary.files ?? []) {
+        facts.append(el("dt", { text: t("register.file") }), el("dd", { text: `${f.name}, ${sizeText(f.size)}` }));
+    }
+    const parts = [el("h1", { text: t("approvals.review_title") }), el("p", { text: t("approvals.review_intro") }), facts,
+                   el("p", { class: "id", text: id }),
+                   el("p", { class: "hint", text: t(checkedHere ? "approvals.checked_here" : "approve.checked_by_console") })];
+    if (summary.type === "record-register" && summary.field_count > 0) {
+        parts.push(el("p", { class: "hint", text: t(fields ? "approvals.fields_shown" : "approvals.fields_sealed") }));
+    }
+    parts.push(el("h2", { text: t("approvals.progress_title") }), heldProgress(held));
+    const notice = el("div", { role: "status" });
+    const buttons = [];
+    if (view.may_approve) {
+        const approve = el("button", { type: "button", class: "primary", text: t("approvals.button") });
+        approve.addEventListener("click", async () => {
+            approve.disabled = true;
+            status(t("status.working"));
+            try {
+                const prepared = await api("POST", `approvals/${id}/prepare`, {});
+                let challenge = prepared.public_key.challenge;
+                if (check) {
+                    // The approval's own challenge, from the payload the
+                    // console prepared: for this statement, by this person.
+                    const own = check.approvalChallenge(new Uint8Array(fromBase64url(prepared.payload)),
+                                                        new Uint8Array(fromBase64url(prepared.kid)), prepared.hash);
+                    if (!own.ok || own.challenge !== challenge || own.statement !== id ||
+                        own.approver !== view.approver || own.ledger !== decoded.ledger) {
+                        notice.replaceChildren(problem(t("approvals.mismatch")));
+                        return;
+                    }
+                    challenge = own.challenge;
+                }
+                const options = prepared.public_key;
+                const credential = await navigator.credentials.get({
+                    publicKey: {
+                        challenge: fromBase64url(challenge),
+                        rpId: options.rpId,
+                        allowCredentials: options.allowCredentials.map((c) => ({ type: c.type, id: fromBase64url(c.id) })),
+                        userVerification: options.userVerification,
+                        timeout: options.timeout,
+                    },
+                });
+                const done = await api("POST", `approvals/${id}/approve`, {
+                    prepared: prepared.prepared,
+                    credential_id: toBase64url(credential.rawId),
+                    authenticator_data: toBase64url(credential.response.authenticatorData),
+                    client_data_json: toBase64url(credential.response.clientDataJSON),
+                    signature: toBase64url(credential.response.signature),
+                });
+                show(el("h1", { text: t("approvals.done_title") }),
+                     el("p", { role: "status", text: done.statement_id ? t("approvals.registered", { index: done.index })
+                                                                       : t("approvals.kept") }),
+                     el("p", { class: "id", text: id }),
+                     done.statement_id ? null : heldProgress(done),
+                     goButton(t("approvals.open_list"), "#/approvals"));
+            } catch (error) {
+                notice.replaceChildren(problem(passkeyProblem(error)));
+            } finally {
+                approve.disabled = false;
+                status("");
+            }
+        });
+        const decline = el("button", { type: "button", text: t("approvals.decline") });
+        decline.addEventListener("click", async () => {
+            decline.disabled = true;
+            try {
+                await api("POST", `approvals/${id}/decline`, {});
+                notice.replaceChildren(el("p", { text: t("approvals.declined") }));
+            } catch (error) {
+                decline.disabled = false;
+                notice.replaceChildren(problem(t("error.server", { message: error.message })));
+            }
+        });
+        buttons.push(approve, " ", decline);
+        parts.push(el("p", { class: "hint", text: t("approvals.decline_hint") }));
+    } else if (view.why_not) {
+        parts.push(el("p", { class: "hint", text: t("approvals.not_yours", { why: view.why_not }) }));
+    }
+    if (view.may_withdraw) {
+        const withdraw = el("button", { type: "button", text: t("approvals.withdraw") });
+        withdraw.addEventListener("click", async () => {
+            withdraw.disabled = true;
+            try {
+                await api("DELETE", `approvals/${id}`);
+                state.flash = t("approvals.withdrawn");
+                location.hash = "#/approvals";
+            } catch (error) {
+                withdraw.disabled = false;
+                notice.replaceChildren(problem(t("error.server", { message: error.message })));
+            }
+        });
+        buttons.push(" ", withdraw);
+    }
+    show(...parts, notice, ...buttons, " ", goButton(t("approvals.open_list"), "#/approvals"));
 }
 
 // --- Navigation ------------------------------------------------------------------
@@ -5344,6 +6045,7 @@ function chrome() {
         : hash.startsWith("#/people") ? "people"
         : hash.startsWith("#/automation") ? "automation"
         : hash.startsWith("#/scripts") || hash.startsWith("#/script/") ? "scripts"
+        : hash.startsWith("#/approval") ? "approvals"
         : hash.startsWith("#/reports") ? "reports"
         : hash.startsWith("#/kinds") ? "kinds"
         : hash.startsWith("#/rules") ? "rules"
@@ -5404,12 +6106,15 @@ async function route() {
         const asked = hash.match(/^#\/access\/request\/([0-9a-f]{64})$/);
         const delivered = hash.match(/^#\/access\/delivery\/([0-9a-f]{64})$/);
         const opened = hash.match(/^#\/exchange\/opened\/([0-9a-f]{24})$/);
+        const approval = hash.match(/^#\/approval\/([0-9a-f]{64})$/);
         await (thing ? thingScreen(thing[1])
             : act ? actionLinkScreen(act[1], decodeURIComponent(act[2]))
             : asked ? accessRequestScreen(asked[1])
             : delivered ? accessDeliveryScreen(delivered[1])
             : instance ? instanceScreen(instance[1])
             : script ? scriptScreen(script[1])
+            : approval ? approvalScreen(approval[1])
+            : hash.startsWith("#/approvals") ? approvalsScreen()
             : hash.startsWith("#/scripts") ? scriptsScreen()
             : create ? createScreen(create[1])
             : opened ? exchangeScreen(opened[1])

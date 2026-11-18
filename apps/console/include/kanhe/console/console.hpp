@@ -35,6 +35,7 @@
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/error.hpp>
+#include <kanhe/core/protocol/approvals.hpp>
 #include <kanhe/core/protocol/exchange.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
@@ -239,11 +240,54 @@ struct Prepared {
     std::optional<std::string> seal_as;
     /// The key sealed under `seal_as` when this was prepared (none, or a
     /// revoked actor's being replaced): sealing refuses if it changed since,
-    /// so that two approvals never overwrite each other's key.
+    /// so that two confirmations never overwrite each other's key.
     std::optional<crypto::PublicKey> seal_over;
+    /// Its approval rules (spec v0.20) need more than its signer: once
+    /// signed it is sent for approval, held at the node until enough of the
+    /// people they name approve it, and registered then; it lapses at
+    /// `lapses_at` otherwise.
+    bool for_approval = false;
+    protocol::Timestamp lapses_at = 0;
+    /// For a machine's registration: the step that follows it (a
+    /// machine.delegate intent), which the console takes by itself, signed
+    /// by the organization, once a registration sent for approval is
+    /// registered (only when an owner confirmed it).
+    nlohmann::json then{};
 };
 
 inline constexpr protocol::Timestamp approval_lifetime = 2 * 60'000;
+
+/// An approval of someone else's statement (spec v0.20), prepared for the
+/// signed-in person's passkey tap: built and held by the console, given
+/// once, within two minutes, signed with that person's sealed key.
+struct PreparedApproval {
+    std::string user;
+    protocol::Approval approval;
+    /// The approver's key id, which the challenge names.
+    protocol::Id kid;
+    /// The console's sealed key that signs it.
+    std::string key;
+    Bytes challenge;
+    std::string origin;
+    protocol::Timestamp expires = 0;
+};
+
+/// Statements held for approval at the node (spec v0.20, section 16;
+/// node::LedgerApi::hold_for_approval, give_approval, withdraw_held, and
+/// decline_held): holding one (the CBOR POST /v1/approvals takes), one
+/// approval of a held one, withdrawing one, and a decline (a hint for its
+/// preparer). Each answers through its callback, as the node's routes do.
+struct ApprovalHooks {
+    std::function<void(Bytes body, std::function<void(http::Response)>)> hold;
+    std::function<void(const protocol::Id& statement, Bytes approval,
+                       std::function<void(http::Response)>)>
+        give;
+    std::function<void(const protocol::Id& statement, std::function<void(http::Response)>)>
+        withdraw;
+    std::function<void(const protocol::Id& statement, const protocol::Id& approver,
+                       std::function<void(http::Response)>)>
+        decline;
+};
 
 /// Wrong recovery codes: at most this many a minute (each costs a scrypt),
 /// and one checked at a time.
@@ -326,6 +370,13 @@ public:
         held_ = std::move(held);
     }
 
+    /// Statements held for approval at the node (spec v0.20). Until they are
+    /// set, sending for approval and approving answer 503.
+    void set_approvals(ApprovalHooks hooks) {
+        const std::lock_guard lock(api_mutex_);
+        approvals_ = std::move(hooks);
+    }
+
     /// Keeps a witness's cosignature of one of this ledger's checkpoints
     /// (node::LedgerApi::add_cosignature: `body` is [cosignature, witness
     /// key]). Until it is set, parties' cosignatures are not kept.
@@ -389,10 +440,9 @@ private:
     /// The answer to a request that fails the checks every request passes
     /// first (the console started, its Host, its Origin); nothing if it passes.
     [[nodiscard]] std::optional<http::Response> refuse(const http::Request& request) const;
-    /// Checks an approval and signs its statement: the signed statement, or
-    /// the answer that refuses it.
-    /// What an approval sends to the ledger: the signed statement, or a
-    /// submission; and the uploads it used, forgotten once it is registered.
+    /// What a person's confirmation sends to the ledger: the signed
+    /// statement, or a submission; and the uploads it used, forgotten once
+    /// it is registered.
     struct Signing {
         Bytes body;
         bool submission = false;
@@ -400,12 +450,29 @@ private:
         /// Done once the ledger has registered it (a person linked, the
         /// activity log).
         std::function<void(const protocol::Id& statement)> after{};
+        /// Sent for approval instead (spec v0.20): the hold request POST
+        /// /v1/approvals takes, and when the statement lapses.
+        std::optional<Bytes> hold{};
+        protocol::Timestamp lapses_at{};
+        /// What follows it once registered, when it is held: kept in a file
+        /// of the console's (`follow_up`), so that a restart loses nothing
+        /// but what is kept in memory only.
+        nlohmann::json follow{};
     };
+    /// Checks a confirmation's passkey tap and signs its statement: what to
+    /// send, or the answer that refuses it.
     [[nodiscard]] std::variant<Signing, http::Response>
     sign_approval(const http::Request& request) const;
-    /// Once the ledger answered an approval: on success, its uploads are
+    /// Once the ledger answered a confirmation: on success, its uploads are
     /// forgotten and what follows it is done.
     void registered_now(const Signing& signing, const http::Response& registered) const;
+    /// Sends what a confirmation signed: registered, or held for approval
+    /// (then what follows it waits until it is registered).
+    void send_signed(Signing signing, std::function<void(http::Response)> respond) const;
+    /// Waits for an answer given through a callback (the node answers once
+    /// its writer has), at most 30 seconds.
+    [[nodiscard]] static http::Response
+    wait_for(const std::function<void(std::function<void(http::Response)>)>& start);
     [[nodiscard]] http::Response upload_route(const http::Request& request) const;
     /// A registration's statement body and draft from the page's intent, or
     /// why there is none.
@@ -602,7 +669,16 @@ private:
         std::optional<std::string> model;
         std::optional<std::string> model_version;
         protocol::Timestamp expires = 0;
+        /// Its delegation once it is signed (hex): sent for approval, it is
+        /// set up from Automation once registered.
+        std::string delegation{};
     };
+    /// Grants a machine sent for approval what it may do, once its
+    /// registration is registered: the step an owner confirmed with it,
+    /// signed by the organization, and sent on (held again if it needs
+    /// approvals).
+    void continue_machine(const std::string& by, const protocol::Id& actor,
+                          nlohmann::json intent) const;
     /// Witnessing (witnessing.cpp): each poll follows the parties' ledgers
     /// (their genesis fetched) and asks those with a witness key to cosign
     /// this ledger's latest checkpoint; what each answered, for the Parties
@@ -751,6 +827,55 @@ private:
     [[nodiscard]] http::Response unlock_route(const http::Request& request) const;
     [[nodiscard]] http::Response prepare_route(const http::Request& request) const;
     [[nodiscard]] http::Response approve_route(const http::Request& request) const;
+    /// Approvals (approvals.cpp, spec v0.20). GET /console/api/approvals:
+    /// what waits for the signed-in person's approval (statements held at
+    /// the node that a rule names them for, and contracts' proposals they
+    /// may approve) and what they sent for approval, with what became of it;
+    /// GET .../ID, one held statement with its signed bytes and shown
+    /// fields, for the page to check; POST .../ID/prepare, an approval for
+    /// the person's passkey tap.
+    [[nodiscard]] http::Response approvals_route(const http::Request& request) const;
+    /// POST .../ID/approve (the tap: the approval, signed with the person's
+    /// sealed key, goes to the node, which registers the statement once its
+    /// rules are met), POST .../ID/decline (a hint for its preparer), and
+    /// DELETE .../ID (withdrawn, by its signer or an owner or admin).
+    void approvals_write(const http::Request& request,
+                         std::function<void(http::Response)> respond) const;
+    [[nodiscard]] static bool approvals_write_path(const http::Request& request);
+    /// GET /console/api/guardians: the organization's guardians in effect
+    /// (spec v0.20), every setting, who could be one, and the settings
+    /// waiting for approvals.
+    [[nodiscard]] http::Response guardians_route(const http::Request& request) const;
+    /// A guardian setting (guardians.set, guardians.remove), signed by the
+    /// organization after an owner's passkey: checked here as the ledger
+    /// will check it, with the warnings of the spec in words.
+    [[nodiscard]] std::variant<PersonStep, http::Response>
+    guardians_step(const Signed& who, const nlohmann::json& intent) const;
+    /// The proposals contracts keep on this ledger's things, waiting for
+    /// approvals (Bo, requirements of approvals): each with who proposed it
+    /// and who approved it, and, for `actor`, whether they may approve it
+    /// now (a dry run of their `approve`), with `instance` only that thing's.
+    [[nodiscard]] nlohmann::json proposals_json(const protocol::LedgerState& state,
+                                                const std::optional<protocol::Id>& actor,
+                                                const std::optional<protocol::Id>& instance,
+                                                const std::string& language) const;
+    /// What a statement prepared for confirmation needs (spec v0.20): each
+    /// rule that applies, the signer counted when the rule names it, and
+    /// whether others must approve it.
+    [[nodiscard]] static nlohmann::json approvals_needed(const protocol::LedgerState& state,
+                                                         const protocol::Statement& statement,
+                                                         bool signer_verified);
+    /// What follows statements sent for approval (spec v0.20), once they
+    /// are registered: each kept as a file under the console's folder
+    /// (follow-ups/<statement id>.json), {"by", "activity", "detail",
+    /// "link": {"user", "key"}, "certificate": type, "recovery": {"user"},
+    /// "machine": intent, "until"}; done once the ledger has the statement,
+    /// and forgotten once it lapsed, was withdrawn, or was dropped.
+    void keep_follow_up(const std::string& statement, nlohmann::json what) const;
+    /// Runs what follows statements registered since; any thread, one at a
+    /// time (another run meanwhile returns at once).
+    void follow_up() const;
+    void run_follow_up(const protocol::Id& statement, const nlohmann::json& what) const;
     /// A lost passkey: the recovery code opens the console and begins
     /// registering a new passkey for the owner, whose passkeys the root key
     /// then replaces with it on the ledger.
@@ -760,11 +885,25 @@ private:
         Bytes statement;
         std::string user;
         protocol::PresenceCredential passkey;
-        /// The lost passkeys' credential ids (base64url), whose PRF slots go.
-        std::vector<std::string> old_passkeys;
         /// The new passkey's PRF output, if it gave one: its slot.
         std::string prf;
+        /// While guardians guard it (spec v0.20): sent for their approval,
+        /// and done once they have approved it, before it lapses.
+        bool for_approval = false;
+        protocol::Timestamp lapses_at = 0;
+        nlohmann::json needs{};
     };
+    /// Registers a recovery's statement, or sends it for the guardians'
+    /// approval: the answer for the recovery page.
+    void send_recovery(std::shared_ptr<const Recovery> recovery,
+                       std::function<void(http::Response)> respond) const;
+    /// The console's side of a recovery, once the ledger has the new
+    /// passkey: it is the owner's only one in the console, the lost ones'
+    /// slots go, its PRF output (if any) gets one, and the owner's sessions
+    /// end. The answer that refuses it, if it cannot be done.
+    [[nodiscard]] std::optional<http::Response>
+    apply_recovery(const std::string& user, const protocol::PresenceCredential& passkey,
+                   const std::string& prf) const;
     /// Checks a recovery's new passkey and signs the statement that makes it
     /// the owner's only one: the plan, or the answer that refuses it.
     [[nodiscard]] std::variant<Recovery, http::Response>
@@ -828,6 +967,10 @@ private:
         const std::lock_guard lock(api_mutex_);
         return cosignatures_;
     }
+    [[nodiscard]] ApprovalHooks approval_hooks() const {
+        const std::lock_guard lock(api_mutex_);
+        return approvals_;
+    }
     /// Tells the node the ledger's API may open (set up, or unlocked).
     void ready_now() const;
 
@@ -842,11 +985,20 @@ private:
     Propose propose_;
     Held held_;
     Cosignatures cosignatures_;
+    ApprovalHooks approvals_;
     std::function<void()> on_ready_;
     mutable std::mutex mutex_;
     std::vector<Origin> origins_;
     mutable std::map<std::string, Ceremony> ceremonies_;
     mutable std::map<std::string, Prepared> prepared_;
+    mutable std::map<std::string, PreparedApproval> prepared_approvals_;
+    /// A recovery's new passkey's PRF output while the recovery waits for
+    /// the guardians, by its statement's id: in memory only (a secret), so
+    /// that the passkey unlocks the console once registered; after a
+    /// restart it gets its slot at its first sign-in instead.
+    mutable std::map<std::string, std::string> recovery_prf_;
+    /// One run of the follow-ups at a time.
+    mutable std::mutex follow_mutex_;
     mutable std::map<std::string, Upload> uploads_;
     /// The sessions the compiler runs for now (one run each).
     mutable std::set<std::string> compiling_;

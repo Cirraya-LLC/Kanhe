@@ -8,7 +8,7 @@
 add_library(kanhe_console src/console.cpp src/passkeys.cpp src/sessions.cpp src/users.cpp src/views.cpp src/keystore.cpp src/unlock.cpp src/approve.cpp src/setup.cpp src/deferred.cpp src/recover.cpp src/settings.cpp src/kinds.cpp src/documents.cpp
     src/access.cpp src/exchange.cpp src/instances.cpp src/parties.cpp src/things.cpp src/search.cpp src/rules.cpp src/witnessing.cpp src/relaying.cpp
     src/people.cpp src/activity.cpp src/qr.cpp src/certificates.cpp src/certifying.cpp src/claiming.cpp src/automation.cpp
-    src/backups.cpp src/provenance.cpp)
+    src/backups.cpp src/provenance.cpp src/approvals.cpp)
 add_library(kanhe::console ALIAS kanhe_console)
 target_include_directories(kanhe_console PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
 target_link_libraries(kanhe_console

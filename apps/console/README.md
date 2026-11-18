@@ -4,7 +4,8 @@ An application on the chain: a web console for a ledger, for one person on their
 company on its server. `kanhe-console` serves it beside the ledger's API, as an extension of
 the chain's node. It builds what it signs with the chain's client library, and the ledger applies
 its own rules to it, so what someone may do on the ledger stays in their delegations; each
-statement is approved with a passkey, checked in the browser before the tap. Its Things and
+statement is confirmed with a passkey, checked in the browser before the tap, and what others
+must approve waits for their approvals. Its Things and
 Reports screens read the [search index](../index/README.md), and its rules editor runs the `bo`
 compiler beside it.
 
@@ -17,12 +18,13 @@ one person or a team, signs people in, registers documents with their fields and
 they were made from, approves the scripts that make records, shows a thing's page, shares and
 verifies proof, writes, tests, and deploys rules, creates things under them and acts on them,
 connects with other organizations (consents, documents, witnessing each other, public
-witnesses, relays), runs machines and AI agents, backs itself up, and approves each statement
-with a passkey. Not yet: Windows.
+witnesses, relays), runs machines and AI agents, backs itself up, confirms each statement with
+a passkey, collects the approvals that statements and contracts' proposals need, and sets the
+organization's guardians. Not yet: Windows.
 
 | Path | What it holds |
 |---|---|
-| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, parties, people, automation, backups, the witness, and the relay |
+| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, approvals and guardians, parties, people, automation, backups, the witness, and the relay |
 | `web/` | The page (`index.html`, `console.js`, `console.css`) and its catalogs in three languages (`web/i18n/`) |
 | `wasm/` | Its checks in the browser, built to WebAssembly (`tools/wasm/build.sh`) and embedded when `KANHE_CONSOLE_WASM_DIR` names them |
 | `cli/` | The `kanhe-console` program |
@@ -51,7 +53,8 @@ kanhe-console settings show
   `presence enroll`.
 - **A lost passkey.** "Lost your passkey?" on the sign-in page takes the recovery code and a
   new passkey: the root key makes the new passkey the owner's only one on the ledger, the lost
-  one stops signing in, approving, and unlocking, and the owner's other sessions end. A few
+  one stops signing in, confirming, and unlocking, and the owner's other sessions end; while the
+  organization's guardians guard it, only once they have approved it (Guardians, below). A few
   wrong codes a minute are tried at most.
 - **A ledger of your own** (the quick start's, with its keys in files) opens in the console once
   its log key is sealed: `console key init`, `console key import log log.key`, then
@@ -146,7 +149,9 @@ kanhe-console settings show
 - **Rules.** The Rules screen lists the contracts on the ledger and retires them; "Write
   rules" is an editor with two views of the same rules: a form (parties, the thing and its
   fields, actions with their conditions, consents, presence, what AI agents may do, the state
-  change, fields set, and requests; time rules, rules for answers, and tests; vocabulary packs as
+  change, fields set, and requests; requirements of approvals (how many, by whom, in person,
+  within, above what) and whether AI agents may approve; time rules, rules for answers, and tests;
+  vocabulary packs as
   boxes to tick) and the Bo text, with its keywords in any of the three languages. The form
   writes Bo as `bo form` does, and a source opens in the form when it fits (`bo form
   --from`); otherwise it stays text, and the page says where. Each problem the compiler finds
@@ -161,7 +166,10 @@ kanhe-console settings show
 - **Things with rules.** "Create a thing" under deployed rules opens a form drawn from the
   contract (`bo calls`): each field and party it takes, typed, in the reader's language. A thing's
   page shows its state and fields as the contract text writes them, its parties, and its history,
-  each call with who made it and whether in person; the actions the rules offer, each a form; the
+  each call with who made it and whether in person; the proposals it keeps waiting for
+  approvals, with who proposed and who approved them, and Approve for those who may (their own
+  call of `approve`, run before the tap and confirmed in person); the actions the rules offer,
+  each a form; the
   time rules that are due (the keeper fires them; "Run it now" does at once); and the requests
   waiting for an answer, which a person
   may answer by hand (done, failed, or expired, with a reason). Every call is built from what the
@@ -251,8 +259,13 @@ kanhe-console settings show
   with a key the console keeps for them; their passkeys as that person's presence; and a
   delegation of what they may do, chosen as words (register documents, of some kinds or all;
   endorse; revoke; act under rules, some or all; deploy rules; manage people, for admins), always
-  in person, optionally until a date (`console user approve NAME --as KEY` does the same from the
-  command line). The page checks each step's bytes before its tap. Withdrawing what someone may
+  in person, optionally until a date, and, if chosen, needing approvals: how many of which people
+  (and machines, where approvals need not be in person, with a warning), within how many days
+  (`console user approve NAME --as KEY` does the same from the command line). Each person's row
+  says whose statements they approve, and whether they are a guardian; while they are, the ledger
+  lets only them (or the organization) change their key or passkeys, so registering a new passkey
+  for them here is refused. The page checks each
+  step's bytes before its tap. Withdrawing what someone may
   do revokes their delegation with a tap; removing them ends their sessions. Settings show the
   **API tokens** for programs (made once and shown once, revoked, as `token create|list|revoke`)
   and the console's **activity log** (`console activity`): who invited, approved, changed a
@@ -288,7 +301,53 @@ kanhe-console settings show
   (`console run --unlock-file`), and each owner's or admin's passkey (its PRF output). A
   console starts locked and signs nothing until a passkey's sign-in, a passphrase, or the
   recovery code unlocks it.
-- **Approving: one tap per statement.** `console user link NAME --actor ID --key KEY` lets a user
+- **Approvals.** A delegation may need others' approvals (spec section 5.1): what its grantee
+  signs is registered only once k of the people it names approve it, each in person with a
+  passkey, within a window. Before the tap, the confirm screen says so ("Others must approve this
+  before it is registered: 2 of Chan Tai Man, Lee Ka Yan, Ho Wing, within 7 days"), takes a note for
+  them, and, for a registration, offers to show them its fields (kept on the server, readable,
+  only while it waits); the tap sends it for approval instead of registering it: the node holds
+  it, and **Sent for approval** (the Approvals screen) shows its progress, what became of it, and
+  Withdraw. **Waiting for your approval** (a count on Home, and the Approvals screen) lists every
+  statement a rule names the signed-in person for, in words: who sent it and when, each rule, who
+  approved and how, what is missing, and the time left; and every contract proposal they may
+  approve. A statement's page gives the browser its signed bytes: the page's WebAssembly
+  recomputes its id, checks the fields shown against its field root, and refuses on any
+  difference with the console's summary. **Approve with your passkey** signs the approval with the
+  person's sealed key over the approval's own challenge, the passkey's tap user-verified and
+  checked as the ledger checks it, the page having recomputed that challenge from the payload; the
+  node registers the statement with every approval the moment its rules are met. **Decline** only
+  tells whoever sent it; nothing goes on the ledger. What follows a statement held for approval
+  (a person linked, a certificate published, the activity log, a recovery's new passkey, a
+  machine's next step) is kept in a file in the console's folder (`follow-ups/`) and done once
+  the ledger has the statement (checked at each poll and when Home or Approvals opens), so a
+  restart loses none of it; it is forgotten when the statement lapses, is withdrawn, or is
+  dropped. A registration's sources' proofs are kept at once, under its id. Kept in memory only,
+  and so lost by a restart: a machine's key waiting to be handed out (by design never written
+  down: add the machine again), and a recovered passkey's PRF output (its passkey then unlocks the
+  console from its first sign-in instead). Adding a machine: if its registration waits for
+  approvals and an owner confirmed it, the console grants it what was chosen by itself once it is
+  registered (the organization signs it, and it goes for approval again if that needs it); a
+  machine whose grant waited for approvals is set up from Automation ("Waiting to be set up")
+  once the grant is registered. As `kanhe approval list|show|give|withdraw` do.
+- **Guardians.** Settings show the organization's guardians in effect (who, how many, what they
+  guard, since when). An owner sets them (who, k, within how many days; everything the
+  organization signs, recommended, or chosen statement types), with the warnings in plain words:
+  if fewer than k can ever approve again, what they guard can never be signed again; name at
+  least one more guardian than k (k equal to their number only when the owner accepts it); a
+  second passkey or a hardware key for each. The organization signs the setting after the
+  owner's passkey, the new guardians (and, when changing them, the current ones) approve it from
+  their own Approvals screen, and it takes effect when registered. Day-to-day work never waits for
+  them: people and the console's machine act under their own delegations. What the organization
+  signs itself waits for them once they guard everything: adding machines and AI agents, turning
+  credentials on, letting the console issue a kind's certificates or answer by itself (each sent
+  for approval like any other), and replacing a lost passkey with the recovery code: the recovery
+  screen says, before the new passkey is made, that the guardians must approve it and which of
+  them; the passkey's tap sends it for their approval (owners see it under Sent for approval), and
+  once they have approved it the new passkey becomes the owner's only one and signs in, the lost
+  one stops, and the owner's other sessions end. Until then nothing changes. As `kanhe ledger
+  guardians set|show|remove` do.
+- **Confirming: one tap per statement.** `console user link NAME --actor ID --key KEY` lets a user
   act as a person of the ledger; `console user passkeys NAME --out DIR` writes their passkeys
   for `actor set-presence`. The console then prepares what the person asks for (registering,
   endorsing, or revoking a record; deploying or retiring rules; creating a thing under rules,
