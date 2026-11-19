@@ -71,6 +71,12 @@ struct Checkpoint {
 [[nodiscard]] Result<Bytes> encode_checkpoint(const Checkpoint& checkpoint);
 [[nodiscard]] Result<Checkpoint> decode_checkpoint(ByteView encoded);
 
+/// RFC 9597's CWT Claims header parameter, and its claim iat (RFC 8392): a
+/// dated cosignature's protected header holds exactly {6: iat} there, the
+/// witness's time in whole seconds (spec v0.21, section 10).
+inline constexpr std::int64_t label_cwt_claims = 15;
+inline constexpr std::int64_t cwt_claim_iat = 6;
+
 /// A checkpoint signed by the log key, or a cosignature by a witness. Both
 /// sign the same payload bytes, under different content types.
 struct SignedCheckpoint {
@@ -78,6 +84,10 @@ struct SignedCheckpoint {
     cose::Sign1 envelope;
     Checkpoint checkpoint;
     Id kid;
+    /// A dated cosignature's time (spec v0.21): its iat, the witness's word
+    /// of when it saw the tree, in POSIX seconds. nullopt for an undated
+    /// cosignature, and for a checkpoint.
+    std::optional<std::uint64_t> witness_time = std::nullopt;
 };
 
 /// Signs a checkpoint with the ledger's log key.
@@ -90,10 +100,16 @@ struct SignedCheckpoint {
                                        const crypto::PublicKey& log_key);
 
 /// A witness's cosignature over a checkpoint. A witness must only cosign
-/// after verifying consistency with the last checkpoint it cosigned.
-[[nodiscard]] Result<SignedCheckpoint> cosign_checkpoint(const crypto::Signer& witness_key,
-                                                         const crypto::Provider& provider,
-                                                         const Checkpoint& checkpoint);
+/// after verifying consistency with the last checkpoint it cosigned. With
+/// `time_seconds` (spec v0.21), a dated cosignature: its protected header
+/// also holds the CWT claims {6: time}, the witness's time in POSIX seconds,
+/// which a witness SHOULD give.
+[[nodiscard]] Result<SignedCheckpoint>
+cosign_checkpoint(const crypto::Signer& witness_key, const crypto::Provider& provider,
+                  const Checkpoint& checkpoint,
+                  std::optional<std::uint64_t> time_seconds = std::nullopt);
+/// Reads a cosignature, dated or not: one whose CWT claims (label 15) are
+/// not exactly {6: iat} with an unsigned iat is malformed.
 [[nodiscard]] Result<SignedCheckpoint> parse_cosignature(ByteView encoded);
 [[nodiscard]] Status verify_cosignature(const crypto::Provider& provider,
                                         const SignedCheckpoint& cosignature,

@@ -35,6 +35,7 @@
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/credentials.hpp>
 #include <kanhe/node/keeper.hpp>
+#include <kanhe/node/long_term.hpp>
 #include <kanhe/node/network_witnesses.hpp>
 #include <kanhe/node/peers.hpp>
 #include <kanhe/node/published.hpp>
@@ -174,6 +175,9 @@ enum class Endpoint {
     get_checkpoint,
     make_checkpoint,
     consistency,
+    /// GET /v1/renewal?from=N[&size=M]: newer attestations of the tree for
+    /// evidence of size N, for anyone (spec v0.21).
+    renewal,
     entries,
     /// GET /v1/genesis: the genesis log entry (read or peer).
     genesis,
@@ -377,6 +381,9 @@ struct LedgerApi::State {
     mutable std::mutex event_mutex;
     /// Which ledger each of this ledger's memberships names (v0.16).
     mutable MembershipIndex membership_index;
+    /// The status's long-term block (v0.21): what the stored cosignatures
+    /// and tokens say, each read once.
+    mutable LongTermWatch long_term;
     /// The witness keeps state of its own (what it last cosigned).
     std::mutex witness_mutex;
 
@@ -1441,6 +1448,9 @@ struct LedgerApi::State {
                   // How far the ledger's clock runs ahead ($KANHE_CLOCK_OFFSET,
                   // demonstrations and tests only): 0 normally.
                   {"clock_offset_ms", ledger::SystemClock::offset()},
+                  // Whether its keys and attestations carry its evidence
+                  // past the classical algorithms (spec v0.21).
+                  {"long_term", long_term.status(*ledger, clock->now())},
                   {"version", options.version}});
     }
 
@@ -1495,6 +1505,35 @@ struct LedgerApi::State {
         }
         auto proof = ledger->consistency_proof(*old_size, *new_size);
         return proof ? cbor_response(digests_value(*proof)) : error_response(proof.error());
+    }
+
+    /// A renewal (spec v0.21, sections 11.1 and 16) for evidence whose
+    /// checkpoint, or last renewal, is of size `from`: to the latest
+    /// checkpoint, or the one of `size`, with what attests it.
+    http::Response renewal(const http::Request& r) const {
+        const auto from = number(r, "from");
+        if (!from || *from == 0) {
+            return error_response(400, "invalid_argument", "from must be a positive integer");
+        }
+        std::optional<std::uint64_t> size;
+        if (r.query.contains("size")) {
+            size = number(r, "size");
+            if (!size || *size == 0) {
+                return error_response(400, "invalid_argument", "size must be a positive integer");
+            }
+            if (*from > *size) {
+                return error_response(400, "invalid_argument", "from must not be above size");
+            }
+        }
+        auto made = ledger->renewal(*from, size);
+        if (!made) {
+            return error_response(made.error());
+        }
+        auto encoded = protocol::encode_renewal(*made);
+        if (!encoded) {
+            return error_response(encoded.error());
+        }
+        return binary("application/cbor", std::move(*encoded));
     }
 
     /// [start, start + count) of a list of `total`, with sane limits.
@@ -4579,6 +4618,12 @@ struct LedgerApi::State {
                          : Routed{path == "/v1/checkpoint" ? Endpoint::get_checkpoint
                                                            : Endpoint::consistency,
                                   Access::open};
+        } else if (path == "/v1/renewal") {
+            // A renewal holds nothing private (spec v0.21): open to anyone.
+            if (!get) {
+                return method_not_allowed("GET");
+            }
+            found = Routed{Endpoint::renewal, Access::open};
         } else if (path == "/v1/access/requests" || path == "/v1/access/receipts" ||
                    path == "/v1/witness/cosign") {
             if (!post) {
@@ -4803,6 +4848,8 @@ struct LedgerApi::State {
             return checkpoint(r);
         case Endpoint::consistency:
             return consistency(r);
+        case Endpoint::renewal:
+            return renewal(r);
         case Endpoint::entries:
             return entries(r);
         case Endpoint::genesis:

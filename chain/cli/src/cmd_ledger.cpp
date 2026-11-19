@@ -6,6 +6,7 @@
 #include <span>
 
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/node/long_term.hpp>
 
 #include "commands.hpp"
 #include "output.hpp"
@@ -47,7 +48,35 @@ Json status_json(Session& session) {
         out["checkpoint"] = nullptr;
         out["unchecked_entries"] = size;
     }
+    // Whether its keys and attestations carry its evidence past the
+    // classical algorithms (spec v0.21), with advice.
+    out["long_term"] = Json::parse(node::long_term_json(session.ledger(), session.now()).dump());
     return out;
+}
+
+/// The status's long-term block, in words.
+void print_long_term(const Json& t) {
+    auto key = [](const Json& k) {
+        return std::format("{} ({})", k["algorithm"].get<std::string>(),
+                           k["post_quantum"].get<bool>() ? "post-quantum" : "classical");
+    };
+    std::println("long term:     root key {}, log key {}; genesis {}", key(t["root_key"]),
+                 key(t["log_key"]),
+                 t["genesis_post_quantum"].get<bool>() ? "post-quantum" : "classical");
+    if (const Json& c = t["last_post_quantum_cosignature"]; c.is_object()) {
+        std::println("               last {} cosignature: size {}, checkpoint of {} (witness {})",
+                     c["algorithm"].get<std::string>(), c["tree_size"].get<std::uint64_t>(),
+                     c["checkpoint_time"].get<std::string>(),
+                     c["witness"].get<std::string>().substr(0, 16));
+    } else {
+        std::println("               no post-quantum witness cosignature yet");
+    }
+    bool first = true;
+    for (const Json& line : t["advice"]) {
+        std::println("{}{}", first ? "advice:        " : "               ",
+                     line.get<std::string>());
+        first = false;
+    }
 }
 
 } // namespace
@@ -139,11 +168,11 @@ int cmd_status(const Args& args) {
     std::println("actors:        {}", s["actors"].get<std::size_t>());
     std::println("delegations:   {}", s["delegations"].get<std::size_t>());
     std::println("records:       {}", s["records"].get<std::size_t>());
-    if (!state_has_contracts(s)) {
-        return exit_ok;
+    if (state_has_contracts(s)) {
+        std::println("contracts:     {} ({} instances)", s["contracts"].get<std::size_t>(),
+                     s["instances"].get<std::size_t>());
     }
-    std::println("contracts:     {} ({} instances)", s["contracts"].get<std::size_t>(),
-                 s["instances"].get<std::size_t>());
+    print_long_term(s["long_term"]);
     return exit_ok;
 }
 

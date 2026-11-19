@@ -486,7 +486,7 @@ Console::consent_draft(const Signed& who, const nlohmann::json& intent) const {
     }
     const crypto::HashAlg hash = served->hash();
     std::vector<protocol::RecordField> fields{
-        {"note", services_.entropy->bytes<16>(),
+        {"note", services_.entropy->bytes<protocol::salt_size>(),
          cbor::Value::text("consent to " + consent.function + " on instance " +
                            hex_of(consent.instance).substr(0, 12))}};
     const auto commitment = protocol::commit_fields(*services_.provider, hash, fields);

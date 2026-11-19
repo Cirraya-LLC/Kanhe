@@ -27,6 +27,7 @@ add_library(kanhe_core
     src/protocol/id_map.cpp
     src/protocol/keys.cpp
     src/protocol/log.cpp
+    src/protocol/longterm.cpp
     src/protocol/memberships.cpp
     src/protocol/scripts.cpp
     src/protocol/network.cpp

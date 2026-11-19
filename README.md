@@ -308,7 +308,7 @@ The `kanhe` tool controls every part of a ledger:
 | Area | Commands |
 |---|---|
 | Keys | `key generate`, `key show`, `key public`, `key passphrase` |
-| Ledger | `init`, `status`, `audit`, `log list`, `log show`, `log export`, `ledger keys`, `ledger genesis`, `ledger rotate-log-key`, `ledger rotate-root-key`, `ledger snapshot create\|show\|remove` |
+| Ledger | `init`, `status`, `audit`, `log list`, `log show`, `log export`, `ledger keys`, `ledger genesis`, `ledger rotate-log-key`, `ledger rotate-root-key`, `ledger long-term`, `ledger snapshot create\|show\|remove` |
 | Actors | `actor add`, `actor list`, `actor show`, `actor revoke`, `actor rotate-key`, `actor set-presence`, `presence enroll` |
 | Delegations | `delegation grant`, `delegation list`, `delegation show`, `delegation revoke` |
 | Approvals | `approval list`, `approval show`, `approval give`, `approval submit`, `approval withdraw`; `--for-approval` on every command that signs; `delegation grant --approvals`; `ledger guardians set\|show\|remove` |
@@ -319,7 +319,7 @@ The `kanhe` tool controls every part of a ledger:
 | Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch` (a member's) |
 | Proofs | `checkpoint create`, `checkpoint list`, `checkpoint show`, `checkpoint cosign-request`, `checkpoint add-cosignature`, `checkpoint timestamp`, `checkpoint add-timestamp`, `checkpoint timestamps`, `checkpoint note`, `checkpoint network-cosign`, `checkpoint network-cosignatures`, `proof inclusion`, `proof consistency`, `proof state`, `receipt` |
 | Witnesses | `witness add-log`, `witness cosign`, `witness status`, `witness remove-log`; `witness register`, `witness registered`, `witness unregister` (public witnesses, and open networks' with `--vkey`); `witness network-entry` |
-| Evidence | `export`, `verify`, `inspect`, `qr` |
+| Evidence | `export`, `verify`, `evidence renew`, `inspect`, `qr` |
 | Vault | `vault status`, `vault keygen`, `vault rekey` |
 | AI agents | `mcp` |
 | Server | `serve`, `token create`, `token list`, `token show`, `token revoke` |
@@ -562,6 +562,69 @@ an event more than a minute after the authority saw it; one that does not counts
 relies on nothing. A token got another way (from a court's or a notary's service) is kept with
 `checkpoint add-timestamp`: `checkpoint show --json` gives the digest to send (`timestamp_imprint`).
 The browser verifier takes the authority's root certificate as it takes witness keys.
+
+## Evidence for decades
+
+A bundle is credible as long as its signatures are. Ed25519, ESP256, SM2, and the keys of most
+time-stamp authorities will fall to a large enough quantum computer (NIST deprecates them after
+2030), and then anyone could sign anything under them. What survives is a tree that something
+still unbroken attested before then, since the tree binds every entry, signatures included;
+and a ledger whose genesis named post-quantum keys. Kanhe keeps evidence credible both ways:
+
+- **Post-quantum keys.** `ledger long-term` moves a ledger's root key and log key to ML-DSA in
+  one step: the log key's rotation, then the root key's, each signed by the root key in effect,
+  then a checkpoint with the new log key. With guardians, each rotation goes for their approval
+  (`--for-approval`), and the command goes on where it stopped when run again. A ledger meant to
+  last is best created with ML-DSA keys (`init` with `key generate --alg ml-dsa-65` keys): a
+  classical genesis stays forgeable whatever it rotates to later.
+- **Post-quantum attestations.** A witness's key may be ML-DSA, and every cosignature is
+  dated with the witness's time. A checkpoint meant to be relied on for long should carry one
+  post-quantum and one classical cosignature, so that neither a quantum computer nor a flaw in
+  ML-DSA alone undoes it.
+- **Renewals.** Whoever holds a bundle can add a newer attestation of the same ledger's tree:
+  a later checkpoint, proven to extend the bundle's, with the key rotations in between and the
+  cosignatures and time-stamp tokens kept beside it. It holds nothing private and changes
+  nothing the bundle shows; it adds integrity and time. The ledger's server answers it with no
+  token (`GET /v1/renewal?from=N`).
+
+Every verification report states the bundle's long-term status: the latest post-quantum
+attestation that covers it, or none, with the advice to renew before 2030. `kanhe status` says
+the same of a ledger: whether its keys are post-quantum, when a witness last cosigned with an
+ML-DSA key, and which time-stamp authority's certificate expires soon, with what to do.
+
+```sh
+# A ledger begun with classical keys has exported evidence.cbor; its status advises.
+kanhe status                        # long term: root key Ed25519 (classical), ...
+
+# Once: both keys to ML-DSA-65, and a checkpoint with the new log key.
+kanhe key generate --alg ml-dsa-65 --out root-pq.key
+kanhe key generate --alg ml-dsa-65 --out log-pq.key
+kanhe ledger long-term --as root.key --log-key log.key \
+    --new-root-key root-pq.key --new-log-key log-pq.key --dry-run     # the plan
+kanhe ledger long-term --as root.key --log-key log.key \
+    --new-root-key root-pq.key --new-log-key log-pq.key
+kanhe serve --log-key log.key --log-key log-pq.key                    # a server holds both
+
+# A witness whose key is ML-DSA cosigns the new checkpoint, dated (beside a classical one).
+kanhe checkpoint cosign-request --witness pq-witness.pub --out request.cbor
+kanhe witness cosign request.cbor --dir witness --key pq-witness.key --out cosignature.cbor
+kanhe checkpoint add-cosignature cosignature.cbor --witness pq-witness.pub
+
+# Anyone holding the old bundle renews it: from the ledger's server, or from the ledger's
+# directory (--ledger). The renewed bundle is verified before it is written.
+kanhe evidence renew evidence.cbor --server https://ledger.example.com --out evidence-2026.cbor
+
+# Verify: long_term names what keeps it credible.
+kanhe verify evidence-2026.cbor --ledger-id <ledger-id> --witness pq-witness.pub --json
+#   "long_term": {"post_quantum": true,
+#                 "checkpoint": {"tree_size": 17, "timestamp": "...", "renewal": 1},
+#                 "attested_by": [{"kind": "witness", "algorithm": "ml-dsa-65", ...}], ...}
+```
+
+Renew evidence meant to last before 2030, and again as attestations improve. A verifier can
+also check a bundle as it would after a break, distrusting an algorithm from a date
+(`verify --distrust`): a signature by it then counts only where a dated attestation from before
+that date covers it.
 
 ## Browser verifier
 
@@ -1128,6 +1191,10 @@ What the chain does not do yet, as of this version (the Bo language's own are in
   a cluster refuses peers' access requests and receipts for now (it would not replicate them).
 - **Credentials** are secured with JOSE; SD-JWT VC, which the EU's digital identity wallet asks
   for, is planned.
+- **Long-term evidence:** the web console has no screen for a ledger's long-term status yet
+  (`kanhe status` and `GET /v1/status` show it), and renewing the hash (if SHA-256 or SM3 ever
+  weakens; [spec section 11.2](spec/README.md#112-hash-renewal-informative)) is described, not
+  built.
 - **`KANHE_CLOCK_OFFSET`** is for demonstrations and tests only (`serve` refuses it without
   `--allow-clock-offset`); a ledger keeps the later times it recorded.
 

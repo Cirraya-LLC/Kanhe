@@ -29,6 +29,12 @@ inline const OptionSpec script_option{
     "script", "SCRIPT",
     "Provenance: the approved script (kanhe script approve) this came from, by its id"};
 inline const OptionSpec log_key_option{"log-key", "KEY", "The ledger's log key file", true};
+/// What a verifier distrusts from a date (spec v0.21, section 11.1).
+inline const OptionSpec distrust_option{
+    "distrust", "ALG@YYYY-MM-DD",
+    "Distrust an algorithm from that date (spec v0.21): ed25519, ecdsa, sm2, rsa, ml-dsa-44, "
+    "ml-dsa-65, ml-dsa-87, or classical (every one but ML-DSA)",
+    false, true};
 /// For a party reached through its relay: what goes there is signed.
 inline const OptionSpec relay_log_key_option{
     "log-key", "KEY",
@@ -54,13 +60,12 @@ inline const std::vector<OptionSpec> client_options{
 inline const std::set<std::string_view> local_only{"init",  "serve", "token",  "replica", "backup",
                                                    "vault", "peer",  "access", "cluster", "relay"};
 /// Commands of other groups that need the directory (its peers, the trust
-/// nodes it belongs to): $KANHE_SERVER does not send them to a mirror.
+/// nodes it belongs to): $KANHE_SERVER does not send them to a mirror. And
+/// evidence renew, which reads the ledger's directory or asks a server's open
+/// route itself, with no mirror and no token.
 inline const std::set<std::pair<std::string_view, std::string_view>> local_only_commands{
-    {"contract", "send"},
-    {"contract", "fetch"},
-    {"keeper", "due"},
-    {"record", "source"},
-    {"trust", "node"}};
+    {"contract", "send"}, {"contract", "fetch"}, {"evidence", "renew"},
+    {"keeper", "due"},    {"record", "source"},  {"trust", "node"}};
 /// The cluster commands that talk to a member's API.
 inline std::vector<OptionSpec> cluster_api(std::vector<OptionSpec> extra) {
     std::vector<OptionSpec> options{

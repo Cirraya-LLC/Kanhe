@@ -239,15 +239,26 @@ int cmd_witness_cosign(const Args& args) {
     const WitnessState state = decode_state(path);
     const std::filesystem::path out = args.need("out");
     write_file(out, *cosignature, false);
+    // Dated (spec v0.21): the witness's time, in whole seconds.
+    const auto cosigned = unwrap(protocol::parse_cosignature(*cosignature), "the cosignature");
+    const std::string algorithm(crypto::name(key->public_key().algorithm));
     if (args.json()) {
         print_json({{"cosigned", true},
                     {"file", out.string()},
                     {"ledger_id", id_json(state.log.ledger_id)},
                     {"tree_size", state.log.size},
-                    {"root", to_hex(state.log.root.bytes())}});
+                    {"root", to_hex(state.log.root.bytes())},
+                    {"algorithm", algorithm},
+                    {"time", cosigned.witness_time
+                                 ? Json(verifier::iso_time_seconds(*cosigned.witness_time))
+                                 : Json(nullptr)}});
     } else {
-        std::println("cosigned \"{}\" at size {} (history consistent since size {}); wrote {}",
-                     state.name, state.log.size, request.old_size, out.string());
+        std::println("cosigned \"{}\" at size {} (history consistent since size {}), {} dated "
+                     "{}; wrote {}",
+                     state.name, state.log.size, request.old_size, algorithm,
+                     cosigned.witness_time ? verifier::format_time_seconds(*cosigned.witness_time)
+                                           : std::string("(undated)"),
+                     out.string());
     }
     return exit_ok;
 }

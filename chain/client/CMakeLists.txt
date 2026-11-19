@@ -23,6 +23,7 @@ add_library(kanhe_client
     src/relay.cpp
     src/relay_client.cpp
     src/relay_server.cpp
+    src/renewals.cpp
     src/requests.cpp
     src/session.cpp
     src/support.cpp

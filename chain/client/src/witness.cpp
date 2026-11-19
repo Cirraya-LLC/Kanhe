@@ -2,6 +2,7 @@
 // Copyright 2026 Cirraya
 
 #include <algorithm>
+#include <cstdint>
 
 #include <kanhe/client/support.hpp>
 #include <kanhe/client/witness.hpp>
@@ -170,20 +171,24 @@ Result<Bytes> witness_cosign(const std::filesystem::path& dir, const crypto::Sig
         return fail(Errc::invalid_argument, "a ledger's log key cannot witness the ledger");
     }
     const auto& provider = shared_provider();
+    // Every cosignature is dated (spec v0.21): the witness's time, in whole
+    // seconds, from the clock the caller gave.
+    const std::uint64_t seconds = now / 1000;
     // The checkpoint cosigned last, asked for again: cosign it again.
     if (state.log.size > 0 && checkpoint.checkpoint.tree_size == state.log.size &&
         checkpoint.checkpoint.root == state.log.root &&
         checkpoint.checkpoint.ledger_id == state.log.ledger_id &&
         protocol::verify_checkpoint(provider, checkpoint, state.log.log_key)) {
-        KANHE_APP_TRY(again, protocol::cosign_checkpoint(key, provider, checkpoint.checkpoint));
+        KANHE_APP_TRY(again,
+                      protocol::cosign_checkpoint(key, provider, checkpoint.checkpoint, seconds));
         return again.encoded;
     }
     KANHE_APP_TRY(approved, protocol::check_cosign_request(provider, state.log, request));
     if (key.public_key() == approved.log.log_key) {
         return fail(Errc::invalid_argument, "a ledger's log key cannot witness the ledger");
     }
-    KANHE_APP_TRY(cosigned,
-                  protocol::cosign_checkpoint(key, provider, approved.checkpoint.checkpoint));
+    KANHE_APP_TRY(cosigned, protocol::cosign_checkpoint(key, provider,
+                                                        approved.checkpoint.checkpoint, seconds));
     state.log = std::move(approved.log);
     state.cosigned_at = now;
     try {

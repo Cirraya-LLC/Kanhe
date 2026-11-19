@@ -45,7 +45,8 @@ struct IssueRequest {
 
 struct VaultAttachment {
     std::string name;
-    protocol::Nonce salt{};
+    /// 16 or 32 bytes: 32 for records issued since spec v0.21.
+    protocol::Salt salt;
 };
 
 /// The private data behind a record's commitments.

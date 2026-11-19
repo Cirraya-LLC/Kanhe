@@ -52,6 +52,7 @@ int cmd_cluster_status(const Args& args);
 int cmd_ledger_genesis(const Args& args);
 int cmd_ledger_rotate_log_key(const Args& args);
 int cmd_ledger_rotate_root_key(const Args& args);
+int cmd_ledger_long_term(const Args& args);
 int cmd_ledger_guardians_set(const Args& args);
 int cmd_ledger_guardians_show(const Args& args);
 int cmd_ledger_guardians_remove(const Args& args);
@@ -147,6 +148,7 @@ int cmd_proof_state(const Args& args);
 int cmd_receipt(const Args& args);
 int cmd_export(const Args& args);
 int cmd_verify(const Args& args);
+int cmd_evidence_renew(const Args& args);
 int cmd_inspect(const Args& args);
 int cmd_qr(const Args& args);
 

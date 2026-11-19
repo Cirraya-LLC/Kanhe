@@ -116,6 +116,46 @@ std::string_view name(SigAlg alg) noexcept {
     return "unknown";
 }
 
+SignatureFamily family_of(SigAlg alg) noexcept {
+    switch (alg) {
+    case SigAlg::esp256:
+        return SignatureFamily::ecdsa;
+    case SigAlg::ed25519:
+        return SignatureFamily::ed25519;
+    case SigAlg::ml_dsa_44:
+        return SignatureFamily::ml_dsa_44;
+    case SigAlg::ml_dsa_65:
+        return SignatureFamily::ml_dsa_65;
+    case SigAlg::ml_dsa_87:
+        return SignatureFamily::ml_dsa_87;
+    case SigAlg::sm2_sm3:
+        return SignatureFamily::sm2;
+    }
+    return SignatureFamily::other;
+}
+
+std::string_view name(SignatureFamily family) noexcept {
+    switch (family) {
+    case SignatureFamily::ed25519:
+        return "ed25519";
+    case SignatureFamily::ecdsa:
+        return "ecdsa";
+    case SignatureFamily::sm2:
+        return "sm2";
+    case SignatureFamily::rsa:
+        return "rsa";
+    case SignatureFamily::ml_dsa_44:
+        return "ml-dsa-44";
+    case SignatureFamily::ml_dsa_65:
+        return "ml-dsa-65";
+    case SignatureFamily::ml_dsa_87:
+        return "ml-dsa-87";
+    case SignatureFamily::other:
+        return "other";
+    }
+    return "other";
+}
+
 std::size_t digest_size(HashAlg alg) noexcept {
     switch (alg) {
     case HashAlg::sha256:

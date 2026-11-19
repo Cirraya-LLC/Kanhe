@@ -99,13 +99,18 @@ std::vector<CommandSpec> chain_commands() {
          "identified by its root key, which registers the people, AI agents, and devices who\n"
          "act on it. Keep the root key offline and act with keys it delegates to."},
         {{"status"},
-         "Show the ledger's identity, size, and latest checkpoint",
+         "Show the ledger's identity, size, latest checkpoint, and long-term status",
          "Ledger",
          "",
          0,
          0,
          with({ledger_option}),
-         cmd_status},
+         cmd_status,
+         "The long-term status (spec v0.21) says whether the root key and the log key are\n"
+         "post-quantum (ML-DSA), whether the genesis named such keys, when a witness last\n"
+         "cosigned with an ML-DSA key, and which time-stamp authority's certificate expires\n"
+         "within 90 days, with advice: kanhe ledger long-term moves the keys, and kanhe\n"
+         "evidence renew brings exported evidence up to date."},
         {{"audit"},
          "Re-validate the whole ledger and every stored checkpoint",
          "Ledger",
@@ -237,6 +242,51 @@ std::vector<CommandSpec> chain_commands() {
          "key in an HSM if you can: whoever holds the root key can rotate both keys, unless\n"
          "guardians guard them (kanhe ledger guardians set): then a rotation goes for approval\n"
          "(--for-approval) and is registered once k guardians approve it."},
+        {{"ledger", "long-term"},
+         "Move the root key and the log key to post-quantum signatures (ML-DSA) in one step",
+         "Ledger",
+         "",
+         0,
+         0,
+         with({ledger_option,
+               {"as", "KEY", "The organization's current root key (file or pkcs11: URI)", true},
+               {"log-key", "KEY",
+                "The current log key (file or pkcs11: URI), checked against the one in effect "
+                "(on a ledger directory; with --server the server holds it)"},
+               {"new-log-key", "KEY",
+                "The new log key: its private key file or pkcs11: URI (it signs the checkpoint; "
+                "with --server its public key file will do), or where --generate writes it",
+                true},
+               {"new-root-key", "KEY",
+                "The new root key: its public key file, private key file, or pkcs11: URI, or "
+                "where --generate writes it",
+                true},
+               {"generate", "", "Make the new keys instead (encrypted with the passphrase)"},
+               {"alg", "ALG", "With --generate: ml-dsa-65 (default), ml-dsa-44, or ml-dsa-87"},
+               {"dry-run", "", "Show the plan, and change nothing"},
+               passphrase_file_option,
+               for_approval_option,
+               approval_note_option}),
+         cmd_ledger_long_term,
+         "For evidence that must outlast the classical algorithms (spec v0.21): rotates the log\n"
+         "key, then the organization's root key, each signed by the root key in effect, then\n"
+         "checkpoints with the new log key. Make the new keys first (kanhe key generate --alg\n"
+         "ml-dsa-65), or let --generate make them. Refuses when both keys are post-quantum\n"
+         "already, when --as or --log-key is not the key in effect, and while a rotation of\n"
+         "either waits for approval. Run again with the same keys, it goes on from where it\n"
+         "stopped.\n\n"
+         "When guardians guard the ledger, each rotation goes for approval (--for-approval):\n"
+         "held at the server or in the ledger directory, or written to FILE. Once k guardians\n"
+         "approve it and it is registered, run this again: it goes on with the root key's\n"
+         "rotation, then the checkpoint.\n\n"
+         "The genesis keeps its classical keys, which no rotation undoes: have a witness whose\n"
+         "key is ML-DSA cosign the new checkpoint (checkpoint cosign-request), and renew the\n"
+         "evidence exported before (evidence renew). A server on the ledger signs with the new\n"
+         "log key once it holds it: serve --log-key OLD --log-key NEW.\n\n"
+         "  kanhe key generate --alg ml-dsa-65 --out root-pq.key\n"
+         "  kanhe key generate --alg ml-dsa-65 --out log-pq.key\n"
+         "  kanhe ledger long-term --as root.key --log-key log.key \\\n"
+         "      --new-root-key root-pq.key --new-log-key log-pq.key"},
         {{"ledger", "guardians", "set"},
          "Name the guardians, k of whom approve the organization's own statements",
          "Ledger",
@@ -1396,6 +1446,7 @@ std::vector<CommandSpec> chain_commands() {
                {"attachment", "NAME=FILE", "Check an attachment's content", false, true},
                {"trust-node", "LEDGER=NAME",
                 "Believe this trust node's memberships, naming it NAME (spec v0.16)", false, true},
+               distrust_option,
                {"follow", "DIR",
                 "Follow the record's sources through their own evidence, found in DIR, level by "
                 "level"}}),
@@ -1404,7 +1455,57 @@ std::vector<CommandSpec> chain_commands() {
          "evidence of it, as its ledger exported it) is verified on its own, and its sources\n"
          "in turn: the report ends with the chain, and warns of any source revoked or\n"
          "replaced since. A source whose evidence is neither in the bundle nor in DIR shows\n"
-         "as not provided."},
+         "as not provided.\n\n"
+         "Every report states the evidence's long-term status (spec v0.21): the latest\n"
+         "post-quantum attestation that covers it, from the bundle or a renewal, or none, and\n"
+         "then the advice to renew before 2030-01-01. With --distrust ALG@YYYY-MM-DD the\n"
+         "attestations by ALG are relied on for nothing, and every signature by ALG must be\n"
+         "in a tree that a trusted time-stamp token, open-network witness's cosignature, or\n"
+         "dated witness cosignature, by an algorithm not distrusted, dated before that day\n"
+         "(00:00 UTC), attested: else the evidence fails. Each algorithm once; classical\n"
+         "names ed25519, ecdsa, sm2, rsa, and any other but ML-DSA.\n\n"
+         "  kanhe verify cert.cbor --ledger-id 98ae652f --distrust classical@2035-01-01"},
+        {{"evidence", "renew"},
+         "Add a newer attestation of the ledger's tree to an evidence bundle",
+         "Evidence",
+         "FILE",
+         1,
+         1,
+         with({{"server", "URL",
+                "Fetch the renewal from the ledger's server, or an archive that serves it "
+                "(GET URL/v1/renewal, with no token; default: $KANHE_SERVER)"},
+               {"ca-file", "FILE",
+                "CA certificates (PEM) to trust for --server, if not the system's"},
+               {"ledger", "DIR",
+                "Instead, make it from the bundle's own ledger directory (default: "
+                "$KANHE_LEDGER)"},
+               {"size", "M", "Renew to the checkpoint of size M (default: the latest)"},
+               {"out", "FILE",
+                "Write the renewed bundle here (default: FILE's name with -renewed before its "
+                "extension)"},
+               {"in-place", "", "Replace FILE with the renewed bundle instead"},
+               {"ledger-id", "ID", "The issuer's ledger id, learned out of band"},
+               {"witness", "PUBKEY", "Trust this witness's public key file", false, true},
+               {"witness-vkey", "VKEY", "Trust this open network's witness, by its verifier key",
+                false, true},
+               {"tsa-root", "FILE",
+                "Trust time-stamp authorities under this root certificate (PEM or DER)", false,
+                true}}),
+         cmd_evidence_renew,
+         "A renewal (spec v0.21) is a newer checkpoint of the bundle's ledger, proven to extend\n"
+         "the bundle's tree, with the key rotations in between and what attests it: witnesses'\n"
+         "cosignatures, time-stamp tokens, and open-network cosignatures. It adds integrity and\n"
+         "time, never state: the bundle still shows its record as of its own checkpoint. It\n"
+         "holds nothing private, so whoever holds a bundle may renew it. Renew evidence meant\n"
+         "to last before 2030 with a post-quantum attestation (a witness whose key is ML-DSA,\n"
+         "or a ledger whose keys are), and again as attestations improve.\n\n"
+         "It goes from the size of the bundle's last renewal, or else its checkpoint, to the\n"
+         "ledger's latest checkpoint (or --size), from --server or from the ledger's directory,\n"
+         "which must be the bundle's ledger. The renewed bundle is verified whole first: if it\n"
+         "fails (exit 3) or the renewal adds nothing (exit 2), nothing is written. The default\n"
+         "output never overwrites a file; --out FILE does, and --in-place replaces FILE.\n"
+         "--witness, --witness-vkey, and --tsa-root say whom the long-term status it reports\n"
+         "relies on, as for verify."},
         {{"qr"},
          "Make a QR code that opens a record's or an instance's evidence in the browser verifier",
          "Evidence",
@@ -1539,7 +1640,11 @@ std::vector<CommandSpec> chain_commands() {
          "A witness is an independent party (another person or organization, an auditor) that\n"
          "cosigns a ledger's checkpoints only if each extends the history it cosigned before.\n"
          "Learn the ledger id from the operator through a channel you trust, and check the\n"
-         "genesis entry against it with --ledger-id."},
+         "genesis entry against it with --ledger-id.\n\n"
+         "The witness's key may be of any algorithm. For evidence meant to last decades, make\n"
+         "it ML-DSA (kanhe key generate --alg ml-dsa-65 --out witness.key), beside a classical\n"
+         "witness: its dated cosignatures then attest checkpoints after a quantum computer\n"
+         "breaks the classical signatures."},
         {{"witness", "cosign"},
          "Check a cosign request and cosign it if the history is consistent",
          "Witness",
@@ -1547,10 +1652,16 @@ std::vector<CommandSpec> chain_commands() {
          1,
          1,
          with({{"dir", "DIR", "The witness's state directory", true},
-               {"key", "KEY", "The witness's private key file", true},
+               {"key", "KEY",
+                "The witness's private key file (any algorithm: ML-DSA-65 too, from kanhe key "
+                "generate --alg ml-dsa-65)",
+                true},
                {"out", "FILE", "Write the cosignature here, for the operator", true},
                passphrase_file_option}),
          cmd_witness_cosign,
+         "Every cosignature is dated: it carries this computer's time in whole seconds, the\n"
+         "witness's word of when it saw the tree (spec v0.21). A witness whose key is ML-DSA\n"
+         "gives evidence a post-quantum attestation; pair it with a classical one.\n"
          "Refuses (exit 3) a checkpoint not signed by the ledger's log key, or one whose history\n"
          "does not extend what this witness cosigned: a sign the ledger was rewritten or forked.\n"
          "Refuses (exit 2) a request whose proof starts elsewhere than the witness's last size;\n"
@@ -1679,7 +1790,9 @@ std::vector<CommandSpec> chain_commands() {
                {"max-body", "BYTES", "Largest request body (default: 1048576)"},
                {"quiet", "", "No access log on stderr"},
                {"witness-dir", "DIR", "Also witness peers' ledgers: this witness state directory"},
-               {"witness-key", "KEY", "The witness key (file or pkcs11: URI), with --witness-dir"},
+               {"witness-key", "KEY",
+                "The witness key (file or pkcs11: URI; any algorithm, ML-DSA-65 too), with "
+                "--witness-dir"},
                {"witness-public", "",
                 "A public witness: any ledger registers and asks for cosignatures with no token, "
                 "within quotas (serve TLS yourself, so quotas see callers' addresses, or see "
@@ -1721,6 +1834,7 @@ std::vector<CommandSpec> chain_commands() {
          cmd_serve,
          "Routes (API v1; binary objects are CBOR or COSE, everything else JSON):\n"
          "  open:    GET /healthz, /v1/checkpoint[?size=N], /v1/consistency?old=&new=,\n"
+         "           /v1/renewal?from=N[&size=M] (newer attestations for evidence of size N),\n"
          "           /c/TOKEN (a published record's evidence: record publish),\n"
          "           /m/LEDGER (a membership), and with --credential-key\n"
          "           /.well-known/did.json, /did.json, /status/N (credential issue)\n"
@@ -2499,6 +2613,7 @@ std::vector<CommandSpec> chain_commands() {
                {"require-presence", "", "Fail unless a person proved presence for each consent"},
                {"require-answered", "",
                 "Fail if a request is still open past its deadline at the checkpoint's time"},
+               distrust_option,
                {"deploy-out", "FILE",
                 "Write the deploy the evidence carries here, as a deploy file (bo rebuild)"}}),
          cmd_contract_verify,
@@ -2511,7 +2626,7 @@ std::vector<CommandSpec> chain_commands() {
          "requests not yet due are work in progress and pass.\n\n"
          "The code is checked as run, not against its source: --deploy-out writes the deploy\n"
          "the evidence carries, and bo rebuild checks that a Bo contract's source builds to its\n"
-         "code.\n\n"
+         "code. --distrust applies to the instance's evidence and to every consent's.\n\n"
          "  kanhe contract verify deal.cbor --ledger-id 98ae652f --deploy-out deal.boc\n"
          "  bo rebuild deal.boc"},
         {{"contract", "export"},

@@ -37,23 +37,36 @@ std::optional<std::int64_t> vds_for(crypto::HashAlg alg) {
     }
 }
 
-Result<SignedCheckpoint> to_signed_checkpoint(detail::Envelope envelope, ByteView encoded) {
+Result<SignedCheckpoint> to_signed_checkpoint(detail::Envelope envelope, ByteView encoded,
+                                              std::optional<std::uint64_t> witness_time = {}) {
     KANHE_TRY(Checkpoint checkpoint, decode_checkpoint(*envelope.message.payload));
     return SignedCheckpoint{
         .encoded = Bytes(encoded.begin(), encoded.end()),
         .envelope = std::move(envelope.message),
         .checkpoint = std::move(checkpoint),
         .kid = envelope.kid,
+        .witness_time = witness_time,
     };
+}
+
+Result<SignedCheckpoint> parse_dated(ByteView encoded) {
+    std::optional<std::uint64_t> iat;
+    KANHE_TRY(detail::Envelope envelope,
+              detail::parse_dated_envelope(encoded, cosignature_content_type, iat));
+    return to_signed_checkpoint(std::move(envelope), encoded, iat);
 }
 
 Result<SignedCheckpoint> sign_checkpoint_as(const crypto::Signer& signer,
                                             const crypto::Provider& provider,
                                             const Checkpoint& checkpoint,
-                                            std::string_view content_type) {
+                                            std::string_view content_type,
+                                            std::optional<std::uint64_t> iat = {}) {
     KANHE_TRY(Bytes payload, encode_checkpoint(checkpoint));
-    KANHE_TRY(Bytes encoded,
-              detail::sign_envelope(signer, provider, checkpoint.tree_hash, payload, content_type));
+    KANHE_TRY(Bytes encoded, detail::sign_envelope(signer, provider, checkpoint.tree_hash, payload,
+                                                   content_type, iat));
+    if (content_type == cosignature_content_type) {
+        return parse_dated(encoded);
+    }
     KANHE_TRY(detail::Envelope envelope, detail::parse_envelope(encoded, content_type));
     return to_signed_checkpoint(std::move(envelope), encoded);
 }
@@ -232,13 +245,14 @@ Status verify_checkpoint(const crypto::Provider& provider, const SignedCheckpoin
 
 Result<SignedCheckpoint> cosign_checkpoint(const crypto::Signer& witness_key,
                                            const crypto::Provider& provider,
-                                           const Checkpoint& checkpoint) {
-    return sign_checkpoint_as(witness_key, provider, checkpoint, cosignature_content_type);
+                                           const Checkpoint& checkpoint,
+                                           std::optional<std::uint64_t> time_seconds) {
+    return sign_checkpoint_as(witness_key, provider, checkpoint, cosignature_content_type,
+                              time_seconds);
 }
 
 Result<SignedCheckpoint> parse_cosignature(ByteView encoded) {
-    KANHE_TRY(detail::Envelope envelope, detail::parse_envelope(encoded, cosignature_content_type));
-    return to_signed_checkpoint(std::move(envelope), encoded);
+    return parse_dated(encoded);
 }
 
 Status verify_cosignature(const crypto::Provider& provider, const SignedCheckpoint& cosignature,

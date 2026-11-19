@@ -19,10 +19,11 @@
 namespace kanhe::protocol {
 
 /// One field of a record. The salt keeps undisclosed fields from being
-/// guessed by hashing candidate values.
+/// guessed by hashing candidate values: 16 or 32 bytes, 32 for new records
+/// (spec v0.21).
 struct RecordField {
     std::string name;
-    Nonce salt{};
+    Salt salt;
     cbor::Value value;
 
     friend bool operator==(const RecordField&, const RecordField&) = default;
@@ -67,9 +68,11 @@ struct FieldDisclosure {
                                                     std::uint64_t field_count,
                                                     const FieldDisclosure& disclosure);
 
-/// Commitment to an attachment: HASH(salt || content).
+/// Commitment to an attachment: HASH(salt || content). An attachment's salt
+/// is a `Salt` (16 or 32 bytes); an outside response's, a contract answer's
+/// (spec section 15), stays 16.
 [[nodiscard]] Result<crypto::Digest> attachment_commitment(const crypto::Provider& provider,
-                                                           crypto::HashAlg hash, const Nonce& salt,
+                                                           crypto::HashAlg hash, ByteView salt,
                                                            ByteView content);
 
 } // namespace kanhe::protocol

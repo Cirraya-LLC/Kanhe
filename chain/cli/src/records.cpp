@@ -4,7 +4,10 @@
 #include "records.hpp"
 
 #include <algorithm>
+#include <span>
+#include <string>
 #include <system_error>
+#include <vector>
 
 namespace kanhe::cli {
 
@@ -89,7 +92,19 @@ protocol::VerifyOptions verify_options(const Args& args) {
         }
         options.trust_nodes.push_back({*id, name});
     }
+    options.distrust = distrust_options(args);
     return options;
+}
+
+std::vector<protocol::Distrust> distrust_options(const Args& args) {
+    const std::vector<std::string> texts = args.all("distrust");
+    // Read again with each entry, so that a refusal names the entry.
+    for (std::size_t n = 1; n <= texts.size(); ++n) {
+        if (auto parsed = protocol::parse_distrust(std::span(texts).first(n)); !parsed) {
+            throw UsageError{std::string(parsed.error().detail) + " ('" + texts[n - 1] + "')"};
+        }
+    }
+    return unwrap(protocol::parse_distrust(texts), "--distrust");
 }
 
 std::string script_file_status(const crypto::Provider& provider, crypto::HashAlg hash,

@@ -15,6 +15,7 @@
 #include <kanhe/core/protocol/state.hpp>
 
 #include "evidence_detail.hpp"
+#include "longterm.hpp"
 #include "reader.hpp"
 
 namespace kanhe::protocol {
@@ -214,6 +215,207 @@ std::vector<Id> involved_objects(const LedgerState& state, const Id& record,
 // Encoding
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// An RFC 9162 proof's or path's hashes, each 32 bytes (both ledger
+/// hashes'), at most 65.
+Status check_hashes(std::span<const crypto::Digest> hashes, Errc code) {
+    if (hashes.size() > merkle::max_consistency_proof_length) {
+        return fail(code, "a proof holds at most 65 hashes");
+    }
+    for (const crypto::Digest& h : hashes) {
+        if (h.size() != id_size) {
+            return fail(code, "a proof's hashes are 32 bytes");
+        }
+    }
+    return {};
+}
+
+cbor::Value hashes_value(std::span<const crypto::Digest> hashes) {
+    cbor::Array out;
+    for (const crypto::Digest& h : hashes) {
+        out.push_back(cbor::Value::bytes(h.bytes()));
+    }
+    return cbor::Value::array(std::move(out));
+}
+
+Result<std::vector<crypto::Digest>> hashes_from(const cbor::Value& value) {
+    KANHE_TRY(const cbor::Array* list, detail::as_array(value));
+    if (list->size() > merkle::max_consistency_proof_length) {
+        return fail(Errc::malformed, "a proof holds at most 65 hashes");
+    }
+    std::vector<crypto::Digest> out;
+    out.reserve(list->size());
+    for (const cbor::Value& item : *list) {
+        const Bytes* bytes = item.as_bytes();
+        if (bytes == nullptr || bytes->size() != id_size) {
+            return fail(Errc::malformed, "a proof's hashes are 32-byte strings");
+        }
+        KANHE_TRY(crypto::Digest digest, crypto::Digest::from_bytes(*bytes));
+        out.push_back(digest);
+    }
+    return out;
+}
+
+cbor::Value note_signatures_value(std::span<const network::NoteSignature> signatures) {
+    cbor::Array out;
+    for (const network::NoteSignature& s : signatures) {
+        out.push_back(cbor::Value::array({cbor::Value::text(s.name), cbor::Value::bytes(s.bytes)}));
+    }
+    return cbor::Value::array(std::move(out));
+}
+
+/// A non-empty list of note cosignatures (v0.13): [name, 12 to 8,192 bytes].
+Result<std::vector<network::NoteSignature>> note_signatures_from(const cbor::Value& value) {
+    const cbor::Array* list = value.as_array();
+    if (list == nullptr) {
+        return fail(Errc::malformed, "expected an array");
+    }
+    if (list->empty()) {
+        return fail(Errc::non_canonical, "an empty list must be omitted");
+    }
+    std::vector<network::NoteSignature> out;
+    for (const cbor::Value& item : *list) {
+        const cbor::Array* pair = item.as_array();
+        const std::string* name =
+            pair != nullptr && pair->size() == 2 ? (*pair)[0].as_text() : nullptr;
+        const Bytes* bytes = pair != nullptr && pair->size() == 2 ? (*pair)[1].as_bytes() : nullptr;
+        if (name == nullptr || bytes == nullptr || !network::valid_name(*name) ||
+            bytes->size() < 12 || bytes->size() > 8192) {
+            return fail(Errc::malformed, "a network cosignature is not [name, 12 to 8,192 bytes]");
+        }
+        out.push_back({*name, *bytes});
+    }
+    return out;
+}
+
+Status check_note_signatures(std::span<const network::NoteSignature> signatures) {
+    for (const network::NoteSignature& s : signatures) {
+        if (!network::valid_name(s.name) || s.bytes.size() < 12 || s.bytes.size() > 8192) {
+            return fail(Errc::invalid_argument,
+                        "a network cosignature is not [name, 12 to 8,192 bytes]");
+        }
+    }
+    return {};
+}
+
+/// A renewal as a CBOR map (v0.21), every bound of the CDDL checked.
+Result<cbor::Value> renewal_value(const Renewal& r) {
+    if (r.cosignatures.empty() && r.timestamps.empty() && r.network_cosignatures.empty()) {
+        return fail(Errc::invalid_argument,
+                    "a renewal needs a cosignature, a time-stamp token, or a network cosignature");
+    }
+    if (r.rotations.size() > max_key_rotations) {
+        return fail(Errc::invalid_argument, "a renewal carries at most 4,096 key rotations");
+    }
+    KANHE_CHECK(check_hashes(r.consistency, Errc::invalid_argument));
+    KANHE_CHECK(check_note_signatures(r.network_cosignatures));
+    cbor::Map map{entry(1, cbor::Value::bytes(r.checkpoint))};
+    if (!r.consistency.empty()) {
+        map.push_back(entry(2, hashes_value(r.consistency)));
+    }
+    if (!r.rotations.empty()) {
+        cbor::Array rotations;
+        for (const KeyRotationProof& rotation : r.rotations) {
+            KANHE_CHECK(check_hashes(rotation.path, Errc::invalid_argument));
+            rotations.push_back(cbor::Value::array({cbor::Value::unsigned_integer(rotation.index),
+                                                    cbor::Value::bytes(rotation.entry),
+                                                    hashes_value(rotation.path)}));
+        }
+        map.push_back(entry(3, cbor::Value::array(std::move(rotations))));
+    }
+    for (const auto& [key, list] : {std::pair{4, &r.cosignatures}, std::pair{5, &r.timestamps}}) {
+        if (!list->empty()) {
+            cbor::Array items;
+            for (const Bytes& item : *list) {
+                items.push_back(cbor::Value::bytes(item));
+            }
+            map.push_back(entry(key, cbor::Value::array(std::move(items))));
+        }
+    }
+    if (!r.network_cosignatures.empty()) {
+        map.push_back(entry(6, note_signatures_value(r.network_cosignatures)));
+    }
+    return cbor::Value::map(std::move(map));
+}
+
+Result<Renewal> renewal_from(const cbor::Value& value) {
+    KANHE_TRY(MapReader reader, MapReader::open(value));
+    Renewal r;
+    KANHE_TRY(r.checkpoint, reader.need_bytes(1));
+    auto non_empty = [](const cbor::Value& list_value) -> Result<const cbor::Array*> {
+        KANHE_TRY(const cbor::Array* list, detail::as_array(list_value));
+        if (list->empty()) {
+            return fail(Errc::non_canonical, "an empty list must be omitted");
+        }
+        return list;
+    };
+    if (const cbor::Value* proof = reader.get(2)) {
+        KANHE_TRY(r.consistency, hashes_from(*proof));
+        if (r.consistency.empty()) {
+            return fail(Errc::non_canonical, "an empty consistency proof must be omitted");
+        }
+    }
+    if (const cbor::Value* rotations = reader.get(3)) {
+        KANHE_TRY(const cbor::Array* list, non_empty(*rotations));
+        if (list->size() > max_key_rotations) {
+            return fail(Errc::malformed, "a renewal carries at most 4,096 key rotations");
+        }
+        for (const cbor::Value& item : *list) {
+            const cbor::Array* parts = item.as_array();
+            if (parts == nullptr || parts->size() != 3) {
+                return fail(Errc::malformed, "a key rotation must be [index, entry, path]");
+            }
+            KeyRotationProof rotation;
+            KANHE_TRY(rotation.index, detail::as_uint((*parts)[0]));
+            KANHE_TRY(rotation.entry, detail::as_bytes_value((*parts)[1]));
+            KANHE_TRY(rotation.path, hashes_from((*parts)[2]));
+            r.rotations.push_back(std::move(rotation));
+        }
+    }
+    for (const auto& [key, list] : {std::pair{4, &r.cosignatures}, std::pair{5, &r.timestamps}}) {
+        if (const cbor::Value* items = reader.get(key)) {
+            KANHE_TRY(const cbor::Array* array, non_empty(*items));
+            for (const cbor::Value& item : *array) {
+                KANHE_TRY(Bytes bytes, detail::as_bytes_value(item));
+                list->push_back(std::move(bytes));
+            }
+        }
+    }
+    if (const cbor::Value* cosignatures = reader.get(6)) {
+        KANHE_TRY(r.network_cosignatures, note_signatures_from(*cosignatures));
+    }
+    if (r.cosignatures.empty() && r.timestamps.empty() && r.network_cosignatures.empty()) {
+        return fail(Errc::malformed, "a renewal holds no attestation: no cosignature, "
+                                     "time-stamp token, or network cosignature");
+    }
+    KANHE_CHECK(reader.finish());
+    return r;
+}
+
+/// Decoding options for bundles and renewals, which hold many signed
+/// objects: more items than the default.
+cbor::DecodeOptions large_decode_options() {
+    cbor::DecodeOptions options;
+    options.max_items = std::size_t{1} << 20;
+    return options;
+}
+
+} // namespace
+
+Result<Bytes> encode_renewal(const Renewal& renewal) {
+    KANHE_TRY(cbor::Value value, renewal_value(renewal));
+    return cbor::encode(value);
+}
+
+Result<Renewal> decode_renewal(ByteView encoded) {
+    if (encoded.size() > max_bundle_size) {
+        return fail(Errc::limit_exceeded, "the renewal is too large");
+    }
+    KANHE_TRY(cbor::Value value, cbor::decode(encoded, large_decode_options()));
+    return renewal_from(value);
+}
+
 Result<Bytes> encode_bundle(const EvidenceBundle& bundle) {
     if (bundle.entries.empty()) {
         return fail(Errc::invalid_argument, "a bundle needs at least the genesis entry");
@@ -325,6 +527,17 @@ Result<Bytes> encode_bundle(const EvidenceBundle& bundle) {
         }
         map.push_back(entry(10, cbor::Value::array(std::move(proofs))));
     }
+    if (!bundle.renewals.empty()) {
+        if (bundle.renewals.size() > max_renewals) {
+            return fail(Errc::invalid_argument, "a bundle carries at most 64 renewals");
+        }
+        cbor::Array renewals;
+        for (const Renewal& r : bundle.renewals) {
+            KANHE_TRY(cbor::Value value, renewal_value(r));
+            renewals.push_back(std::move(value));
+        }
+        map.push_back(entry(11, cbor::Value::array(std::move(renewals))));
+    }
     return cbor::encode(cbor::Value::map(std::move(map)));
 }
 
@@ -342,9 +555,7 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
         return fail(Errc::limit_exceeded, "the evidence bundle is too large");
     }
     // Bundles hold many signed objects; allow more items than the default.
-    cbor::DecodeOptions options;
-    options.max_items = std::size_t{1} << 20;
-    KANHE_TRY(cbor::Value value, cbor::decode(encoded, options));
+    KANHE_TRY(cbor::Value value, cbor::decode(encoded, large_decode_options()));
     KANHE_TRY(MapReader reader, MapReader::open(value));
     EvidenceBundle bundle;
 
@@ -416,11 +627,12 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
             }
             AttachmentOpening a;
             KANHE_TRY(a.name, detail::as_text((*parts)[0]));
-            KANHE_TRY(Bytes salt, detail::as_bytes_value((*parts)[1]));
-            if (salt.size() != a.salt.size()) {
-                return fail(Errc::malformed, "attachment salt must be 16 bytes");
+            // 16 or 32 bytes (v0.21).
+            const Bytes* salt = (*parts)[1].as_bytes();
+            if (salt == nullptr || !Salt::valid_size(salt->size())) {
+                return fail(Errc::malformed, "attachment salt must be 16 or 32 bytes");
             }
-            std::ranges::copy(salt, a.salt.begin());
+            KANHE_TRY(a.salt, Salt::from_bytes(*salt));
             bundle.attachments.push_back(std::move(a));
         }
     }
@@ -488,20 +700,7 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
                 }
             }
             if (const cbor::Value* cosignatures_value = anchor_reader.get(4)) {
-                KANHE_TRY(const cbor::Array* cosignatures, non_empty_list(*cosignatures_value));
-                for (const cbor::Value& item_value : *cosignatures) {
-                    const cbor::Array* pair = item_value.as_array();
-                    const std::string* name =
-                        pair != nullptr && pair->size() == 2 ? (*pair)[0].as_text() : nullptr;
-                    const Bytes* bytes =
-                        pair != nullptr && pair->size() == 2 ? (*pair)[1].as_bytes() : nullptr;
-                    if (name == nullptr || bytes == nullptr || !network::valid_name(*name) ||
-                        bytes->size() < 12 || bytes->size() > 8192) {
-                        return fail(Errc::malformed,
-                                    "a network cosignature is not [name, 12 to 8,192 bytes]");
-                    }
-                    a.network_cosignatures.push_back({*name, *bytes});
-                }
+                KANHE_TRY(a.network_cosignatures, note_signatures_from(*cosignatures_value));
             }
             if (a.timestamps.empty() && a.network_cosignatures.empty()) {
                 return fail(Errc::malformed,
@@ -531,6 +730,17 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
             bundle.source_proofs.push_back(std::move(proof));
         }
     }
+    // Renewals (v0.21): 1 to 64, in order; checked in step 11.
+    if (const cbor::Value* list_value = reader.get(11)) {
+        KANHE_TRY(const cbor::Array* list, non_empty_list(*list_value));
+        if (list->size() > max_renewals) {
+            return fail(Errc::malformed, "a bundle carries at most 64 renewals");
+        }
+        for (const cbor::Value& item : *list) {
+            KANHE_TRY(Renewal renewal, renewal_from(item));
+            bundle.renewals.push_back(std::move(renewal));
+        }
+    }
     KANHE_CHECK(reader.finish());
     return bundle;
 }
@@ -541,55 +751,21 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
 
 namespace {
 
-/// Counts the witnesses that cosigned the bundle's checkpoint into `report`.
-Result<EvidenceReport> count_witnesses(const crypto::Provider& provider, const LedgerState& state,
-                                       const SignedCheckpoint& checkpoint,
-                                       const EvidenceBundle& bundle, const VerifyOptions& options,
-                                       EvidenceReport report) {
-    // Count witnesses, not cosignatures: a witness that signed twice (or a
-    // bundle that repeats its cosignature) is still one witness.
-    std::vector<Id> counted;
-    for (const Bytes& encoded_cosignature : bundle.cosignatures) {
-        auto cosignature = parse_cosignature(encoded_cosignature);
-        if (!cosignature || cosignature->checkpoint != checkpoint.checkpoint) {
-            return verification_failure("a cosignature does not cover the bundle's checkpoint");
-        }
-        // Each one by a trusted witness verifies, a repeated one too (step
-        // 6); only the counting is by witness.
-        bool trusted = false;
-        for (const crypto::PublicKey& witness : options.trusted_witnesses) {
-            auto kid = key_id(provider, state.hash(), witness);
-            if (kid && *kid == cosignature->kid) {
-                if (!verify_cosignature(provider, *cosignature, witness)) {
-                    return verification_failure("a trusted witness's cosignature does not verify");
-                }
-                trusted = true;
-                break;
-            }
-        }
-        if (std::ranges::contains(counted, cosignature->kid)) {
-            continue;
-        }
-        counted.push_back(cosignature->kid);
-        ++(trusted ? report.trusted_cosignatures : report.untrusted_cosignatures);
-    }
-    return report;
-}
-
 /// Checks the bundle's anchors (v0.11) into `report`: each checkpoint signed
 /// by the log key in effect at its size and consistent with the bundle's,
-/// each token over its payload. A trusted token bounds when the entries below
-/// its checkpoint's size existed, and the ledger's clock must agree with it.
-Result<EvidenceReport> check_anchors(const crypto::Provider& provider, const LedgerState& state,
-                                     const SignedCheckpoint& checkpoint,
-                                     const EvidenceBundle& bundle,
-                                     std::span<const Included> included,
-                                     const VerifyOptions& options, EvidenceReport report) {
-    std::vector<Bytes> trusted_authorities;
-    // Open-network witnesses, each counted once: (name, key ID).
-    std::set<std::pair<std::string, Bytes>> trusted_network;
-    std::set<std::pair<std::string, Bytes>> untrusted_network;
-    for (const Anchor& anchor : bundle.anchors) {
+/// its network cosignatures of its note (v0.13), and its tokens over its
+/// payload, checked and counted in `tally` (step 8). A trusted token bounds
+/// when the entries below its checkpoint's size existed, and the ledger's
+/// clock must agree with it. Returns the anchors' checkpoints.
+Result<std::vector<SignedCheckpoint>> check_anchors(const crypto::Provider& provider,
+                                                    const LedgerState& state,
+                                                    const SignedCheckpoint& checkpoint,
+                                                    const EvidenceBundle& bundle,
+                                                    const std::map<std::uint64_t, Timestamp>& held,
+                                                    detail::Tally& tally, EvidenceReport& report) {
+    std::vector<SignedCheckpoint> heads;
+    for (std::size_t n = 1; n <= bundle.anchors.size(); ++n) {
+        const Anchor& anchor = bundle.anchors[n - 1];
         auto stamped = parse_checkpoint(anchor.checkpoint);
         if (!stamped || !stamped->envelope.payload) {
             return verification_failure("an anchor's checkpoint is malformed");
@@ -615,124 +791,18 @@ Result<EvidenceReport> check_anchors(const crypto::Provider& provider, const Led
             return verification_failure(
                 "an anchor's checkpoint is not consistent with the bundle's");
         }
-        KANHE_TRY(crypto::Digest stamped_digest,
-                  provider.digest(state.hash(), *stamped->envelope.payload));
-
         // Open-network witnesses' cosignatures of the checkpoint's note
-        // (v0.13): SHA-256 trees only.
-        if (!anchor.network_cosignatures.empty() && state.hash() != crypto::HashAlg::sha256) {
-            return verification_failure("an SM3 ledger's anchor carries network cosignatures");
+        // (v0.13), then the tokens.
+        if (auto cosigned = tally.note_cosignatures(*stamped, anchor.network_cosignatures, n,
+                                                    std::nullopt, report.network_cosignatures);
+            !cosigned) {
+            return std::unexpected(cosigned.error());
         }
-        const std::string origin = network::origin(state.ledger_id());
-        for (const network::NoteSignature& cosignature : anchor.network_cosignatures) {
-            auto time = network::cosignature_time(cosignature.bytes);
-            if (!time) {
-                return verification_failure("a network cosignature is malformed");
-            }
-            const Bytes id(cosignature.bytes.begin(), cosignature.bytes.begin() + 4);
-            // Two trusted keys could share a name and a 4-byte key ID: the
-            // cosignature is that of the first one it verifies with, and a
-            // trusted witness is told apart by its whole verifier key.
-            bool trusted = false;
-            const network::VerifierKey* verified = nullptr;
-            for (const network::VerifierKey& k : options.trusted_network_witnesses) {
-                if (k.name != cosignature.name || !std::ranges::equal(k.id, id)) {
-                    continue;
-                }
-                trusted = true;
-                if (network::verify_cosignature(provider, k, origin, at.tree_size, at.root,
-                                                cosignature)) {
-                    verified = &k;
-                    break;
-                }
-            }
-            if (trusted && verified == nullptr) {
-                return verification_failure(
-                    "a trusted network witness's cosignature does not verify");
-            }
-            if (verified != nullptr) {
-                Bytes identity = id;
-                identity.push_back(verified->type);
-                identity.insert(identity.end(), verified->key.bytes.begin(),
-                                verified->key.bytes.end());
-                trusted_network.emplace(cosignature.name, std::move(identity));
-            } else {
-                untrusted_network.emplace(cosignature.name, id);
-            }
-            report.network_cosignatures.push_back(NetworkCosignatureCheck{
-                .witness = cosignature.name,
-                .size = at.tree_size,
-                .time = *time,
-                .trusted = trusted,
-            });
-        }
-
-        // The earliest time a trusted authority vouches for, its accuracy
-        // added: everything below the checkpoint's size existed by then.
-        std::optional<Timestamp> existed_by;
-        for (const Bytes& encoded_token : anchor.timestamps) {
-            auto token = provider.read_timestamp(encoded_token, options.trusted_timestamp_roots);
-            if (!token) {
-                if (token.error().code == Errc::unsupported) {
-                    return std::unexpected(token.error());
-                }
-                return verification_failure("a time-stamp token does not verify");
-            }
-            if (token->imprint_alg != state.hash() ||
-                !std::ranges::equal(token->imprint, stamped_digest.bytes())) {
-                return verification_failure(
-                    "a time-stamp token stamps something other than its anchor's checkpoint");
-            }
-            report.timestamps.push_back(TimestampCheck{
-                .size = at.tree_size,
-                .time = token->time,
-                .accuracy = token->accuracy,
-                .authority = token->authority,
-                .trusted = token->trusted,
-            });
-            if (!token->trusted) {
-                continue;
-            }
-            if (!std::ranges::contains(trusted_authorities, token->authority_key)) {
-                trusted_authorities.push_back(token->authority_key);
-            }
-            const Timestamp latest = token->time + token->accuracy;
-            existed_by = existed_by ? std::min(*existed_by, latest) : latest;
-        }
-        if (!existed_by) {
-            continue;
-        }
-        // The ledger dated nothing it had by then later than the authority's
-        // time allows.
-        // Saturating: a token's time and accuracy fit (the token's reading
-        // refuses more), the slack on top may not.
-        constexpr Timestamp latest_time = std::numeric_limits<Timestamp>::max();
-        const Timestamp bound = *existed_by > latest_time - timestamp_clock_slack
-                                    ? latest_time
-                                    : *existed_by + timestamp_clock_slack;
-        const bool contradicted =
-            at.timestamp > bound || std::ranges::any_of(included, [&](const Included& i) {
-                return i.index < at.tree_size && i.log_entry.registered_at > bound;
-            });
-        if (contradicted) {
-            return verification_failure("the ledger's clock contradicts a time-stamp authority: "
-                                        "it dates an entry after the authority saw it");
-        }
-        for (RecordEvent& event : report.events) {
-            if (event.index < at.tree_size) {
-                event.existed_by =
-                    event.existed_by ? std::min(*event.existed_by, *existed_by) : *existed_by;
-            }
-        }
+        KANHE_CHECK(tally.tokens(*stamped, anchor.timestamps, held, n, std::nullopt,
+                                 report.timestamps, report.events));
+        heads.push_back(std::move(*stamped));
     }
-    report.trusted_timestamp_authorities = trusted_authorities.size();
-    report.trusted_cosignatures += trusted_network.size();
-    for (const auto& witness : untrusted_network) {
-        if (!trusted_network.contains(witness)) {
-            ++report.untrusted_cosignatures;
-        }
-    }
-    return report;
+    return heads;
 }
 
 /// A source's status at the record's registration and at a checkpoint,
@@ -763,6 +833,7 @@ Result<EvidenceReport> check_sources(const crypto::Provider& provider, const Evi
     inner.trusted_network_witnesses = options.trusted_network_witnesses;
     inner.trust_nodes = options.trust_nodes;
     inner.modules = options.modules;
+    inner.distrust = options.distrust;
     for (const Bytes& proof : bundle.source_proofs) {
         auto decoded = decode_bundle(proof);
         if (!decoded) {
@@ -848,6 +919,7 @@ Result<EvidenceReport> check_memberships(const crypto::Provider& provider,
     inner.trusted_timestamp_roots = options.trusted_timestamp_roots;
     inner.trusted_network_witnesses = options.trusted_network_witnesses;
     inner.modules = options.modules;
+    inner.distrust = options.distrust;
     std::vector<std::pair<Id, Id>> seen;
     for (const Bytes& proof : bundle.memberships) {
         auto decoded = decode_bundle(proof);
@@ -911,18 +983,67 @@ Result<EvidenceReport> check_memberships(const crypto::Provider& provider,
     return report;
 }
 
-/// The last steps of a verification: witnesses, anchors, then memberships.
+/// The last steps of a verification: witnesses (step 6), anchors (8),
+/// memberships (9), sources (10), renewals (11), and the signatures by
+/// distrusted algorithms with the long-term status (12, v0.21). `relied` is
+/// every signature the entries carry that the steps before relied on, in
+/// log order (section 11.1); the tree heads' follow here.
 Result<EvidenceReport> finish_report(const crypto::Provider& provider, const LedgerState& state,
                                      const SignedCheckpoint& checkpoint,
                                      const EvidenceBundle& bundle,
                                      std::span<const Included> included,
+                                     std::vector<detail::ReliedSignature> relied,
                                      const VerifyOptions& options, EvidenceReport report) {
-    KANHE_TRY(report,
-              count_witnesses(provider, state, checkpoint, bundle, options, std::move(report)));
-    KANHE_TRY(report, check_anchors(provider, state, checkpoint, bundle, included, options,
-                                    std::move(report)));
+    // Every attestation of the bundle, its anchors, and its renewals, each
+    // witness and authority counted once across them.
+    detail::Tally tally(provider, state, options);
+    if (auto own = tally.cosignatures(checkpoint, bundle.cosignatures, std::nullopt, std::nullopt);
+        !own) {
+        return std::unexpected(own.error());
+    }
+    std::map<std::uint64_t, Timestamp> held;
+    for (const Included& i : included) {
+        held.emplace(i.index, i.log_entry.registered_at);
+    }
+    KANHE_TRY(std::vector<SignedCheckpoint> anchors,
+              check_anchors(provider, state, checkpoint, bundle, held, tally, report));
     KANHE_TRY(report, check_memberships(provider, bundle, options, std::move(report)));
-    return check_sources(provider, bundle, options, std::move(report));
+    KANHE_TRY(report, check_sources(provider, bundle, options, std::move(report)));
+    KANHE_TRY(std::vector<detail::CheckedRenewal> renewals,
+              detail::check_renewals(provider, state, checkpoint, bundle.renewals, tally,
+                                     std::move(held), report.events));
+    report.trusted_cosignatures = tally.trusted_witnesses();
+    report.untrusted_cosignatures = tally.untrusted_witnesses();
+    report.trusted_timestamp_authorities = tally.trusted_authorities();
+    for (const detail::CheckedRenewal& r : renewals) {
+        report.renewals.push_back(r.report);
+    }
+
+    // The tree heads the log key signed: the checkpoint, each anchor's, and
+    // each renewal's, after its rotations.
+    const std::uint64_t size = checkpoint.checkpoint.tree_size;
+    relied.push_back({SignedObject::checkpoint, std::nullopt, size, std::nullopt, std::nullopt,
+                      std::nullopt, checkpoint.envelope.algorithm});
+    for (std::size_t n = 0; n < anchors.size(); ++n) {
+        relied.push_back({SignedObject::anchor, std::nullopt, anchors[n].checkpoint.tree_size,
+                          std::nullopt, n + 1, std::nullopt, anchors[n].envelope.algorithm});
+    }
+    for (std::size_t n = 0; n < renewals.size(); ++n) {
+        for (const auto& [index, algorithm] : renewals[n].rotations) {
+            relied.push_back({SignedObject::rotation, index, std::nullopt, std::nullopt,
+                              std::nullopt, n + 1, algorithm});
+        }
+        relied.push_back({SignedObject::renewal, std::nullopt,
+                          renewals[n].head.checkpoint.tree_size, std::nullopt, std::nullopt, n + 1,
+                          renewals[n].head.envelope.algorithm});
+    }
+    report.distrust = options.distrust;
+    KANHE_TRY(report.distrusted, detail::cover(relied, tally.items(), options.distrust));
+    report.set_aside = detail::set_aside_attestations(tally.items());
+    KANHE_TRY(report.long_term,
+              detail::long_term_status(provider, state, checkpoint, state.log_key_for(size),
+                                       renewals, tally.items(), options.distrust));
+    return report;
 }
 
 } // namespace
@@ -1086,6 +1207,16 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
     std::map<std::uint64_t, ContractAccept> outcomes;
     // What each statement's approvals counted for (v0.20).
     std::map<std::uint64_t, ApprovalTally> tallies;
+    // The algorithms of the presence credentials that signed (v0.21: the
+    // signatures step 12 checks): a statement's, and its approvals', by
+    // approver.
+    std::map<std::uint64_t, crypto::SigAlg> presence_algorithms;
+    std::map<std::pair<std::uint64_t, IdKey>, crypto::SigAlg> approval_presence_algorithms;
+    auto credential_algorithm = [](const ActorState& actor, const PresenceProof& proof) {
+        const auto it = std::ranges::find(actor.presence, proof.credential_id,
+                                          &PresenceCredential::credential_id);
+        return it == actor.presence.end() ? std::nullopt : std::optional(it->key.algorithm);
+    };
     for (const Included& item : included) {
         if (item.index == 0 || item.commitment) {
             continue;
@@ -1095,6 +1226,20 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
                 if (auto check = verify_presence(provider, state->hash(), s, item.statement.kid,
                                                  signer->presence)) {
                     presence[item.index] = std::move(*check);
+                    if (const auto alg = credential_algorithm(*signer, *s.presence)) {
+                        presence_algorithms[item.index] = *alg;
+                    }
+                }
+            }
+        }
+        // An approval's proof of presence verifies, or the replay refuses
+        // its statement: its credential is the approver's of the moment.
+        for (const SignedApproval& approval : item.approvals) {
+            const ActorState* approver = state->actor(approval.approval.approver);
+            if (approver != nullptr && approval.approval.presence) {
+                if (const auto alg = credential_algorithm(*approver, *approval.approval.presence)) {
+                    approval_presence_algorithms[{item.index, key_of(approval.approval.approver)}] =
+                        *alg;
                 }
             }
         }
@@ -1140,6 +1285,38 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
             !verify_state_commitment(provider, *item.commitment, state->log_key_for(item.index))) {
             return verification_failure("a state commitment in the bundle does not verify");
         }
+    }
+
+    // The signatures the entries carry, which the steps above relied on, in
+    // log order (v0.21, section 11.1): each statement, its proof of
+    // presence, its approvals each with its proof, or a state commitment;
+    // then its receipt.
+    std::vector<detail::ReliedSignature> relied;
+    for (const Included& item : included) {
+        const std::uint64_t i = item.index;
+        if (item.commitment) {
+            relied.push_back({SignedObject::state_commitment, i, std::nullopt, std::nullopt,
+                              std::nullopt, std::nullopt, item.commitment->envelope.algorithm});
+        } else {
+            relied.push_back({SignedObject::statement, i, std::nullopt, std::nullopt, std::nullopt,
+                              std::nullopt, item.statement.envelope.algorithm});
+            if (const auto alg = presence_algorithms.find(i); alg != presence_algorithms.end()) {
+                relied.push_back({SignedObject::presence, i, std::nullopt, std::nullopt,
+                                  std::nullopt, std::nullopt, alg->second});
+            }
+            for (const SignedApproval& approval : item.approvals) {
+                const Id& approver = approval.approval.approver;
+                relied.push_back({SignedObject::approval, i, std::nullopt, approver, std::nullopt,
+                                  std::nullopt, approval.envelope.algorithm});
+                if (const auto alg = approval_presence_algorithms.find({i, key_of(approver)});
+                    alg != approval_presence_algorithms.end()) {
+                    relied.push_back({SignedObject::approval_presence, i, std::nullopt, approver,
+                                      std::nullopt, std::nullopt, alg->second});
+                }
+            }
+        }
+        relied.push_back({SignedObject::receipt, i, checkpoint.checkpoint.tree_size, std::nullopt,
+                          std::nullopt, std::nullopt, item.receipt.envelope.algorithm});
     }
 
     const RecordState* record = state->record(bundle.record);
@@ -1550,8 +1727,8 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
         if (!bundle.disclosures.empty() || !bundle.attachments.empty()) {
             return verification_failure("an instance has no fields or attachments to disclose");
         }
-        return finish_report(provider, *state, checkpoint, bundle, included, options,
-                             std::move(report));
+        return finish_report(provider, *state, checkpoint, bundle, included, std::move(relied),
+                             options, std::move(report));
     }
 
     // Leaves are sorted by name, one per name: disclosures must agree (a
@@ -1603,7 +1780,7 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
         report.attachments.push_back(std::move(check));
     }
 
-    return finish_report(provider, *state, checkpoint, bundle, included, options,
+    return finish_report(provider, *state, checkpoint, bundle, included, std::move(relied), options,
                          std::move(report));
 }
 

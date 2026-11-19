@@ -70,6 +70,38 @@ inline constexpr std::array all_sig_algs{SigAlg::esp256,    SigAlg::ed25519,   S
 [[nodiscard]] std::string_view name(HashAlg alg) noexcept;
 [[nodiscard]] std::string_view name(SigAlg alg) noexcept;
 
+/// Signature algorithms as spec section 11.1 names them (v0.21), for the
+/// long-term status of evidence and the algorithms a verifier distrusts, in
+/// the spec's order: a key's algorithm, or a certificate's, where ECDSA on
+/// any curve but SM2's is `ecdsa`, RSA in any form `rsa`, and an algorithm
+/// the list does not name `other`. ML-DSA is post-quantum; every other one
+/// is classical.
+enum class SignatureFamily : std::uint8_t {
+    ed25519,
+    ecdsa,
+    sm2,
+    rsa,
+    ml_dsa_44,
+    ml_dsa_65,
+    ml_dsa_87,
+    other,
+};
+
+inline constexpr std::array all_signature_families{
+    SignatureFamily::ed25519,   SignatureFamily::ecdsa,     SignatureFamily::sm2,
+    SignatureFamily::rsa,       SignatureFamily::ml_dsa_44, SignatureFamily::ml_dsa_65,
+    SignatureFamily::ml_dsa_87, SignatureFamily::other};
+
+/// The family of a COSE algorithm: ESP256 is `ecdsa`, SM2 with SM3 `sm2`.
+[[nodiscard]] SignatureFamily family_of(SigAlg alg) noexcept;
+/// "ed25519", "ecdsa", "sm2", "rsa", "ml-dsa-44", "ml-dsa-65", "ml-dsa-87", or
+/// "other", as reports and the distrust option write them.
+[[nodiscard]] std::string_view name(SignatureFamily family) noexcept;
+[[nodiscard]] constexpr bool is_post_quantum(SignatureFamily family) noexcept {
+    return family == SignatureFamily::ml_dsa_44 || family == SignatureFamily::ml_dsa_65 ||
+           family == SignatureFamily::ml_dsa_87;
+}
+
 [[nodiscard]] std::size_t digest_size(HashAlg alg) noexcept;
 [[nodiscard]] std::size_t public_key_size(SigAlg alg) noexcept;
 [[nodiscard]] std::size_t signature_size(SigAlg alg) noexcept;
@@ -160,6 +192,11 @@ struct TimestampToken {
     Bytes authority_key;
     /// The signing certificate chains to one of the trusted roots.
     bool trusted = false;
+    /// Its two algorithms (spec section 11.1, v0.21): its signature's, by its
+    /// signing certificate's key, and that certificate's own signature's, by
+    /// its issuer's key. Named by the certificate's algorithm identifiers.
+    SignatureFamily signature_family = SignatureFamily::other;
+    SignatureFamily certificate_family = SignatureFamily::other;
 
     friend bool operator==(const TimestampToken&, const TimestampToken&) = default;
 };

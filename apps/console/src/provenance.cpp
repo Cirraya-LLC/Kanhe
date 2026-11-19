@@ -452,7 +452,7 @@ Console::script_draft(const nlohmann::json& intent) const {
     // Its one field, kept sealed with the approval, as the command line
     // keeps it: how it was reviewed.
     std::vector<protocol::RecordField> fields;
-    fields.push_back({"reviewed", services_.entropy->bytes<16>(),
+    fields.push_back({"reviewed", services_.entropy->bytes<protocol::salt_size>(),
                       cbor::Value::text(note.empty() ? std::string("approved") : note)});
     const auto commitment =
         protocol::commit_fields(*services_.provider, ledger()->hash(), std::move(fields));

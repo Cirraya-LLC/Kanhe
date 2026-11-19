@@ -18,6 +18,7 @@ add_library(kanhe_node
     src/files.cpp
     src/http.cpp
     src/keeper.cpp
+    src/long_term.cpp
     src/peers.cpp
     src/process.cpp
     src/published.cpp

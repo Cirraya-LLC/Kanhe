@@ -25,7 +25,8 @@
 /// defines them; everything else is JSON. Errors are
 ///   {"error": {"code": "<Errc name>", "message": "..."}}
 ///
-/// Open:   GET /healthz, /v1/checkpoint[?size=N], /v1/consistency?old=&new=, /c/TOKEN,
+/// Open:   GET /healthz, /v1/checkpoint[?size=N], /v1/consistency?old=&new=,
+///         /v1/renewal?from=N[&size=M] (newer attestations of the tree, v0.21), /c/TOKEN,
 ///         /m/LEDGER, and with credentials /.well-known/did.json, /did.json, /status/N
 /// read:   GET /metrics, /v1/status, /v1/entries?start=&count=,
 ///         /v1/checkpoints?start=&count=, /v1/cosignatures?start=&count=,

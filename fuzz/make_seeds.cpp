@@ -1872,6 +1872,55 @@ void search_query_seeds(const Seeds& seeds) {
 /// big-endian), the leaf's hash, the old and the new root, and the proof.
 /// An inclusion proof takes the empty tree as the old one; a consistency
 /// proof, the first leaf.
+/// Long-term evidence (spec v0.21), from testvectors/protocol-v0.21.json:
+/// renewals that read and that do not, the bundles that carry them (whole,
+/// for the bundle's key 11 and their verification), each renewal's
+/// cosignatures (dated ones among them, and ones with malformed CWT claims),
+/// and --distrust options.
+void renewal_seeds(const Seeds& seeds) {
+    std::ifstream in(KANHE_TESTVECTORS_DIR "/protocol-v0.21.json");
+    if (!in) {
+        throw std::runtime_error("cannot read protocol-v0.21.json");
+    }
+    const auto doc = nlohmann::json::parse(in);
+    auto hex = [](const nlohmann::json& value) {
+        return must(from_hex(value.get<std::string>()), "hex");
+    };
+    std::size_t n = 0;
+    for (const char* list : {"valid", "refused"}) {
+        for (const auto& c : doc.at("renewals").at(list)) {
+            seeds.write("renewal_fuzz", std::format("renewal-{:03}", n++), hex(c.at("renewal")));
+        }
+    }
+    n = 0;
+    std::size_t cosignatures = 0;
+    for (const auto& c : doc.at("bundles")) {
+        const Bytes evidence = hex(c.at("evidence"));
+        seeds.write("renewal_fuzz", std::format("bundle-{:03}", n++), evidence);
+        const auto bundle = protocol::decode_bundle(evidence);
+        if (!bundle) {
+            continue;
+        }
+        for (const Bytes& cosignature : bundle->cosignatures) {
+            seeds.write("renewal_fuzz", std::format("cosignature-{:03}", cosignatures++),
+                        cosignature);
+        }
+        for (const protocol::Renewal& r : bundle->renewals) {
+            for (const Bytes& cosignature : r.cosignatures) {
+                seeds.write("renewal_fuzz", std::format("cosignature-{:03}", cosignatures++),
+                            cosignature);
+            }
+        }
+    }
+    n = 0;
+    for (const char* list : {"valid", "refused"}) {
+        for (const auto& c : doc.at("distrust_options").at(list)) {
+            seeds.write("renewal_fuzz", std::format("distrust-{:03}", n++),
+                        c.at("options").at(0).get<std::string>());
+        }
+    }
+}
+
 void merkle_seeds(const Seeds& seeds) {
     std::ifstream in(KANHE_TESTVECTORS_DIR "/merkle-sha256.json");
     if (!in) {
@@ -1948,6 +1997,7 @@ int main(int argc, char** argv) {
         membership_seeds(seeds);
         script_seeds(seeds);
         approval_seeds(seeds);
+        renewal_seeds(seeds);
         form_seeds(seeds);
         calls_seeds(seeds);
         exchange_seeds(seeds);

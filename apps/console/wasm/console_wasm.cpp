@@ -331,14 +331,15 @@ Json describe(const protocol::Statement& s) {
     return out;
 }
 
-std::optional<protocol::Nonce> salt_of(const std::string& text) {
+/// A field's salt: 16 or 32 bytes (spec v0.21), base64url.
+std::optional<protocol::Salt> salt_of(const std::string& text) {
     const auto bytes = from_base64url(text);
-    protocol::Nonce salt{};
-    if (!bytes || bytes->size() != salt.size()) {
+    auto salt = bytes ? protocol::Salt::from_bytes(*bytes)
+                      : Result<protocol::Salt>(std::unexpected(bytes.error()));
+    if (!salt) {
         return std::nullopt;
     }
-    std::copy(bytes->begin(), bytes->end(), salt.begin());
-    return salt;
+    return *salt;
 }
 
 } // namespace
@@ -482,7 +483,7 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_field_root(const char* request, std::size_t siz
         }
         const auto salt = salt_of(f["salt"].get<std::string>());
         if (!salt) {
-            return to_c_string({{"ok", false}, {"error", "a salt is 16 bytes, base64url"}});
+            return to_c_string({{"ok", false}, {"error", "a salt is 16 or 32 bytes, base64url"}});
         }
         fields.push_back({f["name"].get<std::string>(), *salt,
                           cbor::Value::text(f["value"].get<std::string>())});
@@ -501,13 +502,12 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_attachment_commitment(const std::uint8_t* conte
                                                        std::size_t size, const std::uint8_t* salt,
                                                        std::size_t salt_size, int hash) {
     const auto alg = crypto::hash_alg_from_cose(hash);
-    protocol::Nonce nonce{};
-    if (!alg || salt_size != nonce.size()) {
+    // 16 or 32 bytes (spec v0.21).
+    if (!alg || !protocol::Salt::valid_size(salt_size)) {
         return to_c_string({{"ok", false}, {"error", "not a salt or a hash"}});
     }
-    std::copy(salt, salt + salt_size, nonce.begin());
-    const auto digest =
-        protocol::attachment_commitment(provider(), *alg, nonce, ByteView(content, size));
+    const auto digest = protocol::attachment_commitment(provider(), *alg, ByteView(salt, salt_size),
+                                                        ByteView(content, size));
     if (!digest) {
         return to_c_string({{"ok", false}, {"error", digest.error().detail}});
     }

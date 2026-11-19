@@ -1,9 +1,27 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Cirraya
 
+#include <algorithm>
+
 #include <kanhe/core/protocol/common.hpp>
 
 namespace kanhe::protocol {
+
+Salt::Salt(const std::array<std::uint8_t, 16>& bytes) noexcept : size_(16) {
+    std::ranges::copy(bytes, data_.begin());
+}
+
+Salt::Salt(const std::array<std::uint8_t, 32>& bytes) noexcept : data_(bytes), size_(32) {}
+
+Result<Salt> Salt::from_bytes(ByteView bytes) {
+    if (!valid_size(bytes.size())) {
+        return fail(Errc::malformed, "a salt is 16 or 32 bytes");
+    }
+    Salt salt;
+    std::ranges::copy(bytes, salt.data_.begin());
+    salt.size_ = static_cast<std::uint8_t>(bytes.size());
+    return salt;
+}
 
 bool is_ledger_hash(crypto::HashAlg alg) noexcept {
     return alg == crypto::HashAlg::sha256 || alg == crypto::HashAlg::sm3;

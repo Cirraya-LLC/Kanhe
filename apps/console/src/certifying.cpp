@@ -676,8 +676,8 @@ void Console::issue(Run& run, const std::stop_token& stop) const {
                 fields = vault->fields;
             } else {
                 for (const auto& [name, value] : row.fields) {
-                    fields.push_back(
-                        {name, services_.entropy->bytes<16>(), cbor::Value::text(value)});
+                    fields.push_back({name, services_.entropy->bytes<protocol::salt_size>(),
+                                      cbor::Value::text(value)});
                 }
                 std::optional<Bytes> submission;
                 std::string problem;

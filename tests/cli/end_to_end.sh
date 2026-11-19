@@ -301,6 +301,28 @@ python3 -c 'import sys; p="corrupted.cbor"; d=bytearray(open(p,"rb").read()); d[
 expect_exit 3 verify corrupted.cbor
 [ "$("$KANHE" verify corrupted.cbor --json | json 'd["verified"]' || true)" = "False" ] || fail "json failure report"
 
+# The long-term status (spec v0.21): Ed25519 keys, no renewal, and no
+# post-quantum attestation, so the report advises renewing before 2030.
+json 'd["renewals"] == [] and d["distrust"] is None and not d["long_term"]["post_quantum"]' \
+    < report.json | contains -x True
+json 'd["long_term"]["renew_before"]' < report.json | contains -x 2030-01-01T00:00:00.000Z
+contains 'Renew before 2030-01-01' report.txt
+# Distrusting Ed25519: no dated attestation covers its signatures. RSA
+# signs nothing here, so distrusting it changes nothing.
+expect_exit 3 verify bundle.cbor --ledger-id "$LEDGER_ID" --distrust ed25519@2035-01-01
+run verify bundle.cbor --distrust rsa@2035-01-01 --json > distrust.json
+json 'd["verified"] and d["distrust"]["algorithms"] == [{"algorithm": "rsa", "after": "2035-01-01T00:00:00.000Z"}] and d["distrust"]["signatures"] == []' \
+    < distrust.json | contains -x True
+expect_exit 1 verify bundle.cbor --distrust esp256@2035-01-01
+contains 'esp256@2035-01-01' out.txt
+expect_exit 1 verify bundle.cbor --distrust ed25519@2035-02-30
+expect_exit 1 verify bundle.cbor --distrust classical@2035-01-01 --distrust rsa@2034-01-01
+contains 'twice' out.txt
+expect_exit 1 contract verify bundle.cbor --distrust ed25519
+run verify --help | contains -- '--distrust ALG@YYYY-MM-DD'
+complete_line kanhe verify bundle.cbor --dis | contains -x -- "--distrust" ||
+    fail "completion: --distrust"
+
 # QR codes that open the browser verifier.
 run qr "$RECORD" --bundle-url "https://example.com/e 1.cbor" --verifier-url https://verify.example.com/ --json \
     > qr.json

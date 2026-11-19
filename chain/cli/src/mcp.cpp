@@ -34,6 +34,7 @@
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/http.hpp>
+#include <kanhe/node/long_term.hpp>
 #include <kanhe/node/peers.hpp>
 
 #include "commands.hpp"
@@ -583,8 +584,10 @@ private:
             });
 
         add("kanhe_ledger_status",
-            "The ledger's identity, size, and latest checkpoint, and its peers: other "
-            "organizations' ledgers, by the names the contract tools take as 'home'.",
+            "The ledger's identity, size, and latest checkpoint; its long-term status (whether "
+            "its keys and its witnesses' cosignatures are post-quantum, with advice for its "
+            "owner); and its peers: other organizations' ledgers, by the names the contract "
+            "tools take as 'home'.",
             json::object(), json::array(), read_only, [this](const Tool&, const json&) {
                 Session session(args_);
                 json out = {{"ledger_id", hex_id(session.state().ledger_id())},
@@ -604,6 +607,8 @@ private:
                                      {"online", p.url.has_value()}});
                 }
                 out["peers"] = std::move(peers);
+                // Read only: rotating keys is the owner's, never an agent's.
+                out["long_term"] = node::long_term_json(session.ledger(), session.now());
                 return out;
             });
 
@@ -1408,7 +1413,9 @@ private:
             });
 
         add("kanhe_verify_evidence",
-            "Verify an evidence bundle offline before acting on a document from someone else.",
+            "Verify an evidence bundle offline before acting on a document from someone else. "
+            "The answer says whether a post-quantum attestation covers it (long_term), so that "
+            "it stays credible after the classical signatures fall.",
             {{"bundle_path", {{"type", "string"}}},
              {"expected_ledger_id",
               {{"type", "string"},
@@ -1446,14 +1453,16 @@ private:
                     throw ToolError{"VERIFICATION FAILED: " + std::string(report.error().detail)};
                 }
                 const bool checked = options.expected_ledger.has_value();
-                return json{
-                    {"verified", true},
-                    {"record_type", report->record_type},
-                    {"state", report->state},
-                    {"revoked", report->revoked},
-                    {"memberships",
-                     json::parse(verifier::report_json(*report, checked)["memberships"].dump())},
-                    {"report", verifier::report_text(*report, checked)}};
+                auto full = verifier::report_json(*report, checked);
+                return json{{"verified", true},
+                            {"record_type", report->record_type},
+                            {"state", report->state},
+                            {"revoked", report->revoked},
+                            {"memberships", json::parse(full["memberships"].dump())},
+                            {"long_term", full.contains("long_term")
+                                              ? json::parse(full["long_term"].dump())
+                                              : json(nullptr)},
+                            {"report", verifier::report_text(*report, checked)}};
             });
     }
 

@@ -254,8 +254,9 @@ TEST_CASE("record field commitments and disclosure match the vectors", "[protoco
         for (const auto& item : ledger["record_fields"]) {
             protocol::RecordField field;
             field.name = item["name"].get<std::string>();
-            const Bytes salt = hex_field(item["salt"]);
-            std::ranges::copy(salt, field.salt.begin());
+            const auto salt = protocol::Salt::from_bytes(hex_field(item["salt"]));
+            REQUIRE(salt);
+            field.salt = *salt;
             field.value = json_to_cbor(item["value"]);
             fields.push_back(std::move(field));
         }

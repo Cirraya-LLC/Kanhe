@@ -245,20 +245,38 @@ bool has_attachment_mismatch(const protocol::EvidenceReport& report) {
 
 namespace {
 
-/// The bundle's time-stamp tokens (v0.11), and when its subject existed by.
-/// The witnesses: counts, and each open-network witness's cosignature
-/// (v0.13) with the size it saw and its time.
-Json witnesses_json(const protocol::EvidenceReport& r) {
+/// Open-network witnesses' cosignatures (v0.13), each with the size it saw
+/// and its time.
+Json network_json(std::span<const protocol::NetworkCosignatureCheck> cosignatures) {
     Json network = Json::array();
-    for (const protocol::NetworkCosignatureCheck& n : r.network_cosignatures) {
+    for (const protocol::NetworkCosignatureCheck& n : cosignatures) {
         network.push_back({{"witness", n.witness},
                            {"size", n.size},
                            {"time", iso_time_seconds(n.time)},
                            {"trusted", n.trusted}});
     }
+    return network;
+}
+
+/// Time-stamp tokens (v0.11), in their order.
+Json tokens_json(std::span<const protocol::TimestampCheck> timestamps) {
+    Json tokens = Json::array();
+    for (const protocol::TimestampCheck& t : timestamps) {
+        tokens.push_back({{"checkpoint_size", t.size},
+                          {"time", iso_time(t.time)},
+                          {"accuracy_ms", t.accuracy},
+                          {"authority", t.authority},
+                          {"trusted", t.trusted}});
+    }
+    return tokens;
+}
+
+/// The witnesses, each counted once across the bundle, its anchors, and its
+/// renewals (v0.21), and the anchors' open-network cosignatures.
+Json witnesses_json(const protocol::EvidenceReport& r) {
     return {{"trusted", r.trusted_cosignatures},
             {"untrusted", r.untrusted_cosignatures},
-            {"network", std::move(network)}};
+            {"network", network_json(r.network_cosignatures)}};
 }
 
 std::string witnesses_text(const protocol::EvidenceReport& r) {
@@ -276,20 +294,181 @@ std::string witnesses_text(const protocol::EvidenceReport& r) {
     return out;
 }
 
+/// The anchors' time-stamp tokens (v0.11), and when the subject existed by.
 Json timestamps_json(const protocol::EvidenceReport& r) {
-    Json tokens = Json::array();
-    for (const protocol::TimestampCheck& t : r.timestamps) {
-        tokens.push_back({{"checkpoint_size", t.size},
-                          {"time", iso_time(t.time)},
-                          {"accuracy_ms", t.accuracy},
-                          {"authority", t.authority},
-                          {"trusted", t.trusted}});
-    }
     const std::optional<protocol::Timestamp> existed_by =
         r.events.empty() ? std::nullopt : r.events.front().existed_by;
     return {{"trusted_authorities", r.trusted_timestamp_authorities},
             {"existed_by", existed_by ? Json(iso_time(*existed_by)) : Json(nullptr)},
-            {"tokens", std::move(tokens)}};
+            {"tokens", tokens_json(r.timestamps)}};
+}
+
+// ---------------------------------------------------------------------------
+// Long-term evidence (spec v0.21, section 11.1)
+// ---------------------------------------------------------------------------
+
+Json attested_time_json(const std::optional<protocol::AttestedTime>& time) {
+    return time ? Json(iso_time_seconds(time->seconds, time->millis)) : Json(nullptr);
+}
+
+template <class Number>
+Json optional_number(const std::optional<Number>& n) {
+    return n ? Json(*n) : Json(nullptr);
+}
+
+/// Each renewal, in order: its checkpoint, the log key that signed it, the
+/// rotations it carries, and its witnesses and tokens, as the bundle's own.
+Json renewals_json(const protocol::EvidenceReport& r) {
+    Json out = Json::array();
+    for (const protocol::RenewalReport& n : r.renewals) {
+        out.push_back(
+            {{"tree_size", n.checkpoint.tree_size},
+             {"root", to_hex(n.checkpoint.root.bytes())},
+             {"timestamp", iso_time(n.checkpoint.timestamp)},
+             {"log_key",
+              {{"algorithm", crypto::name(n.log_key.algorithm)}, {"key", to_hex(n.log_key.bytes)}}},
+             {"log_key_rotations", n.log_key_rotations},
+             {"root_key_rotations", n.root_key_rotations},
+             {"witnesses",
+              {{"trusted", n.trusted_cosignatures},
+               {"untrusted", n.untrusted_cosignatures},
+               {"network", network_json(n.network_cosignatures)}}},
+             {"timestamps", tokens_json(n.timestamps)}});
+    }
+    return out;
+}
+
+/// The long-term status: the latest covering checkpoint with a
+/// post-quantum attestation, and those attestations; or none, and the date
+/// to renew before.
+Json long_term_json(const protocol::EvidenceReport& r) {
+    const protocol::LongTermStatus& s = r.long_term;
+    if (!s.post_quantum()) {
+        return {{"post_quantum", false},
+                {"checkpoint", nullptr},
+                {"attested_by", Json::array()},
+                {"renew_before", iso_time(protocol::renew_before)}};
+    }
+    Json attested = Json::array();
+    for (const protocol::AttestationReport& a : s.attested_by) {
+        attested.push_back({{"kind", protocol::attestation_kind_name(a.kind)},
+                            {"by", a.by},
+                            {"algorithm", crypto::name(a.algorithm)},
+                            {"time", attested_time_json(a.time)}});
+    }
+    return {{"post_quantum", true},
+            {"checkpoint",
+             {{"tree_size", s.checkpoint->tree_size},
+              {"timestamp", iso_time(s.checkpoint->timestamp)},
+              {"renewal", optional_number(s.renewal)}}},
+            {"attested_by", std::move(attested)},
+            {"renew_before", nullptr}};
+}
+
+Json attestation_place_json(const protocol::AttestationReport& a) {
+    return {{"kind", protocol::attestation_kind_name(a.kind)},
+            {"by", a.by},
+            {"checkpoint_size", a.checkpoint_size},
+            {"anchor", optional_number(a.anchor)},
+            {"renewal", optional_number(a.renewal)}};
+}
+
+/// The algorithms distrusted, the attestations set aside, and each
+/// signature by a distrusted algorithm with what covers it; null when the
+/// verifier distrusts none.
+Json distrust_json(const protocol::EvidenceReport& r) {
+    if (r.distrust.empty()) {
+        return nullptr;
+    }
+    Json algorithms = Json::array();
+    for (const protocol::Distrust& d : r.distrust) {
+        algorithms.push_back(
+            {{"algorithm", crypto::name(d.algorithm)}, {"after", iso_time(d.after)}});
+    }
+    Json set_aside = Json::array();
+    for (const protocol::SetAsideAttestation& a : r.set_aside) {
+        Json item = attestation_place_json(a.attestation);
+        item["algorithm"] = crypto::name(a.algorithm);
+        set_aside.push_back(std::move(item));
+    }
+    Json signatures = Json::array();
+    for (const protocol::DistrustedSignature& d : r.distrusted) {
+        Json covered = attestation_place_json(d.covered_by);
+        covered["time"] = attested_time_json(d.covered_by.dated_by);
+        signatures.push_back({{"signed", protocol::signed_object_name(d.signed_object)},
+                              {"index", d.index ? Json(*d.index) : Json(nullptr)},
+                              {"tree_size", d.tree_size ? Json(*d.tree_size) : Json(nullptr)},
+                              {"approver", d.approver ? Json(hex_id(*d.approver)) : Json(nullptr)},
+                              {"anchor", optional_number(d.anchor)},
+                              {"renewal", optional_number(d.renewal)},
+                              {"algorithm", crypto::name(d.algorithm)},
+                              {"covered_by", std::move(covered)}});
+    }
+    return {{"algorithms", std::move(algorithms)},
+            {"set_aside", std::move(set_aside)},
+            {"signatures", std::move(signatures)}};
+}
+
+/// The date of a time, YYYY-MM-DD.
+std::string date_text(protocol::Timestamp ms) {
+    return iso_time(ms).substr(0, 10);
+}
+
+/// The report's lines on renewals, the long-term status, and distrusted
+/// algorithms (v0.21).
+std::string long_term_text(const protocol::EvidenceReport& r) {
+    std::string out;
+    for (std::size_t i = 0; i < r.renewals.size(); ++i) {
+        const protocol::RenewalReport& n = r.renewals[i];
+        const auto trusted_tokens = static_cast<std::size_t>(std::ranges::count_if(
+            n.timestamps, [](const protocol::TimestampCheck& t) { return t.trusted; }));
+        out += std::format("  Renewed      ({}) size {}, signed {} by its {} log key{}\n", i + 1,
+                           n.checkpoint.tree_size, format_time(n.checkpoint.timestamp),
+                           crypto::name(n.log_key.algorithm),
+                           n.log_key_rotations + n.root_key_rotations == 0
+                               ? std::string()
+                               : std::format(", after {} log key and {} root key rotation(s)",
+                                             n.log_key_rotations, n.root_key_rotations));
+        out += std::format("               {} trusted witness(es), {} trusted time-stamp(s)\n",
+                           n.trusted_cosignatures, trusted_tokens);
+    }
+    const protocol::LongTermStatus& s = r.long_term;
+    if (!s.post_quantum()) {
+        out += std::format("  Renew before {}: no post-quantum attestation covers this evidence\n",
+                           date_text(protocol::renew_before));
+        out += "               (it rests on classical signatures; NIST IR 8547)\n";
+    } else {
+        std::string by;
+        for (const protocol::AttestationReport& a : s.attested_by) {
+            const std::string who =
+                a.kind == protocol::AttestationKind::witness   ? "witness " + a.by.substr(0, 12)
+                : a.kind == protocol::AttestationKind::log_key ? "its log key " + a.by.substr(0, 12)
+                : a.kind == protocol::AttestationKind::timestamp ? "time-stamp authority " + a.by
+                                                                 : "network witness " + a.by;
+            by += (by.empty() ? "" : ", ") + who + " (" + std::string(crypto::name(a.algorithm)) +
+                  ")";
+        }
+        out += std::format("  Post-quantum since {}: {}, size {}\n",
+                           format_time(s.checkpoint->timestamp),
+                           s.renewal ? std::format("renewal {}", *s.renewal)
+                                     : std::string("the bundle's checkpoint"),
+                           s.checkpoint->tree_size);
+        out += "               attested by " + by + "\n";
+    }
+    for (const protocol::Distrust& d : r.distrust) {
+        const auto count = static_cast<std::size_t>(std::ranges::count(
+            r.distrusted, d.algorithm, &protocol::DistrustedSignature::algorithm));
+        out += std::format("  Distrusted   {} from {}: {} signature(s), each in a tree attested "
+                           "before then\n",
+                           crypto::name(d.algorithm), date_text(d.after), count);
+    }
+    for (const protocol::SetAsideAttestation& a : r.set_aside) {
+        out += std::format("               set aside: {} {} (size {}, {}): relied on for nothing\n",
+                           protocol::attestation_kind_name(a.attestation.kind),
+                           a.attestation.by.substr(0, 24), a.attestation.checkpoint_size,
+                           crypto::name(a.algorithm));
+    }
+    return out;
 }
 
 /// The report's time-stamp lines: the trusted authorities' tokens, then
@@ -792,6 +971,9 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
         {"events", std::move(events)},
         {"disclosed_fields", std::move(fields)},
         {"attachments", std::move(attachments)},
+        {"renewals", renewals_json(r)},
+        {"long_term", long_term_json(r)},
+        {"distrust", distrust_json(r)},
         {"complete", r.complete},
         {"state_commitment",
          r.state_commitment ? Json{{"index", r.state_commitment->tree_size},
@@ -824,6 +1006,7 @@ std::string report_text(const protocol::EvidenceReport& r, bool ledger_checked) 
     }
     out += witnesses_text(r);
     out += timestamps_text(r);
+    out += long_term_text(r);
     out += guardians_text(r);
     out += memberships_text(r);
     line(std::format("  Record       {} (id {})", r.record_type, short_id(r.record)));
@@ -1349,6 +1532,7 @@ std::string contract_report_text(const protocol::ContractReport& r, bool ledger_
                      e.checkpoint.tree_size, format_time(e.checkpoint.timestamp)));
     out += witnesses_text(e);
     out += timestamps_text(e);
+    out += long_term_text(e);
     out += guardians_text(e);
     out += memberships_text(e);
     auto call_lines = [&](const protocol::ContractStep& step) {

@@ -5,30 +5,38 @@
 
 #include <string>
 
+#include <kanhe/core/protocol/log.hpp>
+
 namespace kanhe::protocol::detail {
 
-Result<Bytes> sign_envelope(const crypto::Signer& signer, const crypto::Provider& provider,
-                            crypto::HashAlg hash, ByteView payload, std::string_view content_type) {
-    auto kid = key_id(provider, hash, signer.public_key());
-    if (!kid) {
-        return std::unexpected(kid.error());
-    }
-    cose::SignOptions options;
-    options.protected_header = {
-        {cbor::Value::integer(cose::label_content_type),
-         cbor::Value::text(std::string(content_type))},
-        {cbor::Value::integer(cose::label_kid), cbor::Value::bytes(kid->bytes())},
-    };
-    return cose::sign(signer, payload, options);
-}
+namespace {
 
-Result<Envelope> parse_envelope(ByteView encoded, std::string_view content_type) {
+/// `parse_envelope`, and with `iat` also `parse_dated_envelope`.
+Result<Envelope> parse_with(ByteView encoded, std::string_view content_type,
+                            std::optional<std::uint64_t>* iat) {
     auto message = cose::parse(encoded);
     if (!message) {
         return std::unexpected(message.error());
     }
     const cbor::Map* protected_map = message->protected_header.as_map();
-    if (protected_map == nullptr || protected_map->size() != 3) {
+    // A dated cosignature's time (v0.21): CWT claims holding iat alone.
+    std::size_t expected = 3;
+    if (const cbor::Value* claims = message->protected_header.find(label_cwt_claims);
+        claims != nullptr && iat != nullptr) {
+        const cbor::Map* map = claims->as_map();
+        const bool only_iat =
+            map != nullptr && map->size() == 1 &&
+            (*map)[0].key.as_uint64() == static_cast<std::uint64_t>(cwt_claim_iat);
+        const auto seconds = only_iat ? (*map)[0].value.as_uint64() : std::nullopt;
+        if (!seconds) {
+            return fail(Errc::malformed,
+                        "a cosignature's CWT claims (header 15) must hold exactly iat (6), an "
+                        "unsigned integer");
+        }
+        *iat = *seconds;
+        expected = 4;
+    }
+    if (protected_map == nullptr || protected_map->size() != expected) {
         return fail(Errc::malformed, "protected header must be exactly {alg, content type, kid}");
     }
     const cbor::Value* type = message->protected_header.find(cose::label_content_type);
@@ -56,6 +64,40 @@ Result<Envelope> parse_envelope(ByteView encoded, std::string_view content_type)
         return fail(Errc::malformed, "payload must be attached");
     }
     return Envelope{std::move(*message), *kid_id};
+}
+
+} // namespace
+
+Result<Bytes> sign_envelope(const crypto::Signer& signer, const crypto::Provider& provider,
+                            crypto::HashAlg hash, ByteView payload, std::string_view content_type,
+                            std::optional<std::uint64_t> iat) {
+    auto kid = key_id(provider, hash, signer.public_key());
+    if (!kid) {
+        return std::unexpected(kid.error());
+    }
+    cose::SignOptions options;
+    options.protected_header = {
+        {cbor::Value::integer(cose::label_content_type),
+         cbor::Value::text(std::string(content_type))},
+        {cbor::Value::integer(cose::label_kid), cbor::Value::bytes(kid->bytes())},
+    };
+    if (iat) {
+        options.protected_header.push_back(
+            {cbor::Value::integer(label_cwt_claims),
+             cbor::Value::map(
+                 {{cbor::Value::integer(cwt_claim_iat), cbor::Value::unsigned_integer(*iat)}})});
+    }
+    return cose::sign(signer, payload, options);
+}
+
+Result<Envelope> parse_envelope(ByteView encoded, std::string_view content_type) {
+    return parse_with(encoded, content_type, nullptr);
+}
+
+Result<Envelope> parse_dated_envelope(ByteView encoded, std::string_view content_type,
+                                      std::optional<std::uint64_t>& iat) {
+    iat.reset();
+    return parse_with(encoded, content_type, &iat);
 }
 
 Status verify_envelope(const crypto::Provider& provider, crypto::HashAlg hash,

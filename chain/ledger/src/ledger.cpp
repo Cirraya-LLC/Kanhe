@@ -2966,6 +2966,147 @@ Result<protocol::CosignRequest> Ledger::cosign_request(std::uint64_t old_size) c
     return request;
 }
 
+Result<protocol::Renewal> Ledger::renewal(std::uint64_t from,
+                                          std::optional<std::uint64_t> size) const {
+    if (from == 0 || (size && *size == 0)) {
+        return fail(Errc::invalid_argument, "sizes are positive integers");
+    }
+    if (size && from > *size) {
+        return fail(Errc::invalid_argument, "the size to renew from is above the renewal's size");
+    }
+    // The rotations from the state, the rest from the log and what is kept
+    // beside it: one consistent view of both.
+    const std::shared_lock state_lock(impl_->state_mutex);
+    const std::shared_lock log_lock(impl_->log_mutex);
+    if (!impl_->latest_checkpoint) {
+        return fail(Errc::not_found, "the ledger has no checkpoint yet");
+    }
+    const std::uint64_t latest = impl_->latest_checkpoint->checkpoint.tree_size;
+    if (!size && latest < from) {
+        return fail(Errc::not_found,
+                    "the ledger's latest checkpoint is smaller than the size to renew from");
+    }
+    const std::uint64_t target = size.value_or(latest);
+
+    // The stored checkpoints of that size, oldest first.
+    auto first = first_checkpoint_at_least(impl_->checkpoints, target);
+    if (!first) {
+        return std::unexpected(first.error());
+    }
+    std::vector<protocol::SignedCheckpoint> candidates;
+    for (std::uint64_t i = *first; i < impl_->checkpoints.count(); ++i) {
+        auto bytes = impl_->checkpoints.read(i);
+        if (!bytes) {
+            return std::unexpected(bytes.error());
+        }
+        auto parsed = protocol::parse_checkpoint(*bytes);
+        if (!parsed) {
+            return std::unexpected(parsed.error());
+        }
+        if (parsed->checkpoint.tree_size != target) {
+            break;
+        }
+        candidates.push_back(std::move(*parsed));
+    }
+    if (candidates.empty()) {
+        return fail(Errc::not_found, "the ledger keeps no checkpoint of this size");
+    }
+
+    auto cosignatures = read_cosignatures(impl_->cosignatures);
+    if (!cosignatures) {
+        return std::unexpected(cosignatures.error());
+    }
+    auto stamps = read_timestamps(impl_->timestamps);
+    if (!stamps) {
+        return std::unexpected(stamps.error());
+    }
+    auto network = read_network_cosignatures(*impl_->provider, impl_->network_cosignatures);
+    if (!network) {
+        return std::unexpected(network.error());
+    }
+    // Cosignatures and tokens attest one checkpoint's payload; a network
+    // witness's, a size and its root (its note), whichever checkpoint of
+    // that size it was asked with.
+    auto cosigns = [&](const protocol::SignedCheckpoint& c) {
+        return std::ranges::any_of(*cosignatures, [&](const StoredCosignature& s) {
+            return s.cosignature.checkpoint == c.checkpoint;
+        });
+    };
+    auto stamps_it = [&](const protocol::SignedCheckpoint& c) {
+        return std::ranges::any_of(*stamps, [&](const StoredTimestamp& t) {
+            return t.checkpoint.checkpoint == c.checkpoint;
+        });
+    };
+    auto notes = [&](const StoredNetworkCosignature& n) {
+        return n.checkpoint.checkpoint.tree_size == target &&
+               n.checkpoint.checkpoint.root == candidates.back().checkpoint.root;
+    };
+    const protocol::SignedCheckpoint* chosen = nullptr;
+    for (auto it = candidates.rbegin(); it != candidates.rend() && chosen == nullptr; ++it) {
+        if (cosigns(*it) || stamps_it(*it)) {
+            chosen = &*it;
+        }
+    }
+    if (chosen == nullptr && std::ranges::any_of(*network, notes)) {
+        chosen = &candidates.back();
+    }
+    if (chosen == nullptr) {
+        return fail(Errc::not_found, "no witness, time-stamp authority, or network witness has "
+                                     "attested the checkpoint of this size yet");
+    }
+
+    protocol::Renewal out;
+    out.checkpoint = chosen->encoded;
+    if (from < target) {
+        auto proof = impl_->tree.consistency_proof(from, target);
+        if (!proof) {
+            return std::unexpected(proof.error());
+        }
+        out.consistency = std::move(*proof);
+    }
+    // Every rotation of the organization's keys between the two sizes, as a
+    // witness follows them (spec section 10).
+    const protocol::ActorState* organization = impl_->state.actor(id());
+    for (const std::uint64_t index : organization->rotations) {
+        if (index < from) {
+            continue;
+        }
+        if (index >= target) {
+            break;
+        }
+        if (out.rotations.size() == protocol::max_key_rotations) {
+            return fail(Errc::limit_exceeded,
+                        "more key rotations between the two sizes than a renewal holds: renew "
+                        "from a later size");
+        }
+        auto entry = impl_->log.read(index);
+        if (!entry) {
+            return std::unexpected(entry.error());
+        }
+        auto path = impl_->tree.inclusion_proof(index, target);
+        if (!path) {
+            return std::unexpected(path.error());
+        }
+        out.rotations.push_back({index, std::move(*entry), std::move(*path)});
+    }
+    for (const StoredCosignature& s : *cosignatures) {
+        if (s.cosignature.checkpoint == chosen->checkpoint) {
+            out.cosignatures.push_back(s.encoded);
+        }
+    }
+    for (const StoredTimestamp& t : *stamps) {
+        if (t.checkpoint.checkpoint == chosen->checkpoint) {
+            out.timestamps.push_back(t.token);
+        }
+    }
+    for (const StoredNetworkCosignature& n : *network) {
+        if (notes(n) && !std::ranges::contains(out.network_cosignatures, n.cosignature)) {
+            out.network_cosignatures.push_back(n.cosignature);
+        }
+    }
+    return out;
+}
+
 Result<protocol::EvidenceBundle> Ledger::export_evidence(const crypto::Signer& log_key,
                                                          const protocol::Id& record_id) const {
     const crypto::Signer* keys[] = {&log_key};

@@ -63,6 +63,7 @@ kanhe_program(kanhe
     src/cmd_keeper.cpp
     src/cmd_keys.cpp
     src/cmd_ledger.cpp
+    src/cmd_longterm.cpp
     src/cmd_node.cpp
     src/cmd_presence.cpp
     src/cmd_qr.cpp
@@ -70,6 +71,7 @@ kanhe_program(kanhe
     src/cmd_recompute.cpp
     src/cmd_scripts.cpp
     src/cmd_relay.cpp
+    src/cmd_renew.cpp
     src/cmd_requests.cpp
     src/cmd_vault.cpp
     src/cmd_timestamps.cpp

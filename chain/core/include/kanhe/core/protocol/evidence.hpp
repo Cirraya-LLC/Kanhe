@@ -3,10 +3,13 @@
 
 #pragma once
 
+#include <compare>
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <kanhe/core/bytes.hpp>
@@ -25,6 +28,7 @@
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state_tree.hpp>
 #include <kanhe/core/protocol/statement.hpp>
+#include <kanhe/core/protocol/witness.hpp>
 
 /// Evidence bundles: everything needed to verify a record offline, without
 /// contacting or trusting the ledger's database. See `evidence-bundle` in
@@ -44,7 +48,8 @@ struct EvidenceEntry {
 
 struct AttachmentOpening {
     std::string name;
-    Nonce salt{};
+    /// 16 or 32 bytes (v0.21).
+    Salt salt;
 
     friend bool operator==(const AttachmentOpening&, const AttachmentOpening&) = default;
 };
@@ -73,6 +78,43 @@ struct Anchor {
 /// ledger's clock and the authority's may disagree by this much (v0.11).
 inline constexpr Timestamp timestamp_clock_slack = 60'000;
 
+/// A renewal (v0.21, spec section 11.1): a newer attestation of the same
+/// ledger's tree, at a size no smaller than the previous checkpoint's (the
+/// bundle's for the first renewal, the one before it for the others),
+/// proven consistent with it, with the rotations of the root key and the
+/// log key in between, followed as a witness follows them. It holds nothing
+/// private, so whoever holds a bundle may append one. It adds integrity and
+/// time; what the bundle shows stays as of the bundle's own checkpoint. See
+/// `renewal` in spec/kanhe.cddl.
+struct Renewal {
+    /// The signed checkpoint at size M (COSE_Sign1).
+    Bytes checkpoint;
+    /// The RFC 9162 consistency proof from the previous size to M, 1 to 65
+    /// hashes; empty when the sizes are equal.
+    std::vector<crypto::Digest> consistency;
+    /// Every rotation of the organization's root key or the ledger's log key
+    /// at an index from the previous size to M - 1, ascending, each with its
+    /// inclusion path in M's tree; at most 4,096.
+    std::vector<KeyRotationProof> rotations;
+    /// Witnesses' cosignatures of the checkpoint (COSE, dated or not).
+    std::vector<Bytes> cosignatures;
+    /// RFC 3161 tokens over the checkpoint's payload.
+    std::vector<Bytes> timestamps;
+    /// Open-network witnesses' cosignatures of its note; never an SM3
+    /// ledger's. A renewal holds cosignatures, tokens, these, or several.
+    std::vector<network::NoteSignature> network_cosignatures;
+
+    friend bool operator==(const Renewal&, const Renewal&) = default;
+};
+
+/// At most this many renewals a bundle carries (key 11).
+inline constexpr std::size_t max_renewals = 64;
+
+/// The standalone renewal that a ledger's server answers (GET /v1/renewal,
+/// spec section 16), with every bound of the CDDL checked both ways.
+[[nodiscard]] Result<Bytes> encode_renewal(const Renewal& renewal);
+[[nodiscard]] Result<Renewal> decode_renewal(ByteView encoded);
+
 struct EvidenceBundle {
     /// The record this bundle is about.
     Id record;
@@ -95,6 +137,9 @@ struct EvidenceBundle {
     /// Source proofs (v0.18): encoded bundles, each the complete evidence of
     /// one of the record's sources on another ledger; at most 64.
     std::vector<Bytes> source_proofs;
+    /// Renewals (v0.21), in order: newer attestations of the tree, at or
+    /// after `checkpoint`; at most 64.
+    std::vector<Renewal> renewals;
 
     friend bool operator==(const EvidenceBundle&, const EvidenceBundle&) = default;
 };
@@ -173,6 +218,26 @@ struct TrustNode {
     friend bool operator==(const TrustNode&, const TrustNode&) = default;
 };
 
+/// An algorithm the verifier distrusts from a date (v0.21, spec section
+/// 11.1): its attestations are relied on for nothing, and every signature
+/// by it that the evidence relies on must be in a tree that a dated
+/// attestation by another algorithm, dated before `after`, attested.
+struct Distrust {
+    crypto::SignatureFamily algorithm = crypto::SignatureFamily::other;
+    /// 00:00 UTC of the date, in Unix milliseconds.
+    Timestamp after = 0;
+
+    friend bool operator==(const Distrust&, const Distrust&) = default;
+};
+
+/// Reads `ALG@YYYY-MM-DD` options, as `--distrust` takes them: ALG one of
+/// ed25519, ecdsa, sm2, rsa, ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical
+/// (ed25519, ecdsa, sm2, rsa, and other), a real date from 1970 on. Returns
+/// them in the spec's order of algorithms. Fails with Errc::invalid_argument
+/// (a usage error) for anything else, and for an algorithm named twice,
+/// directly or through classical.
+[[nodiscard]] Result<std::vector<Distrust>> parse_distrust(std::span<const std::string> options);
+
 struct VerifyOptions {
     /// If set, the bundle must come from this ledger. Verifiers learn the
     /// expected ledger out of band (for example from a QR code or a contract).
@@ -199,6 +264,10 @@ struct VerifyOptions {
     /// Modules loaded before, asked before each contract's code is loaded
     /// (see `ModuleCache`): none by default.
     ModuleCache* modules = nullptr;
+    /// Algorithms the verifier distrusts (v0.21), each once, as
+    /// `parse_distrust` gives them; on every bundle verified with these
+    /// options, nested ones included (memberships, sources, consents).
+    std::vector<Distrust> distrust = {};
 };
 
 struct ActorSummary {
@@ -444,6 +513,140 @@ struct NetworkCosignatureCheck {
                            const NetworkCosignatureCheck&) = default;
 };
 
+/// A time an attestation states (v0.21), to the millisecond: a network
+/// witness's or a dated cosignature's is any 64-bit count of seconds, more
+/// than milliseconds hold, so times are kept as seconds and milliseconds and
+/// compared as exact numbers.
+struct AttestedTime {
+    std::uint64_t seconds = 0;
+    std::uint16_t millis = 0;
+
+    [[nodiscard]] static AttestedTime from_millis(Timestamp ms) noexcept {
+        return {ms / 1000, static_cast<std::uint16_t>(ms % 1000)};
+    }
+
+    friend auto operator<=>(const AttestedTime&, const AttestedTime&) = default;
+};
+
+/// What attests a checkpoint (v0.21, spec section 11.1).
+enum class AttestationKind : std::uint8_t {
+    witness,         ///< a witness's COSE cosignature, dated or not
+    timestamp,       ///< a time-stamp authority's token
+    network_witness, ///< an open-network witness's cosignature of its note
+    log_key,         ///< its own signature, in a ledger of post-quantum keys alone
+};
+/// "witness", "timestamp", "network-witness", or "log-key".
+[[nodiscard]] std::string_view attestation_kind_name(AttestationKind kind) noexcept;
+
+/// One attestation of a checkpoint the bundle holds (v0.21): its own
+/// cosignatures, its anchors' tokens and network cosignatures, and its
+/// renewals' three kinds.
+struct AttestationReport {
+    AttestationKind kind = AttestationKind::witness;
+    /// A witness's kid (hex), an authority's name (as its signing
+    /// certificate names it), a network witness's name, a log key's kid.
+    std::string by;
+    /// Its signature's algorithm; a token's second, its signing
+    /// certificate's own signature's.
+    crypto::SignatureFamily algorithm = crypto::SignatureFamily::other;
+    std::optional<crypto::SignatureFamily> certificate_algorithm;
+    /// Its time: a token's, a network cosignature's T, a dated
+    /// cosignature's iat; nullopt for an undated cosignature. And the time
+    /// it is dated by: a token's time plus its accuracy, the others' time.
+    std::optional<AttestedTime> time;
+    std::optional<AttestedTime> dated_by;
+    /// The checkpoint it attests, and the anchor or renewal that carries it
+    /// (numbered from 1), or neither for the bundle's own.
+    std::uint64_t checkpoint_size = 0;
+    std::optional<std::size_t> anchor;
+    std::optional<std::size_t> renewal;
+
+    friend bool operator==(const AttestationReport&, const AttestationReport&) = default;
+};
+
+/// A renewal as checked (v0.21): its checkpoint, the log key that signed it,
+/// how many rotations of each key it carries, and its witnesses (each
+/// once, network ones among them) and tokens, as the bundle's own.
+struct RenewalReport {
+    Checkpoint checkpoint;
+    crypto::PublicKey log_key;
+    std::size_t log_key_rotations = 0;
+    std::size_t root_key_rotations = 0;
+    std::size_t trusted_cosignatures = 0;
+    std::size_t untrusted_cosignatures = 0;
+    std::vector<NetworkCosignatureCheck> network_cosignatures;
+    std::vector<TimestampCheck> timestamps;
+
+    friend bool operator==(const RenewalReport&, const RenewalReport&) = default;
+};
+
+/// Without a post-quantum attestation, a report advises renewing before
+/// 2030-01-01T00:00:00Z (v0.21): NIST IR 8547 deprecates the classical
+/// algorithms after 2030. A fixed date, never the verifier's clock.
+inline constexpr Timestamp renew_before = 1'893'456'000'000;
+
+/// The bundle's long-term status (v0.21, spec section 11.1): the latest
+/// checkpoint that covers it (its own, or a renewal's) with a post-quantum
+/// attestation the verifier relies on, and those attestations, each
+/// attester once; or none. Advice: it changes no verdict.
+struct LongTermStatus {
+    std::optional<Checkpoint> checkpoint;
+    /// Its renewal's number from 1; nullopt for the bundle's own.
+    std::optional<std::size_t> renewal;
+    /// Cosignatures, tokens, network cosignatures, then the log key.
+    std::vector<AttestationReport> attested_by;
+
+    [[nodiscard]] bool post_quantum() const noexcept { return checkpoint.has_value(); }
+
+    friend bool operator==(const LongTermStatus&, const LongTermStatus&) = default;
+};
+
+/// An attestation the verifier would trust, set aside for an algorithm it
+/// distrusts (v0.21): `algorithm` is that one (a token's signature's first).
+struct SetAsideAttestation {
+    AttestationReport attestation;
+    crypto::SignatureFamily algorithm = crypto::SignatureFamily::other;
+
+    friend bool operator==(const SetAsideAttestation&, const SetAsideAttestation&) = default;
+};
+
+/// What a signature the evidence relies on signed (v0.21, spec section 11.1).
+enum class SignedObject : std::uint8_t {
+    statement,
+    presence,
+    approval,
+    approval_presence,
+    state_commitment,
+    receipt,
+    checkpoint,
+    anchor,
+    renewal,
+    rotation,
+};
+/// "statement", "presence", "approval", "approval-presence",
+/// "state-commitment", "receipt", "checkpoint", "anchor", "renewal", or
+/// "rotation".
+[[nodiscard]] std::string_view signed_object_name(SignedObject signed_object) noexcept;
+
+/// A signature by a distrusted algorithm that the evidence relies on, and
+/// the dated attestation before the algorithm's date that covers it: the
+/// earliest, the first in the bundle's order among equal times (v0.21).
+struct DistrustedSignature {
+    SignedObject signed_object = SignedObject::statement;
+    /// The entry's log index (an entry's signatures and a renewal's
+    /// rotations); the tree head's size (a receipt, a checkpoint, an anchor,
+    /// a renewal); the approver; the anchor's and the renewal's numbers.
+    std::optional<std::uint64_t> index;
+    std::optional<std::uint64_t> tree_size;
+    std::optional<Id> approver;
+    std::optional<std::size_t> anchor;
+    std::optional<std::size_t> renewal;
+    crypto::SignatureFamily algorithm = crypto::SignatureFamily::other;
+    AttestationReport covered_by;
+
+    friend bool operator==(const DistrustedSignature&, const DistrustedSignature&) = default;
+};
+
 /// At most this many source proofs a bundle carries (v0.18).
 inline constexpr std::size_t max_source_proofs = 64;
 
@@ -598,6 +801,19 @@ struct EvidenceReport {
     bool complete = false;
     /// That state commitment (the last entry the checkpoint covers).
     std::optional<StateCommitment> state_commitment;
+    /// The renewals (v0.21), in order, and the bundle's long-term status.
+    /// Their witnesses and trusted authorities count in the totals above,
+    /// their trusted tokens in each event's `existed_by`; their network
+    /// cosignatures and tokens are theirs, not in the lists above.
+    std::vector<RenewalReport> renewals;
+    LongTermStatus long_term;
+    /// The algorithms the verifier distrusts (v0.21), in the spec's order;
+    /// the attestations set aside for them, in the bundle's order (its own
+    /// cosignatures, each anchor's, each renewal's); and every signature by
+    /// them the evidence relies on, each with what covers it.
+    std::vector<Distrust> distrust;
+    std::vector<SetAsideAttestation> set_aside;
+    std::vector<DistrustedSignature> distrusted;
 
     friend bool operator==(const EvidenceReport&, const EvidenceReport&) = default;
 };

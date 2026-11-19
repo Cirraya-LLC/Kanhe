@@ -30,11 +30,12 @@ Result<RecordField> decode_field(ByteView leaf) {
     if (field.name.empty()) {
         return fail(Errc::malformed, "field name must not be empty");
     }
-    KANHE_TRY(Bytes salt, detail::as_bytes_value((*parts)[1]));
-    if (salt.size() != field.salt.size()) {
-        return fail(Errc::malformed, "field salt must be 16 bytes");
+    // 16 or 32 bytes (v0.21).
+    const Bytes* salt = (*parts)[1].as_bytes();
+    if (salt == nullptr || !Salt::valid_size(salt->size())) {
+        return fail(Errc::malformed, "field salt must be 16 or 32 bytes");
     }
-    std::ranges::copy(salt, field.salt.begin());
+    KANHE_TRY(field.salt, Salt::from_bytes(*salt));
     field.value = (*parts)[2];
     return field;
 }
@@ -96,11 +97,11 @@ Result<RecordField> verify_disclosure(const crypto::Provider& provider, crypto::
 }
 
 Result<crypto::Digest> attachment_commitment(const crypto::Provider& provider, crypto::HashAlg hash,
-                                             const Nonce& salt, ByteView content) {
+                                             ByteView salt, ByteView content) {
     if (!is_ledger_hash(hash)) {
         return fail(Errc::unsupported, "hash must be SHA-256 or SM3");
     }
-    return provider.digest(hash, {ByteView(salt), content});
+    return provider.digest(hash, {salt, content});
 }
 
 } // namespace kanhe::protocol

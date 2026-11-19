@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include <kanhe/client/records.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
@@ -33,9 +34,13 @@ namespace kanhe::cli {
                                             const std::string& text);
 
 /// A verifier's trust, from verify's options: --ledger-id, --witness,
-/// --witness-vkey, --tsa-root, --attachment, and --trust-node (those a
-/// command takes).
+/// --witness-vkey, --tsa-root, --attachment, --trust-node, and --distrust
+/// (those a command takes).
 [[nodiscard]] protocol::VerifyOptions verify_options(const Args& args);
+
+/// The algorithms --distrust ALG@YYYY-MM-DD names (spec v0.21), each once;
+/// a UsageError names the entry that is not one.
+[[nodiscard]] std::vector<protocol::Distrust> distrust_options(const Args& args);
 
 /// A script's file below `root`, against its approval (spec v0.18): "same"
 /// (that size and hash under `hash`, the ledger's), "changed", or

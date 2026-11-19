@@ -60,14 +60,17 @@ Vault decode_vault_content(const cbor::Value& value) {
     auto corrupted = [] {
         return ActionError{"the record vault is corrupted"};
     };
+    // 16 or 32 bytes: vaults written before spec v0.21 hold 16.
     auto salt_of = [&](const cbor::Value& v) {
-        protocol::Nonce salt{};
         const Bytes* bytes = v.as_bytes();
-        if (bytes == nullptr || bytes->size() != salt.size()) {
+        if (bytes == nullptr) {
             throw corrupted();
         }
-        std::ranges::copy(*bytes, salt.begin());
-        return salt;
+        auto salt = protocol::Salt::from_bytes(*bytes);
+        if (!salt) {
+            throw corrupted();
+        }
+        return *salt;
     };
     const cbor::Value* fields = value.find(1);
     const cbor::Value* attachments = value.find(2);
@@ -296,7 +299,8 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
     }
     Vault vault;
     for (const auto& [name, value] : request.fields) {
-        vault.fields.push_back({name, entropy.bytes<16>(), cbor::Value::text(value)});
+        vault.fields.push_back(
+            {name, entropy.bytes<protocol::salt_size>(), cbor::Value::text(value)});
     }
     const auto commitment =
         unwrap(protocol::commit_fields(session.provider(), session.state().hash(), vault.fields),
@@ -317,7 +321,8 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
                              " is larger than a kept file may be (16 MiB): attach it without "
                              "keeping it"};
         }
-        const VaultAttachment attachment{path.filename().string(), entropy.bytes<16>()};
+        const VaultAttachment attachment{path.filename().string(),
+                                         entropy.bytes<protocol::salt_size>()};
         const auto digest =
             unwrap(protocol::attachment_commitment(session.provider(), session.state().hash(),
                                                    attachment.salt, content),

@@ -3,19 +3,26 @@
 
 // RFC 3161 time-stamp tokens: reading and checking them, asking an authority
 // for one, and the certificates a verifier trusts. All of it is OpenSSL's
-// code (its TS, PKCS #7, and X.509 modules); this file only adapts it.
+// code (its TS, PKCS #7, CMS, and X.509 modules); this file only adapts it.
+// OpenSSL's PKCS #7 code has no ML-DSA and does not verify SM2 signatures,
+// so a token whose signing certificate's key is ML-DSA (spec v0.21) or SM2
+// is checked by its CMS code, with the same conditions of trust.
 
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 #include <openssl/asn1.h>
 #include <openssl/bio.h>
+#include <openssl/cms.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/objects.h>
@@ -24,6 +31,7 @@
 #include <openssl/ts.h>
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
+#include <openssl/x509v3.h>
 
 #include <kanhe/crypto/openssl.hpp>
 
@@ -40,6 +48,7 @@ struct Deleter {
 };
 
 using Pkcs7Ptr = std::unique_ptr<PKCS7, Deleter<&PKCS7_free>>;
+using CmsPtr = std::unique_ptr<CMS_ContentInfo, Deleter<&CMS_ContentInfo_free>>;
 using TstInfoPtr = std::unique_ptr<TS_TST_INFO, Deleter<&TS_TST_INFO_free>>;
 using TsReqPtr = std::unique_ptr<TS_REQ, Deleter<&TS_REQ_free>>;
 using TsRespPtr = std::unique_ptr<TS_RESP, Deleter<&TS_RESP_free>>;
@@ -191,6 +200,131 @@ void forget_errors() noexcept {
     return certificate;
 }
 
+/// An algorithm identifier's algorithm as spec section 11.1 names it (v0.21),
+/// by its OID: RSA in any form, ECDSA with any hash, an EC key on SM2's curve
+/// (`curve`, the identifier's parameter when it is an OID) as sm2 and on any
+/// other as ecdsa, SM2 with SM3, Ed25519, and ML-DSA; any other is `other`.
+[[nodiscard]] SignatureFamily family_of_oid(const ASN1_OBJECT* oid, const ASN1_OBJECT* curve) {
+    auto dotted = [](const ASN1_OBJECT* object) {
+        std::array<char, 128> text{};
+        if (object == nullptr) {
+            return std::string();
+        }
+        const int length = OBJ_obj2txt(text.data(), static_cast<int>(text.size()), object, 1);
+        return length <= 0 ? std::string()
+                           : std::string(text.data(), std::min(static_cast<std::size_t>(length),
+                                                               text.size() - 1));
+    };
+    const std::string name = dotted(oid);
+    constexpr std::string_view sm2_curve = "1.2.156.10197.1.301";
+    if (name.starts_with("1.2.840.113549.1.1.")) {
+        return SignatureFamily::rsa;
+    }
+    if (name == "1.2.840.10045.2.1") { // id-ecPublicKey
+        return dotted(curve) == sm2_curve ? SignatureFamily::sm2 : SignatureFamily::ecdsa;
+    }
+    if (name.starts_with("1.2.840.10045.4.")) { // ecdsa-with-*
+        return SignatureFamily::ecdsa;
+    }
+    if (name == "1.3.101.112") {
+        return SignatureFamily::ed25519;
+    }
+    if (name == "2.16.840.1.101.3.4.3.17") {
+        return SignatureFamily::ml_dsa_44;
+    }
+    if (name == "2.16.840.1.101.3.4.3.18") {
+        return SignatureFamily::ml_dsa_65;
+    }
+    if (name == "2.16.840.1.101.3.4.3.19") {
+        return SignatureFamily::ml_dsa_87;
+    }
+    if (name == sm2_curve || name == "1.2.156.10197.1.501") { // SM2, SM2 with SM3
+        return SignatureFamily::sm2;
+    }
+    return SignatureFamily::other;
+}
+
+/// The family of an algorithm identifier, with its parameter if an OID.
+[[nodiscard]] SignatureFamily family_of_algorithm(const X509_ALGOR* algorithm) {
+    const ASN1_OBJECT* oid = nullptr;
+    int type = 0;
+    const void* parameter = nullptr;
+    X509_ALGOR_get0(&oid, &type, &parameter, algorithm);
+    return family_of_oid(oid, type == V_ASN1_OBJECT ? static_cast<const ASN1_OBJECT*>(parameter)
+                                                    : nullptr);
+}
+
+/// A certificate's two algorithms (v0.21): its key's, and its own
+/// signature's (its issuer's key's).
+[[nodiscard]] std::pair<SignatureFamily, SignatureFamily> families_of(X509* certificate) {
+    X509_ALGOR* key_algorithm = nullptr;
+    X509_PUBKEY_get0_param(nullptr, nullptr, nullptr, &key_algorithm,
+                           X509_get_X509_PUBKEY(certificate));
+    const X509_ALGOR* signature_algorithm = nullptr;
+    X509_get0_signature(nullptr, &signature_algorithm, certificate);
+    const SignatureFamily key =
+        key_algorithm != nullptr ? family_of_algorithm(key_algorithm) : SignatureFamily::other;
+    const SignatureFamily signature = signature_algorithm != nullptr
+                                          ? family_of_algorithm(signature_algorithm)
+                                          : SignatureFamily::other;
+    forget_errors();
+    return {key, signature};
+}
+
+/// The store of the roots a caller trusts.
+[[nodiscard]] Result<X509StorePtr> store_of(std::span<const Bytes> trusted_roots) {
+    X509StorePtr roots(X509_STORE_new());
+    if (!roots) {
+        forget_errors();
+        return fail(Errc::crypto_failure, "preparing to verify the token failed");
+    }
+    for (const Bytes& der : trusted_roots) {
+        const auto root = parse_certificate(der);
+        if (!root) {
+            return std::unexpected(root.error());
+        }
+        if (X509_STORE_add_cert(roots.get(), root->get()) != 1) {
+            forget_errors();
+        }
+    }
+    return roots;
+}
+
+/// A token checked by OpenSSL's CMS code (v0.21: one whose signing
+/// certificate's key is ML-DSA, which its PKCS #7 code does not know, or
+/// SM2, whose signatures that code does not verify), as
+/// `openssl cms -verify` checks one: without `store`, its one signature with
+/// the signing certificate it carries; with `store`, also that certificate's
+/// chain to an anchor there at `at` (Unix seconds), for time stamping (its
+/// critical id-kp-timeStamping usage), and its signing-certificate attribute
+/// (RFC 5816), as `TS_RESP_verify_token` checks a classical token.
+[[nodiscard]] bool cms_verifies(ByteView token, X509_STORE* store, std::int64_t at) {
+    const unsigned char* p = token.data();
+    const CmsPtr cms(d2i_CMS_ContentInfo(nullptr, &p, static_cast<long>(token.size())));
+    if (!cms || p != token.data() + token.size()) {
+        forget_errors();
+        return false;
+    }
+    STACK_OF(CMS_SignerInfo)* infos = CMS_get0_SignerInfos(cms.get());
+    const BioPtr out(BIO_new(BIO_s_mem()));
+    if (infos == nullptr || sk_CMS_SignerInfo_num(infos) != 1 || !out) {
+        forget_errors();
+        return false;
+    }
+    unsigned int flags = static_cast<unsigned int>(CMS_BINARY);
+    if (store == nullptr) {
+        flags |= static_cast<unsigned int>(CMS_NO_SIGNER_CERT_VERIFY);
+    } else {
+        X509_VERIFY_PARAM* param = X509_STORE_get0_param(store);
+        X509_VERIFY_PARAM_set_time(param, static_cast<time_t>(at));
+        X509_VERIFY_PARAM_set_purpose(param, X509_PURPOSE_TIMESTAMP_SIGN);
+        flags |= static_cast<unsigned int>(CMS_CADES);
+    }
+    const bool ok = CMS_verify(cms.get(), nullptr, store, nullptr, out.get(), flags) == 1;
+    forget_errors();
+    return ok;
+}
+
 /// Verifies the token's signature, its signing-certificate attribute, and its
 /// signing certificate's chain to an anchor in `store`, for time stamping, at
 /// `at` (Unix seconds).
@@ -290,8 +424,25 @@ Result<TimestampToken> Provider::do_read_timestamp(ByteView token,
         return std::unexpected(key.error());
     }
     out.authority_key = std::move(*key);
+    // Its signature's algorithm and its certificate's (v0.21).
+    std::tie(out.signature_family, out.certificate_family) = families_of(signer);
 
     const auto at = static_cast<std::int64_t>(out.time / 1000);
+    // An ML-DSA or SM2 token, through CMS: the same two checks.
+    if (is_post_quantum(out.signature_family) || out.signature_family == SignatureFamily::sm2) {
+        if (!cms_verifies(token, nullptr, at)) {
+            return fail(Errc::verification_failed,
+                        "the time-stamp token does not verify with its signing certificate");
+        }
+        if (!trusted_roots.empty()) {
+            auto roots = store_of(trusted_roots);
+            if (!roots) {
+                return std::unexpected(roots.error());
+            }
+            out.trusted = cms_verifies(token, roots->get(), at);
+        }
+        return out;
+    }
     // First its signature alone: does the token verify at all?
     if (!signature_verifies(pkcs7.get(), signer)) {
         return fail(Errc::verification_failed,
@@ -299,21 +450,11 @@ Result<TimestampToken> Provider::do_read_timestamp(ByteView token,
     }
     // Then with the roots the caller trusts.
     if (!trusted_roots.empty()) {
-        X509StorePtr roots(X509_STORE_new());
+        auto roots = store_of(trusted_roots);
         if (!roots) {
-            forget_errors();
-            return fail(Errc::crypto_failure, "preparing to verify the token failed");
+            return std::unexpected(roots.error());
         }
-        for (const Bytes& der : trusted_roots) {
-            const auto root = parse_certificate(der);
-            if (!root) {
-                return std::unexpected(root.error());
-            }
-            if (X509_STORE_add_cert(roots.get(), root->get()) != 1) {
-                forget_errors();
-            }
-        }
-        out.trusted = token_verifies(pkcs7.get(), std::move(roots), at);
+        out.trusted = token_verifies(pkcs7.get(), std::move(*roots), at);
     }
     return out;
 }

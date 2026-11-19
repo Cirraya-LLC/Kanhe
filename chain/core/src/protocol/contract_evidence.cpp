@@ -141,6 +141,8 @@ Result<ContractConsentCheck> check_contract_consent(const crypto::Provider& prov
     options.trusted_witnesses = trusted.trusted_witnesses;
     options.trusted_network_witnesses = trusted.trusted_network_witnesses;
     options.trusted_timestamp_roots = trusted.trusted_timestamp_roots;
+    // The algorithms the verifier distrusts (v0.21), on every party's ledger.
+    options.distrust = trusted.distrust;
     auto report = verify_bundle(provider, bundle, options);
     if (!report) {
         return std::unexpected(report.error());

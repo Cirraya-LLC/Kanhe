@@ -578,7 +578,7 @@ Console::access_draft(const Signed& who, const nlohmann::json& intent) const {
     }
     // The note is the record's one private field.
     const std::vector<protocol::RecordField> fields{
-        {"note", services_.entropy->bytes<16>(), cbor::Value::text(note)}};
+        {"note", services_.entropy->bytes<protocol::salt_size>(), cbor::Value::text(note)}};
     const auto commitment = protocol::commit_fields(*services_.provider, served->hash(), fields);
     if (!commitment) {
         return error(500, "internal", "the note could not be committed");

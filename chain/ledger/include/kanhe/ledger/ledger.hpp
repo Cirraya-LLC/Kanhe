@@ -351,6 +351,23 @@ public:
     /// from `old_size` and every key rotation below its size.
     [[nodiscard]] Result<protocol::CosignRequest> cosign_request(std::uint64_t old_size) const;
 
+    /// A renewal (spec v0.21, section 11.1) for evidence whose checkpoint,
+    /// or last renewal, is of size `from`: a stored checkpoint of size
+    /// `size` (the latest checkpoint's size without one), the consistency
+    /// proof from `from` (none when the sizes are equal), every rotation of
+    /// the root key or the log key at an index from `from` to its size - 1
+    /// with its path in its tree (as a cosign request carries them), and
+    /// every witness cosignature, time-stamp token, and network cosignature
+    /// stored beside it. Of several stored checkpoints of that size, the
+    /// newest that a cosignature or a token attests; network cosignatures
+    /// attest a size and root, so they go with whichever is chosen. Read
+    /// only. Fails with Errc::invalid_argument if `from` or `size` is 0 or
+    /// `from` is above `size`, and with Errc::not_found if no checkpoint of
+    /// `size` is stored (without `size`: the latest is smaller than `from`)
+    /// or none of that size is attested.
+    [[nodiscard]] Result<protocol::Renewal>
+    renewal(std::uint64_t from, std::optional<std::uint64_t> size = std::nullopt) const;
+
     /// Every stored checkpoint, oldest first (for backups and audits; the
     /// API pages through them).
     [[nodiscard]] Result<std::vector<protocol::SignedCheckpoint>> checkpoints() const;

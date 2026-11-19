@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string_view>
 
 #include <kanhe/core/bytes.hpp>
@@ -22,13 +24,23 @@ struct Envelope {
 };
 
 /// Signs `payload` with the protected header {alg, content type, kid}, where
-/// kid identifies the signer's key under `hash`.
+/// kid identifies the signer's key under `hash`. With `iat` (a witness's
+/// dated cosignature, spec v0.21), the header also holds the CWT claims
+/// {15: {6: iat}}.
 [[nodiscard]] Result<Bytes> sign_envelope(const crypto::Signer& signer,
                                           const crypto::Provider& provider, crypto::HashAlg hash,
-                                          ByteView payload, std::string_view content_type);
+                                          ByteView payload, std::string_view content_type,
+                                          std::optional<std::uint64_t> iat = std::nullopt);
 
 /// Parses a signed object and checks its header shape and content type.
 [[nodiscard]] Result<Envelope> parse_envelope(ByteView encoded, std::string_view content_type);
+
+/// The same for a witness's cosignature (spec v0.21), whose protected header
+/// may also hold the CWT claims (label 15): exactly {6: iat}, iat an
+/// unsigned integer, which `iat` is then set to (nullopt without them).
+/// Anything else at label 15 is malformed.
+[[nodiscard]] Result<Envelope> parse_dated_envelope(ByteView encoded, std::string_view content_type,
+                                                    std::optional<std::uint64_t>& iat);
 
 /// Verifies an envelope's signature with `key`, which must be the key that
 /// `kid` names under `hash`.

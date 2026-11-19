@@ -46,6 +46,7 @@ add_executable(kanhe_tests
     core/protocol_v016_test.cpp
     core/protocol_v018_test.cpp
     core/protocol_v020_test.cpp
+    core/protocol_v021_test.cpp
     core/exchange_test.cpp
     core/vm_test.cpp
     crypto/openssl_test.cpp
@@ -75,6 +76,7 @@ add_executable(kanhe_tests
     ledger/witness_test.cpp
     node/api_test.cpp
     node/approvals_api_test.cpp
+    node/renewal_api_test.cpp
     node/record_files_test.cpp
     node/credentials_test.cpp
     node/published_test.cpp
@@ -405,6 +407,16 @@ if(TARGET kanhe_crypto_pkcs11)
         message(STATUS "SoftHSM not found: skipping the token tests")
     endif()
 endif()
+
+# Evidence for decades: a classical ledger moved to ML-DSA keys, an ML-DSA
+# witness, and old evidence renewed. With SoftHSM, guardians approve each
+# rotation too (their hardware keys stand in).
+set(longterm_arguments $<TARGET_FILE:kanhe>)
+if(KANHE_SOFTHSM_UTIL AND KANHE_SOFTHSM_MODULE)
+    list(APPEND longterm_arguments ${KANHE_SOFTHSM_MODULE})
+endif()
+add_test(NAME longterm_end_to_end
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/longterm.sh ${longterm_arguments})
 
 # The benchmark's scenarios at a small scale, so that they keep
 # working; their numbers are not checked here. Contracts are Bo builds, so

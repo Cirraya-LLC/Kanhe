@@ -1605,7 +1605,8 @@ TEST_CASE("the owner registers a document with fields and a file, kept with it",
     CHECK(summary["fields"].size() == 2);
     CHECK(summary["metadata"]["caption"] == "sunset");
     REQUIRE(summary["files"].size() == 1);
-    CHECK(summary["files"][0]["salt"].get<std::string>().size() == 22);
+    // A 32-byte salt (spec v0.21), in base64url.
+    CHECK(summary["files"][0]["salt"].get<std::string>().size() == 43);
 
     const auto approved = approve(f.w, token, prepared, f.alice);
     REQUIRE(approved.status == 201);

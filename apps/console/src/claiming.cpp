@@ -154,7 +154,8 @@ Console::claim_draft(const Signed& who, const nlohmann::json& intent) const {
     // The claim's own fields: the values it was checked against, sealed.
     std::vector<protocol::RecordField> fields;
     for (const auto& [name, value] : check.basis) {
-        fields.push_back({name, services_.entropy->bytes<16>(), cbor::Value::text(value)});
+        fields.push_back(
+            {name, services_.entropy->bytes<protocol::salt_size>(), cbor::Value::text(value)});
     }
     const auto commitment = protocol::commit_fields(*services_.provider, served->hash(), fields);
     if (!commitment) {
@@ -270,7 +271,8 @@ void Console::answer_questions() const {
             claim.holds = true;
             std::vector<protocol::RecordField> fields;
             for (const auto& [name, value] : check.basis) {
-                fields.push_back({name, services_.entropy->bytes<16>(), cbor::Value::text(value)});
+                fields.push_back({name, services_.entropy->bytes<protocol::salt_size>(),
+                                  cbor::Value::text(value)});
             }
             const auto commitment =
                 protocol::commit_fields(*services_.provider, state.hash(), fields);

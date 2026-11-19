@@ -52,7 +52,10 @@ void add_witnessed(const std::filesystem::path& dir, const WitnessState& state);
 /// What a witness does with a cosign request: checks it against the state
 /// in `dir` and, if the checkpoint extends what this witness cosigned
 /// before, cosigns it with `key` and advances the state (cosigned at
-/// `now`). Asking again for the checkpoint cosigned last gets it cosigned
+/// `now`). Every cosignature is dated (spec v0.21): it carries `now` in
+/// whole seconds as its time, the witness's word of when it saw the tree.
+/// The key may be of any algorithm, ML-DSA included. Asking again for the
+/// checkpoint cosigned last gets it cosigned
 /// again (a lost answer can be retried). Fails with Errc::not_found (a ledger
 /// this witness does not follow), Errc::rejected (the proof starts elsewhere
 /// than the witness's size), or Errc::verification_failed (not signed by the

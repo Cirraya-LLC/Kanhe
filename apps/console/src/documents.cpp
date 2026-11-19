@@ -166,7 +166,8 @@ Console::register_draft(const nlohmann::json& intent, const std::string& user) c
             return "the field " + (f.label.empty() ? f.name : f.label) + " is " + *problem;
         }
         if (f.is_private) {
-            fields.push_back({f.name, services_.entropy->bytes<16>(), cbor::Value::text(value)});
+            fields.push_back({f.name, services_.entropy->bytes<protocol::salt_size>(),
+                              cbor::Value::text(value)});
         } else {
             metadata.push_back({cbor::Value::text(f.name), cbor::Value::text(value)});
         }
@@ -250,7 +251,7 @@ Console::register_draft(const nlohmann::json& intent, const std::string& user) c
             return "two files are named " + u.name;
         }
         const Bytes content = client::read_file(u.path);
-        const client::VaultAttachment salt{u.name, services_.entropy->bytes<16>()};
+        const client::VaultAttachment salt{u.name, services_.entropy->bytes<protocol::salt_size>()};
         const auto digest =
             protocol::attachment_commitment(*services_.provider, hash, salt.salt, content);
         if (!digest || content.size() != u.size) {
