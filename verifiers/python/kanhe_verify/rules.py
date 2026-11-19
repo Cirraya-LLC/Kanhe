@@ -157,6 +157,7 @@ class Ledger(contracts.ContractRules):
         self.statement_ids = {sid}
         self.nonces = {(sid, statement.nonce)}
         self.log_keys = [(0, log)]  # (index of the statement that set it, key)
+        self.root_keys = [(0, root)]  # likewise for the root key (v0.21: the long-term status)
         self.root_rotations = 0
         self.applied: dict[int, Applied] = {
             0: Applied(index=0, registered_at=entry.registered_at, statement=statement, id=sid, signer=sid,
@@ -475,6 +476,7 @@ class Ledger(contracts.ContractRules):
         target.history.append(applied.index)
         if target.id == self.id:
             self.root_rotations += 1
+            self.root_keys.append((applied.index, f["key"]))
 
     def _actor_revoke(self, applied: Applied, signer, chain):
         target = self._target_actor(applied.statement.fields["target"])

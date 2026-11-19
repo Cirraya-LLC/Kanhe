@@ -7,7 +7,10 @@ header holding exactly alg (1), content type (3), and kid (4), an empty
 unprotected header, and an attached payload. Receipts (section 8, RFC 9942)
 differ: their protected header is exactly {1: alg, 4: kid, 395: vds}, the
 unprotected header is {396: {-1: [inclusion proof]}}, and the payload is
-detached (it is the Merkle root at the proof's tree size).
+detached (it is the Merkle root at the proof's tree size). A witness's
+cosignature may also hold, from v0.21, the CWT Claims header parameter
+(RFC 9597, label 15) with exactly the claim iat (6): the witness's time, in
+whole seconds (section 10).
 """
 
 from __future__ import annotations
@@ -24,6 +27,10 @@ CHECKPOINT_TYPE = "application/kanhe-checkpoint+cbor"
 COSIGNATURE_TYPE = "application/kanhe-cosignature+cbor"
 STATE_TYPE = "application/kanhe-state+cbor"
 APPROVAL_TYPE = "application/kanhe-approval+cbor"  # v0.20, section 5.1
+
+# RFC 9597's CWT Claims header parameter, and the claim iat (RFC 8392).
+CWT_CLAIMS_LABEL = 15
+IAT_CLAIM = 6
 
 # RFC 9942 header parameters.
 VDS_LABEL = 395
@@ -43,6 +50,7 @@ class Sign1:
     payload: bytes | None
     signature: bytes
     content_type: str | None = None
+    iat: int | None = None  # v0.21: a dated cosignature's time, in seconds
 
     def to_be_signed(self, payload: bytes | None = None) -> bytes:
         """The Sig_structure (RFC 9052 section 4.4), empty external_aad."""
@@ -82,11 +90,23 @@ def _envelope(data, what: str):
     return header, protected, unprotected, payload, signature
 
 
-def parse_sign1(data: bytes, content_type: str, what: str) -> Sign1:
-    """A signed statement, checkpoint, cosignature, or state commitment."""
+def parse_sign1(data: bytes, content_type: str, what: str, dated: bool = False) -> Sign1:
+    """A signed statement, checkpoint, cosignature, or state commitment.
+    With `dated` (a witness's cosignature, v0.21), the protected header may
+    also hold label 15, which must be exactly {6: iat}, iat an unsigned
+    integer."""
     header, protected, unprotected, payload, signature = _envelope(data, what)
+    iat = None
+    if dated and CWT_CLAIMS_LABEL in header:
+        claims = header[CWT_CLAIMS_LABEL]
+        if not (isinstance(claims, dict) and set(claims) == {IAT_CLAIM} and _int(claims[IAT_CLAIM])
+                and claims[IAT_CLAIM] >= 0):
+            raise VerifyError(f"{what}'s CWT claims (header 15) must hold exactly iat (6), an unsigned integer")
+        iat = claims[IAT_CLAIM]
+        header = {k: v for k, v in header.items() if k != CWT_CLAIMS_LABEL}
     if set(header) != {1, 3, 4}:
-        raise VerifyError(f"{what}'s protected header must hold exactly alg, content type, and kid")
+        raise VerifyError(f"{what}'s protected header must hold exactly alg, content type, and kid"
+                          + (", and its time (15)" if dated else ""))
     alg, ct, kid = header[1], header[3], header[4]
     if not _int(alg):
         raise VerifyError(f"{what}'s alg is not an integer")
@@ -99,7 +119,7 @@ def parse_sign1(data: bytes, content_type: str, what: str) -> Sign1:
     if not isinstance(payload, bytes):
         raise VerifyError(f"{what} has no attached payload")
     return Sign1(alg=alg, kid=kid, protected=protected, payload=payload, signature=signature,
-                 content_type=ct)
+                 content_type=ct, iat=iat)
 
 
 def parse_receipt(data: bytes, what: str = "a receipt") -> Receipt:

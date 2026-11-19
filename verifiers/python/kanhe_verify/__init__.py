@@ -9,8 +9,9 @@ log key in effect, a replay of the ledger rules (contracts included: every
 call's contract runs again, section 14), proof of presence, disclosures and
 attachments, state proofs (completeness), witness cosignatures, RFC 3161
 time-stamp tokens, open witness networks' cosignatures of checkpoint
-notes (section 10.2), and membership proofs from trust nodes (v0.16, bundle
-key 9). And it verifies an instance's contract evidence (section
+notes (section 10.2), membership proofs from trust nodes (v0.16, bundle
+key 9), and renewals, the long-term status, and distrusted algorithms
+(v0.21, bundle key 11, section 11.1). And it verifies an instance's contract evidence (section
 15): its bundle, every consent its calls cite, and the requests and answers
 the calls derive.
 

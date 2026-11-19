@@ -11,7 +11,7 @@ verifiers' reports can be compared field by field.
 
 from __future__ import annotations
 
-from . import approvals, cbor, claims, crypto, rules
+from . import approvals, cbor, claims, crypto, longterm, rules
 from .evidence import Report
 from .protocol import (AGENT, CONTRACT_CALL, ORGANIZATION, PERSON, RECORD_ENDORSE, RECORD_REGISTER, RECORD_REVOKE,
                        RECORD_TRANSITION, STATEMENT_TYPE_NAMES)
@@ -58,8 +58,101 @@ def witnesses_json(report: Report) -> dict:
     and each open-network cosignature with the size it cosigned and its
     time (v0.13)."""
     return {"trusted": report.witnesses_trusted, "untrusted": report.witnesses_untrusted,
-            "network": [{"witness": n.witness, "size": n.size, "time": iso_time(n.time * 1000), "trusted": n.trusted}
-                        for n in report.network]}
+            "network": _network_json(report.network)}
+
+
+def _network_json(items: list) -> list:
+    return [{"witness": n.witness, "size": n.size, "time": iso_time(n.time * 1000), "trusted": n.trusted}
+            for n in items]
+
+
+def _tokens_json(items: list) -> list:
+    return [{"checkpoint_size": t.checkpoint_size, "time": iso_time(t.info.time_ms), "accuracy_ms": t.info.accuracy_ms,
+             "authority": t.info.authority, "trusted": t.info.trusted} for t in items]
+
+
+def renewals_json(report: Report) -> list:
+    """The renewals (v0.21, section 11.1), in order: each checkpoint, the log
+    key that signed it, the rotations it carries, and its witnesses and
+    tokens, shaped as the report's own."""
+    return [{"tree_size": r.checkpoint.tree_size, "root": r.checkpoint.root.hex(),
+             "timestamp": iso_time(r.checkpoint.timestamp), "log_key": _key(r.log_key),
+             "log_key_rotations": r.log_key_rotations, "root_key_rotations": r.root_key_rotations,
+             "witnesses": {"trusted": r.witnesses_trusted, "untrusted": r.witnesses_untrusted,
+                           "network": _network_json(r.network)},
+             "timestamps": _tokens_json(r.tokens)} for r in report.renewals]
+
+
+def long_term_json(report: Report) -> dict:
+    """The long-term status (v0.21, section 11.1): the latest covering
+    checkpoint with a post-quantum attestation, and those attestations; or
+    none, and the date to renew before."""
+    s = report.long_term
+    if s is None or s.checkpoint is None:
+        return {"post_quantum": False, "checkpoint": None, "attested_by": [],
+                "renew_before": iso_time(longterm.RENEW_BEFORE_MS)}
+    return {"post_quantum": True,
+            "checkpoint": {"tree_size": s.checkpoint.tree_size, "timestamp": iso_time(s.checkpoint.timestamp),
+                           "renewal": s.renewal},
+            "attested_by": [{"kind": kind, "by": by, "algorithm": algorithm, "time": iso_time(time)}
+                            for kind, by, algorithm, time in s.attested_by],
+            "renew_before": None}
+
+
+def _attestation_json(a) -> dict:
+    return {"kind": a.kind, "by": a.by, "checkpoint_size": a.checkpoint_size, "anchor": a.anchor,
+            "renewal": a.renewal}
+
+
+def distrust_json(report: Report) -> dict | None:
+    """The algorithms the verifier distrusts (v0.21, section 11.1), the
+    attestations set aside, and each signature by them that the evidence
+    relies on, with the dated attestation that covers it."""
+    if not report.distrust:
+        return None
+    return {"algorithms": [{"algorithm": name, "after": iso_time(ms)} for name, ms in report.distrust.items()],
+            "set_aside": [{**_attestation_json(a), "algorithm": next(x for x in a.algorithms if x in report.distrust)}
+                          for a in report.set_aside],
+            "signatures": [{"signed": d.signed, "index": d.index, "tree_size": d.tree_size,
+                            "approver": d.approver.hex() if d.approver is not None else None, "anchor": d.anchor,
+                            "renewal": d.renewal, "algorithm": d.algorithm,
+                            "covered_by": {**_attestation_json(d.covered_by),
+                                           "time": iso_time(d.covered_by.dated_by)}}
+                           for d in report.distrusted]}
+
+
+def long_term_text(report: Report) -> list:
+    lines = []
+    for n, r in enumerate(report.renewals, start=1):
+        c = r.checkpoint
+        rotated = ""
+        if r.log_key_rotations or r.root_key_rotations:
+            rotated = (f"; followed {r.log_key_rotations} log key and {r.root_key_rotations} root key "
+                       "rotation(s)")
+        lines.append(f"  Renewal {n:<4} size {c.tree_size}, signed {human_time(c.timestamp)} by its "
+                     f"{r.log_key.name} log key{rotated}")
+        lines.append(f"               {r.witnesses_trusted} trusted witness(es), "
+                     f"{sum(1 for t in r.tokens if t.info.trusted)} trusted time-stamp(s)")
+    s = report.long_term
+    if s is None or s.checkpoint is None:
+        lines.append("  Long term    no post-quantum attestation: this evidence rests on classical signatures;")
+        lines.append(f"               renew it with one before {human_time(longterm.RENEW_BEFORE_MS)[:10]} "
+                     "(NIST IR 8547)")
+    else:
+        where = "the bundle's checkpoint" if s.renewal is None else f"renewal {s.renewal}"
+        words = {"witness": lambda b: f"witness {b[:12]}", "timestamp": lambda b: f"time-stamp authority {b}",
+                 "network-witness": lambda b: f"network witness {b}", "log-key": lambda b: f"its log key {b[:12]}"}
+        by = ", ".join(f"{words[kind](by)} ({algorithm})" for kind, by, algorithm, _ in s.attested_by)
+        lines.append(f"  Long term    post-quantum: {where}, size {s.checkpoint.tree_size}, attested by {by}")
+    if report.distrust:
+        for name, ms in report.distrust.items():
+            count = sum(1 for d in report.distrusted if d.algorithm == name)
+            lines.append(f"  Distrusted   {name} from {human_time(ms)[:10]}: {count} signature(s), each in a tree "
+                         "attested before then")
+        for a in report.set_aside:
+            lines.append(f"               set aside: {a.kind} {a.by[:24]} (size {a.checkpoint_size}): "
+                         "relied on for nothing")
+    return lines
 
 
 def witnesses_text(report: Report) -> list:
@@ -472,9 +565,7 @@ def to_json(report: Report) -> dict:
         "timestamps": {
             "trusted_authorities": report.trusted_authorities,
             "existed_by": iso_time(report.existed_by.get(registration)),
-            "tokens": [{"checkpoint_size": t.checkpoint_size, "time": iso_time(t.info.time_ms),
-                        "accuracy_ms": t.info.accuracy_ms, "authority": t.info.authority,
-                        "trusted": t.info.trusted} for t in report.tokens],
+            "tokens": _tokens_json(report.tokens),
         },
         "record": _subject_json(report),
         "events": [_event_json(report, applied) for applied in report.events],
@@ -484,6 +575,9 @@ def to_json(report: Report) -> dict:
         "scripts": [script_json(report, s) for s in report.scripts],
         "sources": [source_json(s) for s in report.sources],
         "guardians": guardians_json(ledger),
+        "renewals": renewals_json(report),
+        "long_term": long_term_json(report),
+        "distrust": distrust_json(report),
         "complete": report.complete,
         "state_commitment": None if report.commitment is None else {
             "index": report.commitment_index, "state_root": report.commitment.root.hex(),
@@ -526,6 +620,7 @@ def to_text(report: Report) -> str:
                      f"{ledger.root_rotations} time(s); every rotation checked")
     lines += witnesses_text(report)
     lines += guardians_text(ledger)
+    lines += long_term_text(report)
     if report.tokens:
         lines.append(f"  Time-stamps  {report.trusted_authorities} trusted authorit"
                      f"{'y' if report.trusted_authorities == 1 else 'ies'}")
@@ -597,4 +692,5 @@ def to_text(report: Report) -> str:
 __all__ = ["actor_json", "approval_json", "approvals_of", "approvals_text", "authority_json", "by_whom", "claim_json",
            "guardians_json", "guardians_text", "human_time", "iso_time", "membership_json", "rule_json",
            "membership_text", "presence_json", "provenance_json", "source_status", "to_json", "to_text",
+           "distrust_json", "long_term_json", "long_term_text", "renewals_json",
            "witnesses_json", "witnesses_text"]

@@ -37,6 +37,7 @@ class PresenceResult:
     origin: str
     rp_id: str
     label: str | None
+    alg: int = 0  # the credential key's COSE algorithm, whose signature the proof is (v0.21, section 11.1)
 
 
 def challenge(h, statement: protocol.Statement) -> bytes:
@@ -106,7 +107,7 @@ def verify_proof(proof: protocol.PresenceProof, credentials: list, expected: byt
             raise VerifyError("the hardware key's proof of presence does not verify")
         # A hardware key's proof counts as user-verified (section 7).
         return PresenceResult(method="hardware-key", user_verified=True, origin="", rp_id="",
-                              label=credential.label)
+                              label=credential.label, alg=credential.key.alg)
     if proof.authenticator_data is None:
         raise VerifyError("a passkey's proof lacks its WebAuthn data")
     auth = proof.authenticator_data
@@ -125,4 +126,4 @@ def verify_proof(proof: protocol.PresenceProof, credentials: list, expected: byt
     if not ok:
         raise VerifyError("a passkey assertion's signature does not verify")
     return PresenceResult(method="webauthn", user_verified=bool(flags & FLAG_USER_VERIFIED), origin=origin,
-                          rp_id=credential.rp_id, label=credential.label)
+                          rp_id=credential.rp_id, label=credential.label, alg=credential.key.alg)

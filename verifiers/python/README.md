@@ -41,7 +41,16 @@ It verifies an evidence bundle (spec section 11), a record's or an instance's, e
   the rules that protect approvers' keys and credentials and keep guardians from being revoked
   below k; every approver and guardian an involved object; and, for each event, the rules that
   applied, who approved, how, and what counted, with the guardians in effect
-  (`kanhe_verify/approvals.py`).
+  (`kanhe_verify/approvals.py`);
+- long-term evidence (spec v0.21): a bundle's renewals (key 11), each a newer checkpoint proven
+  consistent with the one before it, with the rotations of the root and log keys in between,
+  followed as a witness follows them, and its cosignatures, tokens, and network cosignatures
+  checked and counted as the bundle's own; the long-term status, the latest post-quantum
+  attestation that covers the bundle; dated witness cosignatures (the witness's time as CWT
+  claims with only iat, protected header label 15); algorithms distrusted from a date
+  (`--distrust`), whose attestations are set aside and whose every signature must be covered by
+  a dated attestation (a token, a network cosignature, or a dated witness cosignature) before
+  that date; and field and attachment salts of 16 or 32 bytes (`kanhe_verify/longterm.py`).
 
 And it verifies an instance's contract evidence (sections 14 and 15):
 
@@ -85,8 +94,8 @@ JSON fields:
 
 | This verifier | Mirrors | Options besides `--json` |
 |---|---|---|
-| `python3 -m kanhe_verify BUNDLE` | `kanhe verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--attachment NAME=FILE` |
-| `python3 -m kanhe_verify contract FILE` | `kanhe contract verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--require-presence`, `--require-answered`, `--deploy-out FILE` |
+| `python3 -m kanhe_verify BUNDLE` | `kanhe verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--distrust ALG@YYYY-MM-DD`, `--attachment NAME=FILE` |
+| `python3 -m kanhe_verify contract FILE` | `kanhe contract verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--distrust ALG@YYYY-MM-DD`, `--require-presence`, `--require-answered`, `--deploy-out FILE` |
 
 Exit codes: 0 verified, 1 a usage error, 2 an input file that cannot be read (or a
 `--deploy-out` file that cannot be written), 3 not verified.
@@ -100,7 +109,12 @@ Nothing cryptographic is implemented here:
 
 - Ed25519, ECDSA P-256, and ML-DSA come from the `cryptography` package;
 - SHA-256 and SM3 come from `hashlib`;
-- SM2 and the CMS signatures of time-stamp tokens come from the `openssl` command line.
+- SM2 and the CMS signatures of time-stamp tokens come from the `openssl` command line. Its
+  `ts -verify` reads a token as PKCS #7, which has no ML-DSA and does not verify SM2, so a
+  token whose signing certificate's key is ML-DSA or SM2 is checked with `cms -verify -purpose
+  timestampsign -cades -attime`, the same conditions of trust. An authority is the SHA-256 of
+  its certificate's SubjectPublicKeyInfo, read from the certificate's bytes (`cryptography`
+  loads no SM2 key).
 
 `--trust-node` takes a trust node the verifier believes: its ledger id (64 hex digits) and the
 name the report gives it, repeatable; a ledger named twice is a usage error. The JSON report's
@@ -125,6 +139,12 @@ an agent's `model`, `model_version`, `responsible`; presence as an event's, or n
   the names of the types key 2 lists), or null; and `settings`, every guardian setting the bundle
   holds, in log order, each `{index, registered_at, removed, k, within_ms, guardians, guards,
   rules, approvals}` (a removal has `k`, `within_ms`, and `guards` null and no `guardians`).
+
+Long-term evidence (spec v0.21) appears in the JSON report as `renewals`, `long_term`, and
+`distrust`, with the fields section 11.1 of the specification defines, which `kanhe verify --json`
+shares. `--distrust ALG@YYYY-MM-DD` (repeatable) names `ed25519`, `ecdsa`, `sm2`, `rsa`,
+`ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87`, or `classical`; an unknown name, a date that is none, and an
+algorithm named twice are usage errors.
 
 `--witness-vkey` takes an open network's witness by its verifier key,
 `<name>+<key ID>+<base64(type || key)>` (c2sp.org/signed-note), of signature type 0x04 (Ed25519)
@@ -198,6 +218,9 @@ list, and `--trust-node`), `tests/test_approvals.py` for approvals and guardians
 (`protocol-v0.20.json`: approval rules, guardian settings, and approvals decoded and refused, each
 for its rule; a log for each hash, every statement's rules and approvals as the vectors state
 them, every refused statement for its rule, and the logs that do not parse),
+`tests/test_renewals.py` for long-term evidence (`protocol-v0.21.json`: salts, renewals, and the
+distrust option read and refused; the archive ledger's renewal parts; and every bundle verified
+with its options, to its verdict and facts),
 `tests/test_network.py` for open witness networks (`protocol-v0.13.json`: the origin, the note,
 the note key's signed note, verifier keys, every cosignature's verdict and time, the anchor, in
 bundles too, and signed-note's own example), and `tests/test_contracts.py` for the profile (`vm-v1.json`), contracts, parts, requests and

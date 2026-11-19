@@ -49,6 +49,10 @@ def flags(options: dict, work: str) -> list[str]:
         out += ["--min-timestamps", str(options["min_timestamps"])]
     for i, (name, content) in enumerate(options.get("attachments", {}).items()):
         out += ["--attachment", f"{name}={file(f'attachment-{i}', bytes.fromhex(content))}"]
+    for vkey in options.get("witness_vkeys", []):
+        out += ["--witness-vkey", vkey]
+    for item in options.get("distrust", []):
+        out += ["--distrust", item]
     if options.get("require_presence"):
         out.append("--require-presence")
     if options.get("require_answered"):

@@ -6026,6 +6026,8 @@ def main() -> None:
     provenance_vectors.generate()
     import approval_vectors
     approval_vectors.generate()
+    import renewal_vectors
+    renewal_vectors.generate(args.openssl)
     generate_vm_v1()
     import evidence_suite
     evidence_suite.generate(args.openssl)

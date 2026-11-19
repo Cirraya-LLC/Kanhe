@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 
-from . import cbor, contract_report, credentials, crypto, network, report, timestamps
+from . import cbor, contract_report, credentials, crypto, longterm, network, report, timestamps
 from .contract_evidence import verify_contract_evidence
 from .errors import UsageError, VerifyError
 from .evidence import verify_bundle
@@ -50,6 +50,12 @@ def _common(p: argparse.ArgumentParser, issuer: str):
                    help="believe this trust node's memberships (spec v0.16, section 11): its ledger id (64 hex "
                         "digits) and the name to call it by, which the report gives it; a membership proof from "
                         "any other ledger is reported and relied on for nothing [repeatable]")
+    p.add_argument("--distrust", metavar="ALG@YYYY-MM-DD", action="append", default=[],
+                   help="distrust an algorithm from a date (spec v0.21, section 11.1): ed25519, ecdsa, sm2, rsa, "
+                        "ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical (every one but ML-DSA). Attestations by it "
+                        "are relied on for nothing, and every signature by it must be in a tree that a trusted "
+                        "time-stamp token, network witness's cosignature, or dated witness cosignature, by an "
+                        "algorithm not distrusted, dated before that date, attested [repeatable]")
 
 
 def _bundle_parser() -> argparse.ArgumentParser:
@@ -239,6 +245,7 @@ def _bundle_main(argv: list[str]) -> int:
         ledger_id = _ledger_id(args.ledger_id)
         vkeys = _witness_vkeys(args.witness_vkey)
         nodes = _trust_nodes(args.trust_node)
+        distrust = longterm.parse_distrust(args.distrust)
     except UsageError as e:
         print(f"usage error: {e}", file=sys.stderr)
         return EXIT_USAGE
@@ -252,7 +259,7 @@ def _bundle_main(argv: list[str]) -> int:
         return EXIT_INPUT
     try:
         result = verify_bundle(data, ledger_id=ledger_id, witnesses=witnesses, tsa_roots_pem=roots,
-                               attachments=files, network_witnesses=vkeys, trust_nodes=nodes)
+                               attachments=files, network_witnesses=vkeys, trust_nodes=nodes, distrust=distrust)
     except VerifyError as e:
         return _not_verified(args, e)
     failure = _required(result, args)
@@ -267,6 +274,7 @@ def _contract_main(argv: list[str]) -> int:
         ledger_id = _ledger_id(args.ledger_id)
         vkeys = _witness_vkeys(args.witness_vkey)
         nodes = _trust_nodes(args.trust_node)
+        distrust = longterm.parse_distrust(args.distrust)
     except UsageError as e:
         print(f"usage error: {e}", file=sys.stderr)
         return EXIT_USAGE
@@ -279,7 +287,7 @@ def _contract_main(argv: list[str]) -> int:
         return EXIT_INPUT
     try:
         result = verify_contract_evidence(data, ledger_id=ledger_id, witnesses=witnesses, tsa_roots_pem=roots,
-                                          network_witnesses=vkeys, trust_nodes=nodes)
+                                          network_witnesses=vkeys, trust_nodes=nodes, distrust=distrust)
     except VerifyError as e:
         return _not_verified(args, e)
     if args.deploy_out is not None:

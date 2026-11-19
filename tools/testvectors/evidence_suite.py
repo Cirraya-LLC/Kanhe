@@ -394,18 +394,22 @@ class Forge:
 
     def record(self, by: bytes, kind: str = "example.org.report/1", *, delegation=None, fields=None, attachments=(),
                metadata=None, supersedes=None, presence=None, provenance=None, issued_at=None,
-               encode=None, approvals=()) -> bytes:
+               encode=None, approvals=(), salt_size=16, attachment_salt_size=None) -> bytes:
+        """A registration; its fields' and attachments' salts are 16 bytes,
+        or `salt_size` and `attachment_salt_size` (v0.21: 16 or 32, or
+        another size for a forgery)."""
         fields = {"note": "evidence suite"} if fields is None else fields
         ordered = sorted(fields.items(), key=lambda f: f[0].encode())
         tag = f"{self.name} {self.nonce}"
-        salts = [self.h(f"field salt {tag} {name}".encode())[:16] for name, _ in ordered]
+        attachment_salt_size = salt_size if attachment_salt_size is None else attachment_salt_size
+        salts = [self.h(f"field salt {tag} {name}".encode())[:salt_size] for name, _ in ordered]
         leaves = [g.dcbor([name, salt, value]) for (name, value), salt in zip(ordered, salts)]
         body = {1: kind, 2: self.merkle().mth(leaves), 3: len(leaves)}
         opened = {}
         if attachments:
             body[4] = []
             for name, media, content in attachments:
-                salt = self.h(f"attachment salt {tag} {name}".encode())[:16]
+                salt = self.h(f"attachment salt {tag} {name}".encode())[:attachment_salt_size]
                 body[4].append([name, media, len(content), self.h(salt + content)])
                 opened[name] = (salt, content)
         if metadata is not None:
@@ -799,7 +803,7 @@ class Suite:
     def add(self, name: str, description: str, kind: str, evidence: bytes, verified: bool, *, rule: str | None = None,
             facts: dict | None = None, ledger_id: bytes | None = None, witnesses=(), min_witnesses: int = 0,
             tsa_roots=(), min_timestamps: int = 0, attachments: dict | None = None, require_presence=False,
-            require_answered=False):
+            require_answered=False, witness_vkeys=(), distrust=()):
         assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", name) and name not in {c["name"] for c in self.cases}, name
         assert verified == (rule is None), name
         assert verified or not facts, name
@@ -820,6 +824,10 @@ class Suite:
             options["require_presence"] = True
         if require_answered:
             options["require_answered"] = True
+        if witness_vkeys:
+            options["witness_vkeys"] = list(witness_vkeys)
+        if distrust:
+            options["distrust"] = list(distrust)
         case = {"name": name, "description": description, "kind": kind, "evidence": evidence.hex(),
                 "options": options, "verified": verified}
         if rule is not None:
@@ -1974,7 +1982,9 @@ DESCRIPTION = (
     "`ledger_id` (the expected ledger, hex), `witnesses` (trusted witness keys, each the hex of a public key "
     "file, CBOR [alg, key]), `min_witnesses`, `tsa_roots` (trusted authorities' root certificates, PEM), "
     "`min_timestamps`, `attachments` (contents by name, hex), `require_presence` and `require_answered` "
-    "(contract evidence only); an option left out is not used. A verifier must reach `verified`. When verified, "
+    "(contract evidence only), and, from v0.21, `witness_vkeys` (trusted open-network witnesses' verifier keys, "
+    "c2sp.org/signed-note) and `distrust` (algorithms distrusted from a date, `ALG@YYYY-MM-DD`, spec section "
+    "11.1); an option left out is not used. A verifier must reach `verified`. When verified, "
     "its JSON report (the fields of `kanhe verify --json` or `kanhe contract verify --json`) must match "
     "`facts`, which hold only what was forged: a fact object matches a report object when every key of the fact "
     "is in the report and its value matches; a fact list matches a report list of the same length, element by "
@@ -1993,6 +2003,8 @@ def generate(openssl: str = "openssl") -> None:
         claim_cases(suite)
         contract_cases(suite)
         approval_cases(suite)
+        import renewal_vectors  # v0.21: renewals, the long-term status, distrust, and salts
+        renewal_vectors.suite_cases(suite)
     document = {"format": 1, "description": DESCRIPTION, "cases": suite.cases}
     OUT.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     counts = {}

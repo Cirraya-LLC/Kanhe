@@ -30,7 +30,7 @@ from kanhe_verify import cli  # noqa: E402
 
 SUITE = HERE.parents[2] / "testvectors" / "evidence-v1.json"
 OPTIONS = {"ledger_id", "witnesses", "min_witnesses", "tsa_roots", "min_timestamps", "attachments",
-           "require_presence", "require_answered"}
+           "require_presence", "require_answered", "witness_vkeys", "distrust"}
 
 
 def mismatches(fact, value, path: str = "") -> list[str]:
@@ -80,6 +80,10 @@ def run(case: dict, work: pathlib.Path) -> tuple[int, dict]:
         path = work / f"attachment-{i}"
         path.write_bytes(bytes.fromhex(content))
         argv += ["--attachment", f"{name}={path}"]
+    for vkey in options.get("witness_vkeys", []):
+        argv += ["--witness-vkey", vkey]
+    for item in options.get("distrust", []):
+        argv += ["--distrust", item]
     if options.get("require_presence"):
         argv.append("--require-presence")
     if options.get("require_answered"):

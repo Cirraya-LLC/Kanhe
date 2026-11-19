@@ -1,7 +1,7 @@
 ; SPDX-License-Identifier: Apache-2.0
 ; Copyright 2026 Cirraya
 ;
-; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.20 (draft); the
+; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.21 (draft); the
 ; wire protocol version (statement key 0) is 1.
 ;
 ; Revision history:
@@ -84,6 +84,11 @@
 ;         carried by a submission (key 5) and kept in the log entry (key 5),
 ;         ledger-set-guardians (statement type 9), approval files, and the
 ;         submission written down. Earlier objects remain valid.
+;   v0.21 long-term evidence: renewals in evidence bundles (key 11), newer
+;         attestations of the ledger's tree after the bundle's checkpoint;
+;         dated witness cosignatures (CWT claims with iat, header 15); field
+;         and attachment salts of 16 or 32 bytes. Earlier objects remain
+;         valid.
 ;
 ; Every structure is encoded as deterministic CBOR (RFC 8949 section 4.2.1) in
 ; the Kanhe profile: no floats, no indefinite lengths, no duplicate keys.
@@ -434,12 +439,17 @@ source = [ledger: id, record: id]
 ; Fields are committed individually so they can be disclosed selectively:
 ;   leaf = deterministic-CBOR(record-field), leaves sorted by field name,
 ;   root = RFC 9162 Merkle tree hash over the leaves (the ledger's hash).
-record-field = [name: tstr, salt: bstr .size 16, value: any]
+; A salt is fresh for each field: 16 or 32 bytes (v0.21), and issuers SHOULD
+; use 32, since Grover's algorithm searches 16 bytes in about 2^64 steps per
+; guessed value.
+record-field = [name: tstr, salt: salt, value: any]
+salt = bstr .size 16 / bstr .size 32
 attachment = [
   name: tstr,
   media-type: tstr,
   size: uint,
-  commitment: bstr .size 32,   ; HASH(salt || content), salt 16 bytes
+  commitment: bstr .size 32,   ; HASH(salt || content), a salt of 16 or 32
+                               ; bytes (v0.21)
 ]                              ; names are unique within a record
 
 record-endorse-body = {
@@ -626,7 +636,18 @@ state-commitment-payload = {
 ; over a checkpoint-payload. It binds the tree size and root together.
 ; A witness cosignature is a COSE_Sign1 by the witness key over the same
 ; payload bytes, with content type "application/kanhe-cosignature+cbor",
-; so the two can never be confused.
+; so the two can never be confused. From v0.21 its protected header may also
+; hold the witness's time (a dated cosignature, which a witness SHOULD make):
+; RFC 9597's CWT Claims header parameter holding exactly iat, a NumericDate in
+; whole seconds. A verifier refuses any other content at label 15. The time is
+; the witness's word: no clock rule applies to it, and it dates the
+; cosignature as a dated attestation (spec section 11.1).
+cosignature-protected-header = {
+  1 => int,                    ; alg of the witness key
+  3 => "application/kanhe-cosignature+cbor",
+  4 => kid,                    ; the witness key's, under the ledger's hash
+  ? 15 => { 6 => uint },       ; v0.21: CWT claims with only iat (seconds)
+}
 checkpoint-payload = {
   1 => id,                     ; ledger_id
   2 => -16 / -65538,           ; tree hash algorithm
@@ -721,6 +742,16 @@ inclusion-proof = [
 ;      turn). Then nothing was omitted: the report is complete.
 ;      Without that commitment, a bundle cannot rule out omissions (such as
 ;      a later revocation).
+;   8. to 10. anchors, membership proofs, and source proofs (spec section 11);
+;  11. checks each renewal (key 11, v0.21) from the keys the replay reached:
+;      consistency from the previous checkpoint, the rotations in between,
+;      the checkpoint under the log key in effect at its size, and its
+;      attestations as the bundle's own;
+;  12. if it distrusts an algorithm from a date (v0.21), relies on no
+;      attestation by it, and requires every signature by it that it
+;      relied on to be in a tree that a trusted time-stamp token, network
+;      witness's cosignature, or dated witness cosignature, dated before that
+;      date, attested.
 
 ; The state commitment: a compact sparse Merkle tree over every actor,
 ; delegation, record, contract, and instance, keyed by object id (its 256 bits, most significant
@@ -770,6 +801,32 @@ evidence-bundle = {
   ? 10 => [1*64 bstr],         ; v0.18: source proofs, each an encoded
                                ; evidence-bundle (without key 10) of one of
                                ; the record's sources on another ledger
+  ? 11 => [1*64 renewal],      ; v0.21: newer attestations of the tree, in
+                               ; order (spec section 11.1)
+}
+; A renewal (v0.21, spec section 11.1): a newer attestation of the same
+; ledger's tree, at a size M no smaller than the previous checkpoint's (the
+; bundle's for the first renewal, the renewal before it for the others).
+; At the previous size it has neither key 2 nor key 3 and its root is the
+; previous root: it repeats a checkpoint with newer attestations. A
+; verifier follows its rotations as a witness does (signed by the root key
+; in effect, proven in M's tree; approvals on them ignored), checks its
+; checkpoint under the log key in effect at M, and checks and counts its
+; attestations as the bundle's own. It adds integrity and time; what the
+; bundle shows of state and completeness stays as of the bundle's
+; checkpoint. It holds nothing private: whoever holds the bundle may add
+; one. A renewal has key 4, key 5, key 6, or several of them.
+renewal = {
+  1 => bstr,                   ; the signed checkpoint at size M (COSE_Sign1)
+  ? 2 => [1*65 bstr .size 32], ; RFC 9162 consistency proof from the previous
+                               ; size to M; absent when they are equal
+  ? 3 => [1*4096 key-rotation-proof], ; every rotation of the root key or the
+                               ; log key at an index from the previous size
+                               ; to M - 1, ascending, each proven in M's tree
+  ? 4 => [+ bstr],             ; witness cosignatures of its checkpoint
+  ? 5 => [+ timestamp-token],  ; over its checkpoint's payload
+  ? 6 => [+ note-cosignature], ; of its checkpoint's note; never in an SM3
+                               ; ledger's bundle
 }
 ; A checkpoint with time-stamp authorities' tokens over its payload (v0.11),
 ; open-network witnesses' cosignatures of its note (v0.13), or both: an
@@ -805,7 +862,8 @@ field-disclosure = [
 ]
 attachment-opening = [
   name: tstr,
-  salt: bstr .size 16,         ; the content travels alongside the bundle
+  salt: salt,                  ; 16 or 32 bytes (v0.21); the content travels
+                               ; alongside the bundle
 ]
 
 ; ---------------------------------------------------------------------------

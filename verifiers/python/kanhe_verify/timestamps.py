@@ -9,7 +9,12 @@ the CMS signature (with the token's own signing certificate) and, for the
 roots a verifier trusts, the whole RFC 3161 check: the chain at the token's
 time, the critical id-kp-timeStamping usage, and the signing-certificate
 attribute (RFC 5816). Only the DER structure is read here, to learn the
-token's imprint, time, and accuracy.
+token's imprint, time, and accuracy, and its algorithms (v0.21): its
+signature's, by its signing certificate's key, and that certificate's own
+signature's. OpenSSL's `ts` command reads a token as PKCS #7, which has no
+ML-DSA and does not verify SM2, so a token signed with ML-DSA or SM2 is
+checked by `cms -verify` with the same conditions of trust (the chain at the
+token's time, the time-stamping purpose, the signing-certificate attribute).
 """
 
 from __future__ import annotations
@@ -47,6 +52,93 @@ class TokenInfo:
     authority: str  # the signing certificate's subject (RFC 4514)
     authority_id: bytes  # SHA-256 of its SubjectPublicKeyInfo
     trusted: bool
+    # v0.21: (its signature's, its signing certificate's signature's), named
+    # as section 11.1 names algorithms.
+    algorithms: tuple = ("other", "other")
+
+
+# Algorithms of certificates (section 11.1), by OID.
+_RSA_PREFIX = "1.2.840.113549.1.1."
+_EC_PUBLIC_KEY = "1.2.840.10045.2.1"
+_ECDSA_PREFIX = "1.2.840.10045.4."
+_SM2_CURVE = "1.2.156.10197.1.301"
+_SM2_WITH_SM3 = "1.2.156.10197.1.501"
+_OID_NAMES = {"1.3.101.112": "ed25519", "2.16.840.1.101.3.4.3.17": "ml-dsa-44",
+              "2.16.840.1.101.3.4.3.18": "ml-dsa-65", "2.16.840.1.101.3.4.3.19": "ml-dsa-87",
+              _SM2_WITH_SM3: "sm2", _SM2_CURVE: "sm2"}
+
+
+def _oid_text(value: bytes) -> str:
+    """A DER OBJECT IDENTIFIER's content as dotted text."""
+    if not value or value[-1] & 0x80:
+        raise VerifyError("a certificate holds a malformed OID")
+    arcs, n = [], 0
+    for b in value:
+        n = (n << 7) | (b & 0x7F)
+        if not b & 0x80:
+            arcs.append(n)
+            n = 0
+    first = min(arcs[0] // 40, 2)
+    return ".".join(str(x) for x in [first, arcs[0] - 40 * first] + arcs[1:])
+
+
+def _algorithm_name(algorithm: bytes) -> str:
+    """The name of an AlgorithmIdentifier's algorithm (section 11.1): an EC
+    key on SM2's curve is sm2, on any other curve ecdsa."""
+    parts = _children(algorithm)
+    if not parts or parts[0][0] != 0x06:
+        raise VerifyError("a certificate's algorithm identifier is malformed")
+    oid = _oid_text(parts[0][1])
+    if oid.startswith(_RSA_PREFIX):
+        return "rsa"
+    if oid == _EC_PUBLIC_KEY:
+        curve = _oid_text(parts[1][1]) if len(parts) > 1 and parts[1][0] == 0x06 else ""
+        return "sm2" if curve == _SM2_CURVE else "ecdsa"
+    if oid.startswith(_ECDSA_PREFIX):
+        return "ecdsa"
+    return _OID_NAMES.get(oid, "other")
+
+
+def subject_public_key_info(der: bytes) -> bytes:
+    """A DER certificate's SubjectPublicKeyInfo, as its bytes are: read here,
+    since `cryptography` loads no key of some algorithms (an SM2 authority's
+    among them) that OpenSSL checks."""
+    tag, certificate, _ = _der(der)
+    if tag != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    tag, tbs, _ = _der(certificate)
+    if tag != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    pos, fields = 0, []
+    while pos < len(tbs):
+        start = pos
+        field_tag, _, pos = _der(tbs, pos)
+        fields.append((field_tag, tbs[start:pos]))
+    if fields and fields[0][0] == 0xA0:  # the explicit version
+        fields = fields[1:]
+    # serial, signature, issuer, validity, subject, subjectPublicKeyInfo
+    if len(fields) < 6 or fields[5][0] != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    return fields[5][1]
+
+
+def certificate_algorithms(der: bytes) -> tuple:
+    """(its key's algorithm, its own signature's algorithm) of a DER
+    certificate."""
+    tag, certificate, _ = _der(der)
+    parts = _children(certificate) if tag == 0x30 else []
+    if len(parts) != 3 or parts[0][0] != 0x30 or parts[1][0] != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    tbs = _children(parts[0][1])
+    if tbs and tbs[0][0] == 0xA0:  # the explicit version
+        tbs = tbs[1:]
+    # serial, signature, issuer, validity, subject, subjectPublicKeyInfo
+    if len(tbs) < 6 or tbs[5][0] != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    spki = _children(tbs[5][1])
+    if not spki or spki[0][0] != 0x30:
+        raise VerifyError("a time-stamp token's signing certificate is malformed")
+    return _algorithm_name(spki[0][1]), _algorithm_name(parts[1][1])
 
 
 # ---------------------------------------------------------------------------
@@ -225,14 +317,24 @@ def check_token(token: bytes, imprint: bytes, hash_alg: int, roots_pem: bytes) -
         if len(signers) != 1:
             raise VerifyError("a time-stamp token has more than one signer")
         signer = signers[0]
-        spki = signer.public_key().public_bytes(serialization.Encoding.DER,
-                                                serialization.PublicFormat.SubjectPublicKeyInfo)
+        der = signer.public_bytes(serialization.Encoding.DER)
+        algorithms = certificate_algorithms(der)
+        # Not signer.public_key(), which raises for a key `cryptography` does
+        # not load (SM2's): the authority is the SHA-256 of its key's bytes.
+        spki = subject_public_key_info(der)
         trusted = False
         if roots_pem:
             with open(roots_path, "wb") as f:
                 f.write(roots_pem)
-            done = _run(["ts", "-verify", "-token_in", "-in", token_path, "-digest", imprint.hex(),
-                         "-CAfile", roots_path, "-attime", str(time_ms // 1000)])
+            if algorithms[0].startswith("ml-dsa-") or algorithms[0] == "sm2":
+                # OpenSSL's PKCS #7 code has no ML-DSA (v0.21), and does not
+                # verify SM2 signatures: the same checks, through CMS.
+                done = _run(["cms", "-verify", "-binary", "-inform", "DER", "-in", token_path, "-CAfile", roots_path,
+                             "-purpose", "timestampsign", "-cades", "-attime", str(time_ms // 1000),
+                             "-out", os.path.join(tmp, "checked.der")])
+            else:
+                done = _run(["ts", "-verify", "-token_in", "-in", token_path, "-digest", imprint.hex(),
+                             "-CAfile", roots_path, "-attime", str(time_ms // 1000)])
             trusted = done.returncode == 0
     return TokenInfo(time_ms=time_ms, accuracy_ms=accuracy_ms, authority=signer.subject.rfc4514_string(),
-                     authority_id=hashlib.sha256(spki).digest(), trusted=trusted)
+                     authority_id=hashlib.sha256(spki).digest(), trusted=trusted, algorithms=algorithms)

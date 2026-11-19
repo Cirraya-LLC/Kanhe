@@ -684,12 +684,32 @@ class Bundle:
     anchors: list
     memberships: list = field(default_factory=list)  # v0.16: membership proofs, each an encoded bundle
     sources: list = field(default_factory=list)  # v0.18: source proofs, each an encoded bundle
+    renewals: list = field(default_factory=list)  # v0.21: [Renewal], in order
 
 
-# A bundle carries at most this many membership proofs (key 9, v0.16), and
-# this many source proofs (key 10, v0.18).
+@dataclass
+class Renewal:
+    """A renewal (v0.21, section 11.1): a newer attestation of the bundle's
+    tree, checked in longterm.py."""
+    checkpoint: bytes
+    consistency: list | None  # absent when the size is the previous one
+    rotations: list  # [(index, encoded log entry, path)], as the renewal lists them
+    cosignatures: list  # COSE cosignatures of its checkpoint
+    tokens: list  # time-stamp tokens over its checkpoint's payload
+    network: list  # [(name, bytes)]: open-network cosignatures of its note
+
+
+# Field and attachment salts are 16 or 32 bytes (v0.21, section 6).
+SALT_SIZES = (16, 32)
+# A bundle carries at most this many membership proofs (key 9, v0.16), this
+# many source proofs (key 10, v0.18), and this many renewals (key 11, v0.21);
+# a renewal at most this many rotations, and consistency proofs and paths at
+# most this many hashes.
 MAX_MEMBERSHIP_PROOFS = 16
 MAX_SOURCE_PROOFS = 64
+MAX_RENEWALS = 64
+MAX_ROTATIONS = 4096
+MAX_PROOF_HASHES = 65
 
 
 def _nonempty_list(value, what: str) -> list:
@@ -707,7 +727,7 @@ def parse_bundle(data: bytes) -> Bundle:
     value = cbor.decode(data)
     _check(not is_contract_evidence(value), "this is an instance's contract evidence, not an evidence bundle: "
            "verify it as contract evidence")
-    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9, 10})
+    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9, 10, 11})
     _check(m[0] == 1 and _is_int(m[0]), "the bundle is not of format version 1")
     entries = []
     for item in _nonempty_list(m[2], "the bundle's entries"):
@@ -726,7 +746,8 @@ def parse_bundle(data: bytes) -> Bundle:
     openings = []
     for o in (_nonempty_list(m[6], "the attachment openings") if 6 in m else []):
         _check(isinstance(o, list) and len(o) == 2 and isinstance(o[0], str)
-               and isinstance(o[1], bytes) and len(o[1]) == 16, "an attachment opening is not [name, salt]")
+               and isinstance(o[1], bytes) and len(o[1]) in SALT_SIZES,
+               "an attachment opening is not [name, salt of 16 or 32 bytes]")
         openings.append((o[0], o[1]))
     proofs = []
     for p in (_nonempty_list(m[7], "the state proofs") if 7 in m else []):
@@ -754,10 +775,60 @@ def parse_bundle(data: bytes) -> Bundle:
         source_proofs = _nonempty_list(m[10], "the list of source proofs (key 10)")
         _check(len(source_proofs) <= MAX_SOURCE_PROOFS, "the bundle carries more than 64 source proofs")
         _check(all(isinstance(p, bytes) for p in source_proofs), "a source proof is not a byte string")
+    # v0.21: 1 to 64 renewals, checked in longterm.py (section 11, step 11).
+    renewals = []
+    if 11 in m:
+        items = _nonempty_list(m[11], "the list of renewals (key 11)")
+        _check(len(items) <= MAX_RENEWALS, "the bundle carries more than 64 renewals")
+        renewals = [parse_renewal(r) for r in items]
     return Bundle(subject=_id(m[1], "the bundle's subject"), entries=entries,
                   checkpoint=_bstr(m[3], "the checkpoint"), cosignatures=cosignatures,
                   disclosures=disclosures, openings=openings, proofs=proofs, anchors=anchors,
-                  memberships=list(memberships), sources=list(source_proofs))
+                  memberships=list(memberships), sources=list(source_proofs), renewals=renewals)
+
+
+def _network_cosignatures(value, what: str) -> list:
+    out = []
+    for c in _nonempty_list(value, what):
+        _check(isinstance(c, list) and len(c) == 2 and network.valid_name(c[0]) and isinstance(c[1], bytes)
+               and network.PREFIX_SIZE <= len(c[1]) <= 8192,
+               "a network cosignature is not [name, 12 to 8,192 bytes] (section 10.2)")
+        out.append((c[0], c[1]))
+    return out
+
+
+def parse_renewal(value) -> Renewal:
+    """A renewal (v0.21, section 11.1): {1: signed checkpoint, ? 2:
+    consistency proof, ? 3: key rotations, ? 4: cosignatures, ? 5: tokens,
+    ? 6: network cosignatures}, with key 4, 5, or 6."""
+    rm = _map(value, "a renewal", {1}, {2, 3, 4, 5, 6})
+    _check(isinstance(rm[1], bytes), "a renewal's checkpoint is not a byte string")
+    _check(bool({4, 5, 6} & set(rm)), "a renewal holds no attestation: no cosignature, token, or network cosignature")
+    consistency = None
+    if 2 in rm:
+        consistency = _hashes(_nonempty_list(rm[2], "a renewal's consistency proof"), "a renewal's consistency proof")
+        _check(len(consistency) <= MAX_PROOF_HASHES, "a renewal's consistency proof has more than 65 hashes")
+    rotations = []
+    if 3 in rm:
+        items = _nonempty_list(rm[3], "a renewal's key rotations")
+        _check(len(items) <= MAX_ROTATIONS, "a renewal carries more than 4,096 key rotations")
+        for r in items:
+            _check(isinstance(r, list) and len(r) == 3 and _is_uint(r[0]) and isinstance(r[1], bytes),
+                   "a renewal's key rotation is not [index, log entry, path]")
+            path = _hashes(r[2], "a key rotation's path")
+            _check(len(path) <= MAX_PROOF_HASHES, "a key rotation's path has more than 65 hashes")
+            rotations.append((r[0], r[1], path))
+    cosignatures = []
+    if 4 in rm:
+        cosignatures = _nonempty_list(rm[4], "a renewal's cosignatures")
+        _check(all(isinstance(c, bytes) for c in cosignatures), "a cosignature is not a byte string")
+    tokens = []
+    if 5 in rm:
+        tokens = _nonempty_list(rm[5], "a renewal's tokens")
+        _check(all(isinstance(x, bytes) for x in tokens), "a time-stamp token is not a byte string")
+    network_cosignatures = _network_cosignatures(rm[6], "a renewal's network cosignatures") if 6 in rm else []
+    return Renewal(checkpoint=rm[1], consistency=consistency, rotations=rotations, cosignatures=list(cosignatures),
+                   tokens=list(tokens), network=network_cosignatures)
 
 
 def parse_anchor(value) -> Anchor:
@@ -776,21 +847,17 @@ def parse_anchor(value) -> Anchor:
     if 3 in am:
         consistency = _hashes(_nonempty_list(am[3], "an anchor's consistency proof"),
                               "an anchor's consistency proof")
-    cosignatures = []
-    for c in (_nonempty_list(am[4], "an anchor's network cosignatures") if 4 in am else []):
-        _check(isinstance(c, list) and len(c) == 2 and network.valid_name(c[0]) and isinstance(c[1], bytes)
-               and network.PREFIX_SIZE <= len(c[1]) <= 8192,
-               "a network cosignature is not [name, 12 to 8,192 bytes] (section 10.2)")
-        cosignatures.append((c[0], c[1]))
+    cosignatures = _network_cosignatures(am[4], "an anchor's network cosignatures") if 4 in am else []
     return Anchor(checkpoint=am[1], tokens=tokens, consistency=consistency, cosignatures=cosignatures)
 
 
 def parse_field_leaf(leaf: bytes) -> tuple:
-    """A disclosed field: [name, salt, value] (section 6)."""
+    """A disclosed field: [name, salt, value] (section 6), its salt 16 or 32
+    bytes (v0.21)."""
     value = cbor.decode(leaf)
     _check(isinstance(value, list) and len(value) == 3 and isinstance(value[0], str)
-           and isinstance(value[1], bytes) and len(value[1]) == 16,
-           "a disclosed field is not [name, salt, value]")
+           and isinstance(value[1], bytes) and len(value[1]) in SALT_SIZES,
+           "a disclosed field is not [name, salt of 16 or 32 bytes, value]")
     return value[0], value[1], value[2]
 
 
