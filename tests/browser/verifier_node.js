@@ -205,6 +205,140 @@ const text = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
   }
   assert.equal(verifier.verify(new Uint8Array(1), { trustNodes: [{ ledger: "xyz", name: "A" }] }).verified, false);
 
+  // Long-term evidence (spec v0.21): every bundle of the independent vectors,
+  // with its options (the witnesses, network witnesses, and time-stamp
+  // authorities trusted, and the algorithms distrusted), reaches their verdict
+  // and, when verified, their facts: the renewals, the long-term status, and
+  // what covers each signature by a distrusted algorithm.
+  const v21 = JSON.parse(fs.readFileSync(path.join(__dirname, "../../testvectors/protocol-v0.21.json"), "utf8"));
+  const mismatches = (fact, value, where = "") => {
+    if (fact !== null && typeof fact === "object" && !Array.isArray(fact)) {
+      if (value === null || typeof value !== "object" || Array.isArray(value)) return [where + ": not an object"];
+      return Object.entries(fact).flatMap(([key, sub]) =>
+        key in value ? mismatches(sub, value[key], where + "." + key) : [where + "." + key + ": not in the report"]);
+    }
+    if (Array.isArray(fact)) {
+      if (!Array.isArray(value) || value.length !== fact.length) return [where + ": " + fact.length + " items expected"];
+      return fact.flatMap((sub, i) => mismatches(sub, value[i], where + "[" + i + "]"));
+    }
+    return fact === value ? [] : [where + ": " + JSON.stringify(fact) + " expected, " + JSON.stringify(value) + " reported"];
+  };
+  const optionsOf = (o) => ({
+    ledgerId: o.ledger_id, witnesses: (o.witnesses || []).map(hexBytes),
+    timestampRoots: (o.tsa_roots || []).map((pem) => new TextEncoder().encode(pem)),
+    networkWitnesses: o.witness_vkeys || [], distrust: o.distrust || [],
+    attachments: Object.fromEntries(Object.entries(o.attachments || {}).map(([name, hex]) => [name, hexBytes(hex)])),
+  });
+  const USAGE = /^the distrust option /;
+  for (const c of v21.bundles) {
+    const got = verifier.verify(hexBytes(c.evidence), optionsOf(c.options));
+    assert.equal(got.verified, c.verified, c.name + ": " + (got.error || "verified"));
+    if (c.verified) assert.deepEqual(mismatches(c.facts, got), [], c.name);
+    else assert.doesNotMatch(String(got.error), USAGE, c.name);
+  }
+  // The option as the specification reads it: refused before anything is
+  // checked, or read into the algorithms and dates the report gives. An
+  // ML-DSA-65 authority's token covers every signature of this bundle.
+  const stampedPq = v21.bundles.find((c) => c.name === "renewal-post-quantum-timestamp");
+  const withDistrust = (distrust) =>
+    verifier.verify(hexBytes(stampedPq.evidence), Object.assign(optionsOf(stampedPq.options), { distrust }));
+  for (const c of v21.distrust_options.refused) {
+    const got = withDistrust(c.options);
+    assert.equal(got.verified, false, c.name);
+    assert.match(got.error, USAGE, c.name);
+  }
+  v21.distrust_options.valid.forEach((c, i) => {
+    const got = withDistrust(c.options);
+    assert.doesNotMatch(String(got.error), USAGE, c.options.join(" "));
+    if (i < 3) assert.equal(got.verified, true, c.options.join(" ") + ": " + got.error);
+    if (got.verified) assert.deepEqual(got.distrust.algorithms, c.algorithms);
+  });
+  assert.equal(withDistrust([]).distrust, null);
+
+  // Long-term evidence made by the command line (v0.21): a classical
+  // ledger's certificate, then the same renewed after the ledger moved to
+  // ML-DSA-65 keys, cosigned by an Ed25519 and an ML-DSA-65 witness, each
+  // cosignature dated. The same reports as `kanhe verify --json`.
+  const ltOptions = (distrust) => ({ ledgerId: text("longterm-ledger-id"),
+    witnesses: [read("lt-classical.pub"), read("lt-quantum.pub")], distrust });
+  const asNative = (report, file) => {
+    delete report.text;
+    delete report.kind;
+    assert.deepEqual(report, JSON.parse(text(file)), file);
+  };
+  const classical = verifier.verify(read("longterm.cbor"), ltOptions());
+  assert.equal(classical.verified, true, classical.error);
+  assert.deepEqual(classical.renewals, []);
+  assert.deepEqual(classical.long_term,
+                   { post_quantum: false, checkpoint: null, attested_by: [], renew_before: "2030-01-01T00:00:00.000Z" });
+  assert.equal(classical.distrust, null);
+  asNative(classical, "native-longterm-report.json");
+  const renewed = verifier.verify(read("renewed.cbor"), ltOptions());
+  assert.equal(renewed.verified, true, renewed.error);
+  assert.equal(renewed.renewals.length, 1);
+  const [renewal] = renewed.renewals;
+  assert.ok(renewal.tree_size > renewed.checkpoint.tree_size);
+  assert.deepEqual([renewal.log_key.algorithm, renewal.log_key_rotations, renewal.root_key_rotations],
+                   ["ML-DSA-65", 1, 1]);
+  assert.deepEqual(renewal.witnesses, { trusted: 2, untrusted: 0, network: [] });
+  assert.deepEqual(renewal.timestamps, []);
+  assert.equal(renewed.witnesses.trusted, 2);
+  assert.equal(renewed.complete, true);
+  const lt = renewed.long_term;
+  assert.deepEqual([lt.post_quantum, lt.checkpoint.tree_size, lt.checkpoint.renewal, lt.renew_before],
+                   [true, renewal.tree_size, 1, null]);
+  assert.deepEqual(lt.attested_by.map((a) => [a.kind, a.algorithm]), [["witness", "ml-dsa-65"]]);
+  assert.match(lt.attested_by[0].time, /^20\d\d-\d\d-\d\dT\d\d:\d\d:\d\d\.000Z$/, "a dated cosignature");
+  const quantumWitness = lt.attested_by[0].by;
+  asNative(renewed, "native-renewed-report.json");
+  // Ed25519 distrusted: the Ed25519 witness's cosignatures are set aside,
+  // and the ML-DSA-65 witness's dated cosignature of the renewal covers every
+  // Ed25519 signature: the entries', the receipts, the checkpoint, and the
+  // rotations, which the old root key signed. The renewal's checkpoint is
+  // ML-DSA-65's, and needs no cover.
+  const distrusted = verifier.verify(read("renewed.cbor"), ltOptions(["ed25519@2099-01-01"]));
+  assert.equal(distrusted.verified, true, distrusted.error);
+  const d = distrusted.distrust;
+  assert.deepEqual(d.algorithms, [{ algorithm: "ed25519", after: "2099-01-01T00:00:00.000Z" }]);
+  assert.deepEqual(d.set_aside.map((a) => [a.kind, a.algorithm, a.anchor, a.renewal, a.checkpoint_size]),
+                   [["witness", "ed25519", null, null, distrusted.checkpoint.tree_size],
+                    ["witness", "ed25519", null, 1, renewal.tree_size]]);
+  assert.ok(d.set_aside.every((a) => a.by !== quantumWitness));
+  assert.ok(d.signatures.length > 0);
+  for (const s of d.signatures) {
+    assert.equal(s.algorithm, "ed25519");
+    assert.deepEqual([s.covered_by.kind, s.covered_by.by, s.covered_by.renewal, s.covered_by.checkpoint_size],
+                     ["witness", quantumWitness, 1, renewal.tree_size], JSON.stringify(s));
+  }
+  const signedKinds = new Set(d.signatures.map((s) => s.signed));
+  for (const kind of ["statement", "receipt", "state-commitment", "checkpoint", "rotation"]) assert.ok(signedKinds.has(kind), kind);
+  assert.ok(!signedKinds.has("renewal"));
+  assert.equal(distrusted.long_term.post_quantum, true);
+  asNative(distrusted, "native-distrusted-report.json");
+  // ML-DSA-65 distrusted: its witness is set aside, so no post-quantum
+  // attestation is left, and the Ed25519 witness's dated cosignature covers
+  // the renewal's checkpoint.
+  const noQuantum = verifier.verify(read("renewed.cbor"), ltOptions(["ml-dsa-65@2099-01-01"]));
+  assert.equal(noQuantum.verified, true, noQuantum.error);
+  assert.equal(noQuantum.long_term.post_quantum, false);
+  assert.deepEqual(noQuantum.distrust.set_aside.map((a) => [a.by, a.renewal]), [[quantumWitness, 1]]);
+  const covered = noQuantum.distrust.signatures.find((s) => s.signed === "renewal");
+  assert.deepEqual([covered.renewal, covered.tree_size, covered.covered_by.kind, covered.covered_by.renewal],
+                   [1, renewal.tree_size, "witness", 1]);
+  // Distrusted from before the witnesses dated their cosignatures, Ed25519
+  // signatures are covered by nothing: the evidence fails (and the page
+  // checks it again without the option, to say so). Without the renewal,
+  // nothing covers them either: the bundle's own cosignature is undated.
+  const tooEarly = verifier.verify(read("renewed.cbor"), ltOptions(["ed25519@2020-01-01"]));
+  assert.equal(tooEarly.verified, false);
+  assert.doesNotMatch(tooEarly.error, USAGE);
+  assert.equal(verifier.verify(read("longterm.cbor"), ltOptions(["ed25519@2099-01-01"])).verified, false);
+  // Ed25519 named twice, through classical: refused before anything is checked.
+  assert.match(verifier.verify(read("renewed.cbor"), ltOptions(["ed25519@2099-01-01", "classical@2099-01-01"])).error,
+               USAGE);
+  // Options do not leak: the next check distrusts nothing.
+  assert.equal(verifier.verify(read("renewed.cbor"), ltOptions()).distrust, null);
+
   // A W3C credential (spec/credentials.md): the same report as `kanhe
   // credential verify --offline`, and a changed claim fails.
   const credential = text("credential.jwt");

@@ -11,6 +11,7 @@
 //     timestampRoots: [certificateFileBytes],  // trusted time-stamp authorities' roots
 //     attachments: { "report.pdf": pdfBytes }, // contents to check
 //     trustNodes: [{ ledger: "<64 hex digits>", name: "HK Trust" }], // trust nodes believed
+//     distrust: ["ed25519@2035-01-01"],        // algorithms not relied on from a date (spec v0.21)
 //   });
 //   report.verified  // true or false; report.error explains a failure
 //
@@ -18,7 +19,7 @@
 //   const where = verifier.credentialAddresses(jwsBytes); // {evidence, did_document, status_list, ledger}
 //   const report = verifier.verifyCredential(jwsBytes, evidenceBytes, {
 //     didDocument: didJsonBytes, statusList: statusListJwsBytes, // when fetched
-//     ledgerId, witnesses, timestampRoots, trustNodes,           // as for verify
+//     ledgerId, witnesses, timestampRoots, trustNodes, distrust, // as for verify
 //   });
 // The credential, the DID document, and the status list are best given as the
 // bytes read or fetched (a Uint8Array), which are checked as `kanhe credential
@@ -91,6 +92,16 @@ async function createKanheVerifier(factory) {
         withString(node.name, (name) => module._kanhe_add_trust_node(ledger, name)));
       if (ok !== 0) {
         return { verified: false, error: "a trust node is a ledger id (64 hex digits) and a name" };
+      }
+    }
+    // Each ALG@YYYY-MM-DD (spec v0.21, section 11.1): ALG is ed25519, ecdsa,
+    // sm2, rsa, ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical (every one but
+    // ML-DSA). The verifier refuses an unknown algorithm, a date that is none,
+    // and an algorithm named twice, directly or through classical.
+    for (const entry of options.distrust || []) {
+      if (withString(entry.trim(), (p) => module._kanhe_add_distrust(p)) !== 0) {
+        return { verified: false, error: "the distrust option takes ALG@YYYY-MM-DD, ALG one of ed25519, ecdsa, sm2, " +
+                 "rsa, ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical, each algorithm once: " + entry };
       }
     }
     for (const [name, content] of Object.entries(options.attachments || {})) {

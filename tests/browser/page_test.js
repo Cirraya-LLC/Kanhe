@@ -7,7 +7,9 @@
 // and given a contract instance's evidence, a part's, and one whose calls
 // made requests and answered them; and in Chinese, as a certificate's QR code
 // opens it; and, with SoftHSM, a record approved by several people under an
-// organization's guardians, in the three languages.
+// organization's guardians, in the three languages; and long-term evidence,
+// renewed after its ledger moved to post-quantum keys, with algorithms
+// distrusted, in the three languages.
 // Usage: node page_test.js PAGE EVIDENCE_DIR KANHE
 "use strict";
 const assert = require("node:assert/strict");
@@ -408,6 +410,163 @@ async function verdict(page) {
       has(lines.facts, exactly("\u622a\u81f3\u68c0\u67e5\u70b9\uff0c\u6ca1\u6709\u5b88\u62a4\u4eba"));
       has(lines.facts, new RegExp("^" + TIME + "\uff08\u7b2c \\d+ \u9879\uff09\uff1a\u673a\u6784\u79fb\u9664\u5176\u5b88\u62a4\u4eba$"));
       has(lines.facts, /\u9002\u7528\u4e8e\u5176 record-revoke \u9648\u8ff0\u53ca\u4e00\u5f8b\u987b\u628a\u5173\u7684\u9648\u8ff0$/);
+      await page.close();
+    }
+
+    // 11d. Long-term evidence (v0.21), with both witnesses' keys chosen: a
+    // classical ledger's certificate, outcome first with the advice to renew
+    // it; the same renewed after the ledger moved to post-quantum keys, and
+    // the renewal; with Ed25519 distrusted, every signature by it covered,
+    // what was set aside, and what covers what; the short form, a mistake in
+    // the option, and a date that nothing covers; in the three languages. The
+    // page's reports are `kanhe verify --json`'s.
+    {
+      const lines = (page) => page.evaluate(() => ({
+        summary: [...document.querySelectorAll("#summary dd")].map((n) => n.textContent),
+        summaryLabels: [...document.querySelectorAll("#summary dt")].map((n) => n.textContent),
+        facts: [...document.querySelectorAll("#facts dd")].map((n) => n.textContent),
+        labels: [...document.querySelectorAll("#facts dt")].map((n) => n.textContent),
+        limits: document.getElementById("limits").textContent }));
+      const holds = (list, pattern) => assert.ok(list.some((l) => pattern.test(l)), pattern + " in " + JSON.stringify(list));
+      const exact = (s) => new RegExp("^" + escapeRegExp(s) + "$");
+      const asNative = async (page, file) => {
+        const shown = await page.evaluate(() => window.lastReport);
+        delete shown.kind;
+        delete shown.text;
+        assert.deepEqual(shown, JSON.parse(text(file)), file);
+      };
+      const showing = (page, id, pattern) => page.waitForFunction(([id, source]) =>
+        new RegExp(source).test(document.getElementById(id).textContent), [id, pattern.source]);
+      const distrust = async (page, value) => {
+        await page.fill("#distrust", value);
+        await page.dispatchEvent("#distrust", "change");
+      };
+      const DAY = "\\d{1,2} (?:January|February|March|April|May|June|July|August|September|October|November|December) \\d{4}";
+      const ZH_DAY = "\\d{4}\u5e74\\d{1,2}\u6708\\d{1,2}\u65e5";
+      const ID = "[0-9a-f]{12}\u2026";
+      page = await open("file://" + pagePath);
+      await page.fill("#ledger", text("longterm-ledger-id"));
+      await page.dispatchEvent("#ledger", "change");
+      await page.setInputFiles("#witness-files", [path.join(dir, "lt-classical.pub"), path.join(dir, "lt-quantum.pub")]);
+      await page.setInputFiles("#bundle-file", path.join(dir, "longterm.cbor"));
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      let l = await lines(page);
+      assert.ok(l.summaryLabels.includes("Long-term proof"), JSON.stringify(l.summaryLabels));
+      holds(l.summary, exact("no post-quantum attestation: renew this proof file before 1 January 2030. " +
+        "A future quantum computer could forge the signatures it rests on today."));
+      holds(l.facts, exact("no post-quantum attestation covers this evidence; renew it before 1 January 2030 " +
+        "(NIST IR 8547 deprecates classical signatures after 2030)"));
+      assert.ok(!l.labels.includes("Renewals") && !l.labels.includes("Algorithms you distrust"), JSON.stringify(l.labels));
+      assert.doesNotMatch(l.limits, /renewals/);
+      await asNative(page, "native-longterm-report.json");
+
+      await page.setInputFiles("#bundle-file", path.join(dir, "renewed.cbor"));
+      await showing(page, "summary", /post-quantum checkpoint/);
+      assert.equal((await verdict(page)).kind, "ok");
+      l = await lines(page);
+      holds(l.summary, new RegExp("^covered since " + DAY + " by a post-quantum checkpoint, attested by a witness you trust$"));
+      assert.equal(l.labels.filter((x) => x === "Renewals").length, 1);
+      holds(l.facts, new RegExp("^Renewal 1: log size \\d+, signed " + TIME + " by its ML-DSA-65 log key; " +
+        "key changes: 1 of the log key, 1 of the top key$"));
+      holds(l.facts, exact("witnesses: 2 trusted, 0 other"));
+      holds(l.facts, new RegExp("^post-quantum: the checkpoint of renewal 1 \\(log size \\d+, signed " + TIME +
+        "\\), attested by witness " + ID + " \\(ML-DSA-65, dated " + TIME + "\\)$"));
+      assert.match(l.limits, /Its renewals show that later checkpoints of the same ledger still hold this history/);
+      await asNative(page, "native-renewed-report.json");
+
+      // Distrusted, in the advanced options.
+      await page.click("#advanced > summary");
+      await distrust(page, "ed25519@2099-01-01");
+      await showing(page, "summary", /Algorithms you distrust/);
+      assert.equal((await verdict(page)).kind, "ok");
+      assert.equal(await page.textContent("#distrust-names"), "Distrusted: Ed25519 from 1 January 2099");
+      l = await lines(page);
+      holds(l.summary, new RegExp("^Ed25519 from 1 January 2099: the \\d+ signature\\(s\\) by them that this evidence " +
+        "relies on all existed before then, as dated attestations show$"));
+      holds(l.summary, /^covered since .* attested by a witness you trust$/);
+      holds(l.facts, exact("Ed25519 from 1 January 2099"));
+      holds(l.facts, new RegExp("^Set aside: witness " + ID + " \\(log size \\d+, this proof file\\), signed with Ed25519: not relied on$"));
+      holds(l.facts, new RegExp("^Set aside: witness " + ID + " \\(log size \\d+, renewal 1\\), signed with Ed25519: not relied on$"));
+      holds(l.facts, new RegExp("^witness " + ID + " \\(log size \\d+, renewal 1\\), dated " + TIME + ", covers \\d+ Ed25519 " +
+        "signature\\(s\\): statement #0, receipt #0, .*state commitment #\\d+, receipt #\\d+, the checkpoint \\(log size \\d+\\)" +
+        "(?:, key change #\\d+ \\(renewal 1\\))+$"));
+      await asNative(page, "native-distrusted-report.json");
+      // The short form adds a line; Ed25519 twice is a mistake, shown before
+      // anything is checked.
+      await page.selectOption("#distrust-choice", "classical");
+      await page.fill("#distrust-date", "2020-01-01");
+      await page.click("#distrust-add");
+      await showing(page, "verdict-title", /^Check the distrusted algorithms$/);
+      assert.equal(await page.inputValue("#distrust"), "ed25519@2099-01-01\nclassical@2020-01-01");
+      v = await verdict(page);
+      assert.equal(v.kind, "warn");
+      assert.equal(v.detail, "\"classical@2020-01-01\" names Ed25519 a second time");
+      assert.equal(await page.textContent("#distrust-names"), v.detail);
+      // Classical signatures distrusted from before the witnesses dated their
+      // cosignatures: nothing covers them, so the evidence fails, though it
+      // verifies without the option.
+      await distrust(page, "");
+      await page.click("#distrust-add");
+      await showing(page, "verdict-title", /^Not verified with the algorithms you distrust$/);
+      assert.equal(await page.inputValue("#distrust"), "classical@2020-01-01");
+      assert.equal(await page.textContent("#distrust-names"),
+                   "Distrusted: Ed25519, ECDSA, SM2, RSA, other algorithms from 1 January 2020");
+      v = await verdict(page);
+      assert.equal(v.kind, "bad");
+      assert.match(v.detail, /^Without them this evidence verifies\. But it relies on a signature by an algorithm you distrust that no time-stamp, network witness, or dated witness signature from before your date covers, so it fails: ./);
+      await distrust(page, "Ed25519@2035-01-01");
+      await showing(page, "verdict-detail", /^"Ed25519@2035-01-01" is not ALG@YYYY-MM-DD/);
+      assert.equal((await verdict(page)).detail, "\"Ed25519@2035-01-01\" is not ALG@YYYY-MM-DD with ALG one of ed25519, " +
+        "ecdsa, sm2, rsa, ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical (in lower case)");
+      await distrust(page, "ed25519@2035-02-30");
+      await showing(page, "verdict-detail", /^"ed25519@2035-02-30" names a date that does not exist$/);
+
+      // In Traditional Chinese (Hong Kong).
+      await distrust(page, "ed25519@2099-01-01");
+      await page.selectOption("#language", "zh-Hant");
+      await showing(page, "summary", /\u4f60\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5/);
+      assert.equal((await verdict(page)).title, "\u5df2\u9a57\u8b49");
+      assert.equal(await page.textContent("#distrust-names"), "\u4e0d\u4fe1\u4efb\uff1aEd25519\uff08\u81ea2099\u5e741\u67081\u65e5\u8d77\uff09");
+      l = await lines(page);
+      holds(l.summary, new RegExp("^\u81ea" + ZH_DAY + "\u8d77\u5df2\u6709\u5f8c\u91cf\u5b50\u6aa2\u67e5\u9ede\u4fdd\u969c\uff0c\u7531\u4f60\u4fe1\u4efb\u7684\u898b\u8b49\u8005\u78ba\u8a8d$"));
+      holds(l.summary, new RegExp("^Ed25519\uff08\u81ea2099\u5e741\u67081\u65e5\u8d77\uff09\uff1a\u9019\u4efd\u8b49\u660e\u6240\u4f9d\u8cf4\u3001\u4ee5\u5176\u4f5c\u51fa\u7684 \\d+ \u500b\u7c3d\u7f72\uff0c\u5747\u6709\u8a3b\u660e\u6642\u9593\u7684\u8b49\u660e\u986f\u793a\u5728\u8a72\u65e5\u671f\u524d\u5df2\u5b58\u5728$"));
+      holds(l.facts, new RegExp("^\u7b2c 1 \u6b21\u66f4\u65b0\uff1a\u65e5\u8a8c\u5927\u5c0f \\d+\uff0c\u65bc " + TIME + " \u7531\u5176 ML-DSA-65 \u65e5\u8a8c\u5bc6\u9470\u7c3d\u7f72\uff1b\u5bc6\u9470\u8f2a\u63db\uff1a\u65e5\u8a8c\u5bc6\u9470 1 \u6b21\uff0c\u6700\u9ad8\u5bc6\u9470 1 \u6b21$"));
+      holds(l.facts, new RegExp("^\u5f8c\u91cf\u5b50\uff1a\u7b2c 1 \u6b21\u66f4\u65b0\u7684\u6aa2\u67e5\u9ede\uff08\u65e5\u8a8c\u5927\u5c0f \\d+\uff0c\u7c3d\u7f72\u65bc " + TIME + "\uff09\uff0c\u7531\u898b\u8b49\u8005 " + ID +
+        "\uff08ML-DSA-65\uff0c\u8a3b\u660e\u6642\u9593 " + TIME + "\uff09\u78ba\u8a8d$"));
+      holds(l.facts, new RegExp("^\u4e0d\u4e88\u63a1\u4fe1\uff1a\u898b\u8b49\u8005 " + ID + "\uff08\u65e5\u8a8c\u5927\u5c0f \\d+\uff0c\u9019\u4efd\u8b49\u660e\u6a94\u6848\uff09\uff0c\u4ee5 Ed25519 \u7c3d\u7f72$"));
+      holds(l.facts, new RegExp("^\u898b\u8b49\u8005 " + ID + "\uff08\u65e5\u8a8c\u5927\u5c0f \\d+\uff0c\u7b2c 1 \u6b21\u66f4\u65b0\uff09\uff08\u8a3b\u660e\u6642\u9593 " + TIME + "\uff09\u6db5\u84cb \\d+ \u500b Ed25519 \u7c3d\u7f72\uff1a" +
+        "\u7b2c 0 \u9805\u7684\u9673\u8ff0\u3001\u7b2c 0 \u9805\u7684\u6536\u9304\u8b49\u660e\u3001"));
+      await distrust(page, "classical@2020-01-01");
+      await showing(page, "verdict-title", /^\u6309\u4f60\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5\uff0c\u9a57\u8b49\u4e0d\u901a\u904e$/);
+      assert.match((await verdict(page)).detail, /^\u4e0d\u8a08\u9019\u4e9b\u7b97\u6cd5\uff0c\u9019\u4efd\u8b49\u660e\u53ef\u901a\u904e\u9a57\u8b49\u3002/);
+      await distrust(page, "Ed25519@2035-01-01");
+      await showing(page, "verdict-title", /^\u8acb\u6aa2\u67e5\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5$/);
+      assert.match((await verdict(page)).detail, /^\u300cEd25519@2035-01-01\u300d\u4e0d\u7b26\u5408 ALG@YYYY-MM-DD \u7684\u683c\u5f0f/);
+      await distrust(page, "");
+      await page.setInputFiles("#bundle-file", path.join(dir, "longterm.cbor"));
+      await showing(page, "summary", /\u5c1a\u672a\u6709\u5f8c\u91cf\u5b50\u4fdd\u969c/);
+      holds((await lines(page)).summary,
+            exact("\u5c1a\u672a\u6709\u5f8c\u91cf\u5b50\u4fdd\u969c\uff1a\u8acb\u65bc2030\u5e741\u67081\u65e5\u524d\u66f4\u65b0\u9019\u4efd\u8b49\u660e\u6a94\u6848\u3002\u65e5\u5f8c\u7684\u91cf\u5b50\u96fb\u8166\u6216\u53ef\u507d\u9020\u5b83\u73fe\u6642\u6240\u4f9d\u8cf4\u7684\u7c3d\u7f72\u3002"));
+
+      // In Simplified Chinese.
+      await page.selectOption("#language", "zh-Hans");
+      await showing(page, "summary", /\u5c1a\u672a\u6709\u540e\u91cf\u5b50\u4fdd\u969c/);
+      holds((await lines(page)).summary,
+            exact("\u5c1a\u672a\u6709\u540e\u91cf\u5b50\u4fdd\u969c\uff1a\u8bf7\u57282030\u5e741\u67081\u65e5\u524d\u66f4\u65b0\u8fd9\u4efd\u8bc1\u660e\u6587\u4ef6\u3002\u65e5\u540e\u7684\u91cf\u5b50\u8ba1\u7b97\u673a\u6216\u53ef\u4f2a\u9020\u5b83\u73b0\u5728\u6240\u4f9d\u8d56\u7684\u7b7e\u540d\u3002"));
+      await distrust(page, "ed25519@2099-01-01");
+      await page.setInputFiles("#bundle-file", path.join(dir, "renewed.cbor"));
+      await showing(page, "summary", /\u4f60\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5/);
+      assert.equal((await verdict(page)).title, "\u5df2\u9a8c\u8bc1");
+      l = await lines(page);
+      holds(l.summary, new RegExp("^\u81ea" + ZH_DAY + "\u8d77\u5df2\u6709\u540e\u91cf\u5b50\u68c0\u67e5\u70b9\u4fdd\u969c\uff0c\u7531\u4f60\u4fe1\u4efb\u7684\u89c1\u8bc1\u8005\u786e\u8ba4$"));
+      holds(l.summary, new RegExp("^Ed25519\uff08\u81ea2099\u5e741\u67081\u65e5\u8d77\uff09\uff1a\u8fd9\u4efd\u8bc1\u660e\u6240\u4f9d\u8d56\u3001\u4ee5\u5176\u4f5c\u51fa\u7684 \\d+ \u4e2a\u7b7e\u540d\uff0c\u5747\u6709\u6ce8\u660e\u65f6\u95f4\u7684\u8bc1\u660e\u663e\u793a\u5728\u8be5\u65e5\u671f\u524d\u5df2\u5b58\u5728$"));
+      holds(l.facts, new RegExp("^\u7b2c 1 \u6b21\u66f4\u65b0\uff1a\u65e5\u5fd7\u5927\u5c0f \\d+\uff0c\u4e8e " + TIME + " \u7531\u5176 ML-DSA-65 \u65e5\u5fd7\u5bc6\u94a5\u7b7e\u540d\uff1b\u5bc6\u94a5\u8f6e\u6362\uff1a\u65e5\u5fd7\u5bc6\u94a5 1 \u6b21\uff0c\u6700\u9ad8\u5bc6\u94a5 1 \u6b21$"));
+      holds(l.facts, new RegExp("^\u4e0d\u4e88\u91c7\u4fe1\uff1a\u89c1\u8bc1\u8005 " + ID + "\uff08\u65e5\u5fd7\u5927\u5c0f \\d+\uff0c\u7b2c 1 \u6b21\u66f4\u65b0\uff09\uff0c\u4ee5 Ed25519 \u7b7e\u540d$"));
+      await distrust(page, "classical@2020-01-01");
+      await showing(page, "verdict-title", /^\u6309\u4f60\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5\uff0c\u9a8c\u8bc1\u672a\u901a\u8fc7$/);
+      await distrust(page, "ed25519@2035-02-30");
+      await showing(page, "verdict-detail", /^\u201ced25519@2035-02-30\u201d\u7684\u65e5\u671f\u5e76\u4e0d\u5b58\u5728$/);
       await page.close();
     }
 

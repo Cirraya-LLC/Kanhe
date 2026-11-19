@@ -16,6 +16,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/common.hpp>
@@ -31,6 +32,9 @@ using namespace kanhe;
 using verifier::Json;
 
 protocol::VerifyOptions options;
+/// The distrust entries since the last reset (spec v0.21), read again as
+/// one list each time one is added: an algorithm is distrusted once.
+std::vector<std::string> distrust_entries;
 
 const crypto::openssl::Provider& provider() {
     static const crypto::openssl::Provider instance;
@@ -80,6 +84,22 @@ EMSCRIPTEN_KEEPALIVE const char* kanhe_version() {
 
 EMSCRIPTEN_KEEPALIVE void kanhe_reset() {
     options = {};
+    distrust_entries.clear();
+}
+
+/// Distrusts an algorithm from a date (spec v0.21, section 11.1), given as
+/// `ALG@YYYY-MM-DD`, as `kanhe verify --distrust` takes it. Returns 0, or -1
+/// if the entry is malformed or names an algorithm distrusted since the
+/// last reset (directly or through `classical`).
+EMSCRIPTEN_KEEPALIVE int kanhe_add_distrust(const char* entry) {
+    distrust_entries.emplace_back(entry);
+    auto parsed = protocol::parse_distrust(distrust_entries);
+    if (!parsed) {
+        distrust_entries.pop_back();
+        return -1;
+    }
+    options.distrust = std::move(*parsed);
+    return 0;
 }
 
 /// Returns 0, or -1 if `hex` is not a ledger id.

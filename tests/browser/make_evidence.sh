@@ -14,7 +14,13 @@
 # requests-ledger-id, and native-requests-report.json and .txt; and the
 # record's evidence again with a time-stamp authority's token over its
 # checkpoint (v0.11), stamped.cbor, tsa-root.pem, and
-# native-stamped-report.json (with that root trusted). With SoftHSM (which
+# native-stamped-report.json (with that root trusted); long-term evidence
+# (v0.21): longterm.cbor, a certificate's evidence from a classical ledger,
+# renewed.cbor, the same renewed after the ledger moved to post-quantum keys,
+# lt-classical.pub and lt-quantum.pub (its witnesses' keys), longterm-ledger-id,
+# longterm-record-id, and native-longterm-report.json,
+# native-renewed-report.json, and native-distrusted-report.json (both
+# witnesses trusted; the last with Ed25519 distrusted). With SoftHSM (which
 # stands in for hardware keys; PKCS11_MODULE names its module, else it is
 # looked for where Homebrew and Linux distributions install it), approvals
 # and guardians (v0.20): approvals.cbor, guardians.cbor, office-ledger-id,
@@ -224,6 +230,50 @@ run credential did-document --url https://college.example --out credential-did.j
 run credential status --as credentials.key --url https://college.example --out credential-list.jwt > /dev/null
 run credential verify credential.jwt --offline --evidence credential-evidence.cbor \
     --did-document credential-did.json --status-list credential-list.jwt --json > native-credential-report.json
+
+# Long-term evidence (v0.21). An office with classical (Ed25519) keys issues a
+# certificate; an Ed25519 witness cosigns the checkpoint, and the certificate's
+# evidence is exported: longterm.cbor. Then the office prepares its ledger for
+# the long term (its log key, then its root key, rotated to ML-DSA-65), issues
+# on, and checkpoints; both witnesses cosign, the second with an ML-DSA-65 key
+# (each cosignature dated by the witness); and the holder renews the evidence
+# from the ledger: renewed.cbor carries the newer checkpoint, proven to extend
+# its own, with the rotations between them and both cosignatures.
+LT="$DIR/archive"
+rm -rf "$LT" lt-classical-witness lt-quantum-witness
+for k in lt-root lt-log lt-classical; do run key generate --out "$k.key" > /dev/null; done
+for k in lt-root-pq lt-log-pq lt-quantum; do run key generate --alg ml-dsa-65 --out "$k.key" > /dev/null; done
+run key public lt-classical.key --out lt-classical.pub > /dev/null
+run key public lt-quantum.key --out lt-quantum.pub > /dev/null
+lt() { run "$@" --ledger "$LT"; }
+lt init --org "Cirraya Archive Office" --root-key lt-root.key --log-key lt-log.key | id_from > longterm-ledger-id
+lt record issue --as lt-root.key --type example.org.certificate/1 --field name="Chan Tai Man" \
+    --field award="Diploma" | id_from > longterm-record-id
+lt ledger genesis --out lt-genesis.cbor > /dev/null
+for w in classical quantum; do
+    run witness add-log --dir "lt-$w-witness" --genesis lt-genesis.cbor --ledger-id "$(cat longterm-ledger-id)" \
+        --name "Cirraya Archive Office" > /dev/null
+done
+cosign() { # WITNESS: it cosigns the latest checkpoint, and the ledger keeps the cosignature
+    lt checkpoint cosign-request --witness "lt-$1.pub" --out "lt-$1-request.cbor" > /dev/null
+    run witness cosign "lt-$1-request.cbor" --dir "lt-$1-witness" --key "lt-$1.key" --out "lt-$1-cosignature.cbor" \
+        > /dev/null
+    lt checkpoint add-cosignature "lt-$1-cosignature.cbor" --witness "lt-$1.pub" > /dev/null
+}
+lt checkpoint create --log-key lt-log.key > /dev/null
+cosign classical
+lt export "$(cat longterm-record-id)" --log-key lt-log.key --out longterm.cbor > /dev/null
+lt ledger long-term --as lt-root.key --log-key lt-log.key --new-log-key lt-log-pq.key --new-root-key lt-root-pq.key \
+    > /dev/null
+lt record issue --as lt-root-pq.key --type example.org.certificate/1 --field name="Lee Ka Yan" > /dev/null
+lt checkpoint create --log-key lt-log-pq.key > /dev/null
+cosign classical
+cosign quantum
+lt evidence renew longterm.cbor --out renewed.cbor > /dev/null
+LT_TRUST=(--ledger-id "$(cat longterm-ledger-id)" --witness lt-classical.pub --witness lt-quantum.pub)
+run verify longterm.cbor "${LT_TRUST[@]}" --json > native-longterm-report.json
+run verify renewed.cbor "${LT_TRUST[@]}" --json > native-renewed-report.json
+run verify renewed.cbor "${LT_TRUST[@]}" --distrust ed25519@2099-01-01 --json > native-distrusted-report.json
 
 # Approvals and guardians (v0.20), with SoftHSM standing in for each
 # approver's hardware key. An office's clerk issues a form that 2 of 3 named
