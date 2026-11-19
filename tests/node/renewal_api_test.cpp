@@ -23,6 +23,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <kanhe/client/relay.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/statement.hpp>
@@ -305,4 +306,25 @@ TEST_CASE("the renewal route refuses sizes it cannot answer for", "[node][renewa
     auto posted = anyone.request("POST", "/v1/renewal?from=" + exported);
     REQUIRE(posted);
     CHECK(posted->status == 405);
+}
+
+TEST_CASE("a relay reads a mailbox fetch signed with a post-quantum log key", "[node][relay]") {
+    // A ledger whose log key is ML-DSA signs its fetches from a relay with
+    // it: the header is longer than a classical key's, beyond 4,096
+    // characters for both ML-DSA-65 and ML-DSA-87, and must still be read.
+    const Bytes some_id(32, 7);
+    const auto ledger = protocol::Id::from_bytes(some_id);
+    REQUIRE(ledger);
+    for (const crypto::SigAlg alg : {crypto::SigAlg::ml_dsa_65, crypto::SigAlg::ml_dsa_87}) {
+        auto log = KeyPair::generate(alg);
+        REQUIRE(log);
+        const auto header = kanhe::client::relay_authorization(*log, *ledger, t0);
+        REQUIRE(header);
+        CHECK(header->size() > 4096);
+        const auto fetcher = kanhe::client::parse_relay_authorization(*header);
+        REQUIRE(fetcher);
+        CHECK(fetcher->ledger == *ledger);
+        CHECK(fetcher->at == t0);
+        CHECK(kanhe::client::verify_relay_fetcher(provider(), *fetcher, log->public_key()));
+    }
 }

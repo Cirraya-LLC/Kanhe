@@ -250,7 +250,10 @@ Result<std::string> relay_authorization(const crypto::Signer& log_key, const pro
 
 Result<RelayFetcher> parse_relay_authorization(std::string_view header) {
     constexpr std::string_view scheme = "Kanhe-Relay ";
-    if (!header.starts_with(scheme) || header.size() > 4096) {
+    // Room for the largest log key's signature: a fetch signed with ML-DSA-87
+    // (4,627 bytes of signature) is about 6,300 characters in base64url.
+    constexpr std::size_t max_header = 8192;
+    if (!header.starts_with(scheme) || header.size() > max_header) {
         return fail(Errc::malformed, "send Authorization: Kanhe-Relay <signed fetch>");
     }
     auto bytes = from_base64url(header.substr(scheme.size()));
