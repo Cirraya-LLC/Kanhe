@@ -134,11 +134,16 @@ std::vector<CommandSpec> console_commands() {
                {"name", "NAME", "The owner's name, which is also the organization's", true},
                {"credential", "FILE", "The owner's passkey (from presence enroll)", true},
                {"unlock-file", "FILE",
-                "Also unlock with the passphrase in this file (servers that start unattended)"}}),
+                "Also unlock with the passphrase in this file (servers that start unattended)"},
+               {"long-term", "",
+                "Make the root, log, and witness keys ML-DSA-65 (post-quantum), for records that "
+                "must verify for decades (the first run's question, answered yes)"}}),
          cmd_console_setup,
          "What the console's first run does, for scripts: makes the console's keys (sealed),\n"
          "the ledger, and its owner, who acts in person with the passkey given, and prints the\n"
-         "recovery code once. The directory must hold no ledger yet."},
+         "recovery code once. The directory must hold no ledger yet. With --long-term the\n"
+         "ledger's own keys are post-quantum from its genesis; otherwise they are Ed25519, and\n"
+         "Settings in the console prepares the ledger for the long term later."},
         {{"kind", "add"},
          "Add a document kind to the web console",
          "Console",

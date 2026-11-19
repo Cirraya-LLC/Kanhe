@@ -15,6 +15,7 @@ add_library(kanhe_client
     src/contract_views.cpp
     src/contracts.cpp
     src/credentials.cpp
+    src/long_term.cpp
     src/peers.cpp
     src/public_witness.cpp
     src/public_witnesses.cpp

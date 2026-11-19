@@ -77,7 +77,10 @@ struct PeerInvitation {
     friend bool operator==(const PeerInvitation&, const PeerInvitation&) = default;
 };
 
-inline constexpr std::size_t max_invitation_code = 4096;
+/// Room for two ML-DSA-65 witness keys, 1,952 bytes each: the inviting
+/// organization's own and its relay's (spec v0.21: witnesses' keys may be
+/// post-quantum).
+inline constexpr std::size_t max_invitation_code = 8192;
 
 [[nodiscard]] std::string encode_invitation(const PeerInvitation& invitation);
 /// The invitation a code holds, or nullopt if it is not one (a code of

@@ -515,6 +515,11 @@ http::Response Console::route(const http::Request& request) const {
         return ready() ? guardians_route(request)
                        : error(503, "unavailable", "this console keeps no users or sessions");
     }
+    if (request.path == "/console/api/long-term" ||
+        request.path.starts_with("/console/api/long-term/")) {
+        return ready() ? long_term_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
     if (request.path == "/console/api/scripts" ||
         request.path.starts_with("/console/api/scripts/")) {
         return ready() ? scripts_route(request)

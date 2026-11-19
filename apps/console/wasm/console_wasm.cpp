@@ -293,11 +293,14 @@ Json describe(const protocol::Statement& s) {
         // the ledger).
         out["subject"] = to_hex(rotated->actor.bytes());
         out["key"] = to_hex(rotated->key.bytes);
+        // Its algorithm, as the page names it (post-quantum or not).
+        out["algorithm"] = std::string(crypto::name(rotated->key.algorithm));
     } else if (const auto* revoked = std::get_if<protocol::ActorRevokeBody>(&s.body)) {
         out["subject"] = to_hex(revoked->actor.bytes());
         out["reason"] = revoked->reason ? Json(*revoked->reason) : Json();
     } else if (const auto* log_key = std::get_if<protocol::LedgerRotateLogKeyBody>(&s.body)) {
         out["key"] = to_hex(log_key->key.bytes);
+        out["algorithm"] = std::string(crypto::name(log_key->key.algorithm));
     } else if (const auto* guardians = std::get_if<protocol::LedgerSetGuardiansBody>(&s.body)) {
         // The guardians (spec v0.20), or none; and what they guard (null:
         // everything the organization signs).

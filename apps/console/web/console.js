@@ -232,10 +232,12 @@ async function createPasskey(options, device) {
     };
 }
 
-async function register(code, name, device) {
+/// `longTerm`, at the first run only: whether the ledger's records must
+/// verify for decades (its keys then post-quantum).
+async function register(code, name, device, longTerm) {
     const begun = await api("POST", "enroll/begin", { code, name });
     const made = await createPasskey(begun.public_key, device);
-    return api("POST", "enroll/finish", { ceremony: begun.ceremony, ...made });
+    return api("POST", "enroll/finish", { ceremony: begun.ceremony, ...made, long_term: longTerm });
 }
 
 /// A lost passkey: the recovery code opens the console, a new passkey is
@@ -398,7 +400,19 @@ function enrollScreen(code) {
     const button = el("button", { type: "submit", class: "primary",
                                   text: t(firstRun ? "setup.button" : "enroll.button") });
     const notice = el("div");
-    const form = el("form", { novalidate: true }, nameField, deviceField, notice, button);
+    // The first run's one question: records that must verify for decades
+    // get post-quantum keys (recommended, so chosen already).
+    const longYes = el("input", { type: "radio", name: "setup-long-term", id: "setup-long-term-yes",
+                                  checked: true });
+    const longNo = el("input", { type: "radio", name: "setup-long-term", id: "setup-long-term-no" });
+    const question = firstRun
+        ? el("fieldset", { "aria-describedby": "setup-long-term-hint" },
+             el("legend", { text: t("setup.long_term") }),
+             el("div", {}, el("label", { for: "setup-long-term-yes" }, longYes, " ", t("setup.long_term_yes"))),
+             el("div", {}, el("label", { for: "setup-long-term-no" }, longNo, " ", t("setup.long_term_no"))),
+             el("p", { id: "setup-long-term-hint", class: "hint", text: t("setup.long_term_hint") }))
+        : null;
+    const form = el("form", { novalidate: true }, nameField, deviceField, question, notice, button);
     form.addEventListener("submit", async (event) => {
         event.preventDefault();
         if (!passkeysAvailable()) {
@@ -408,7 +422,8 @@ function enrollScreen(code) {
         button.disabled = true;
         status(t("status.working"));
         try {
-            const answer = await register(code, name.value.trim(), device.value.trim());
+            const answer = await register(code, name.value.trim(), device.value.trim(),
+                                          firstRun ? longYes.checked : undefined);
             state.pendingCode = null;
             if (answer.first_run) {
                 // The ledger is made: the recovery sheet next, shown once.
@@ -601,9 +616,25 @@ async function homeScreen() {
              el("p", {}, el("a", { href: "#/approvals", text: t("home.approvals_waiting", { n: approvals.waiting }) })),
              approvals.sent ? el("p", { class: "hint", text: t("home.approvals_sent", { n: approvals.sent }) }) : null)
         : null;
+    // Reminders for the long term, for those who look after the console:
+    // today's log key, and time-stamp certificates that expire soon.
+    const looksAfter = state.who.role === "owner" || state.who.role === "admin";
+    const longTerm = looksAfter ? home.long_term ?? null : null;
+    const longTermParts = [];
+    if (longTerm?.log_key_classical) {
+        longTermParts.push(el("p", { class: "hint", id: "home-long-term" },
+                              el("a", { href: "#/settings", text: t("home.long_term") })));
+    }
+    if (longTerm?.certificates_expiring?.length) {
+        const c = longTerm.certificates_expiring[0];
+        longTermParts.push(el("p", { class: "hint", id: "home-certificates" },
+                              el("a", { href: "#/settings", text: t(c.days_left < 0 ? "home.certificate_expired"
+                                                                                    : "home.certificate_expiring", {
+                                  authority: c.authority, date: isoText(c.not_after), days: c.days_left }) })));
+    }
     show(flash(), keysNotice(), slotNotice(), el("h1", { text: t("home.title") }),
          backup.overdue || backup.problem ? problem(t("home.backup_overdue", { problem: backup.problem ?? "" })) : null,
-         waitingPart,
+         waitingPart, ...longTermParts,
          el("dl", { class: "facts" },
             el("dt", { text: t("home.organization") }), el("dd", { text: home.ledger.organization }),
             el("dt", { text: t("home.ledger") }), el("dd", { class: "id", text: home.ledger.id })),
@@ -818,7 +849,8 @@ async function thingsScreen() {
         searchInstances().catch(failed(instancesArea));
     });
     const register = state.who.role === "viewer" ? null
-        : el("p", {}, el("a", { href: "#/new", class: "button", text: t("register.button") }));
+        : el("p", {}, el("a", { href: "#/new", class: "button", text: t("register.button") }), " ",
+             el("a", { href: "#/renew", text: t("renew.link") }));
     try {
         await searchRecords();
         await searchInstances();
@@ -1296,6 +1328,9 @@ function reportView(given) {
     fact("verify.checkpoint", t("verify.checkpoint_value", { size: report.checkpoint.tree_size ??
                                                                     report.checkpoint.size,
                                                              time: report.checkpoint.timestamp ?? "" }));
+    if (report.long_term) {
+        fact("long_term.status", longTermWords(report.long_term));
+    }
     if (contract) {
         const i = contract.instance;
         fact("column.contract", i.contract.name ?? i.contract.id);
@@ -1895,11 +1930,186 @@ async function settingsScreen() {
         });
         parts.push(lock);
     }
+    parts.push(...await longTermView());
     parts.push(...await guardiansView());
     if (changeable) {
         parts.push(...await tokensView(), ...await activityView());
     }
     show(keysNotice(), ...parts);
+}
+
+// --- Evidence for decades -----------------------------------------------------------
+
+/// Whether an algorithm, as the console names it, is post-quantum (ML-DSA).
+const postQuantum = (algorithm) => /^ML-DSA/i.test(algorithm ?? "");
+
+/// A proof's long-term status (spec v0.21), as a verifier reports it, in
+/// words.
+function longTermWords(lt) {
+    if (!lt) {
+        return "";
+    }
+    if (!lt.post_quantum) {
+        return t("long_term.proof_not_yet", { date: (lt.renew_before ?? "2030-01-01").slice(0, 10) });
+    }
+    const who = [...new Set((lt.attested_by ?? []).map((a) => t(`long_term.by.${a.kind}`)))]
+        .join(t("approvals.separator"));
+    return t("long_term.proof_safe", { who, size: lt.checkpoint?.tree_size ?? "" });
+}
+
+/// Settings, "Keep records verifiable for decades": the ledger's long-term
+/// status in words and, while its keys are today's, preparing it for the
+/// long term (two passkey taps, then a checkpoint the console makes).
+async function longTermView() {
+    const lt = await api("GET", "long-term").catch(() => null);
+    if (!lt || !lt.status) {
+        return [];
+    }
+    const s = lt.status;
+    const parts = [el("h2", { id: "long-term-title", text: t("long_term.title") }),
+                   el("p", { class: "hint", text: t("long_term.intro") })];
+    const said = s.genesis_post_quantum ? t("long_term.born")
+        : s.post_quantum ? t("long_term.converted")
+        : t("long_term.classical", { root: s.root_key.algorithm, log: s.log_key.algorithm });
+    parts.push(el("p", { id: "long-term-status", role: "status", text: said }));
+    const facts = el("dl", { class: "facts" },
+                     el("dt", { text: t("long_term.top_key") }),
+                     el("dd", { text: t(s.root_key.post_quantum ? "long_term.key_long" : "long_term.key_today",
+                                        { algorithm: s.root_key.algorithm }) }),
+                     el("dt", { text: t("long_term.log_key") }),
+                     el("dd", { text: t(s.log_key.post_quantum ? "long_term.key_long" : "long_term.key_today",
+                                        { algorithm: s.log_key.algorithm }) }));
+    const w = s.last_post_quantum_cosignature;
+    if (w || !s.genesis_post_quantum) {
+        facts.append(el("dt", { text: t("long_term.witness") }),
+                     el("dd", { text: w ? t("long_term.witness_last", { size: w.tree_size,
+                                                                        time: isoText(w.time ?? w.checkpoint_time) })
+                                        : t("long_term.witness_none") }));
+    }
+    parts.push(facts);
+    for (const c of s.certificates_expiring ?? []) {
+        parts.push(el("p", { class: "notice", text: t(c.days_left < 0 ? "long_term.certificate_expired"
+                                                                      : "long_term.certificate", {
+            authority: c.authority, date: isoText(c.not_after), days: c.days_left }) }));
+    }
+    // The conversion's steps, for a ledger that began with today's keys.
+    if (!s.genesis_post_quantum) {
+        const held = new Map((lt.held ?? []).map((h) => [h.step, h.id]));
+        parts.push(el("h3", { text: t("long_term.steps") }),
+                   el("ol", { class: "steps" }, lt.steps.map((step) => {
+                       const progress = held.has(step.step) ? "waiting"
+                           : step.status === "planned" ? "planned" : "done";
+                       const now = step.step !== "checkpoint" && progress !== "done" && step.from
+                           ? t("long_term.now", { algorithm: step.from.algorithm }) : "";
+                       return el("li", { "data-step": step.step }, `${t(`long_term.step.${step.step}`)}${now}`,
+                                 t("long_term.step_separator"),
+                                 el("span", { class: "hint", text: t(`long_term.state.${progress}`) }));
+                   })));
+    }
+    const notice = el("div", { role: "status" });
+    if (lt.next) {
+        if (lt.may_convert) {
+            const button = el("button", { type: "button", class: "primary", id: "long-term-prepare",
+                                          text: t("long_term.prepare") });
+            button.addEventListener("click", () => prepareLongTerm(lt, notice, button));
+            parts.push(el("p", { class: "hint", text: t("long_term.prepare_hint") }),
+                       lt.guardians ? el("p", { class: "hint", text: t("long_term.guardians_hint") }) : null,
+                       notice, button);
+        } else if (lt.why_not) {
+            const held = lt.held?.[0];
+            parts.push(el("p", { class: "notice" }, t(`long_term.why_not.${lt.why_not}`),
+                          held ? " " : null,
+                          held ? el("a", { href: `#/approval/${held.id}`, text: t("guardians.open_waiting") }) : null));
+        }
+    } else if (s.post_quantum && !s.genesis_post_quantum) {
+        parts.push(el("p", { class: "hint" }, t("long_term.renew_old"), " ",
+                      el("a", { href: "#/renew", text: t("renew.link") })));
+    }
+    return parts.filter((p) => p !== null);
+}
+
+/// Prepares the ledger for the long term: each new key confirmed with the
+/// passkey (signed by the organization), then the checkpoint, which the
+/// console makes. A new key that waits for the guardians is taken further
+/// by the console itself once they have approved it.
+async function prepareLongTerm(lt, notice, button) {
+    const rotations = lt.remaining.filter((step) => step !== "checkpoint").length;
+    const finish = async () => {
+        const after = await api("POST", "long-term/checkpoint", {});
+        return el("p", { class: "notice", id: "long-term-done",
+                         text: t(after.status?.post_quantum ? "long_term.done" : "long_term.checkpoint_made") });
+    };
+    const step = async (index) => {
+        const prepared = await api("POST", "prepare", { action: "long-term.convert" });
+        if (rotations > 1) {
+            prepared.progress = { index, of: rotations };
+        }
+        prepared.continues = "long_term.continues";
+        await approveScreen(prepared, new Map(), async () => {
+            const now = await api("GET", "long-term");
+            if (now.next === "rotate-log-key" || now.next === "rotate-root-key") {
+                await step(index + 1);
+                return TAKEN;
+            }
+            // Both keys are long-term keys: the checkpoint with the new log
+            // key (made unless the latest covers everything already).
+            return finish();
+        });
+    };
+    button.disabled = true;
+    try {
+        if (lt.next === "checkpoint") {
+            notice.replaceChildren(await finish());
+            return;
+        }
+        await step(1);
+    } catch (error) {
+        notice.replaceChildren(problem(error.status === 423 ? t("keys.locked")
+                                                            : t("error.server", { message: error.message })));
+    } finally {
+        button.disabled = false;
+    }
+}
+
+/// A proof file someone brings back, renewed with this ledger's newest
+/// attested checkpoint (spec v0.21): nothing in it changes.
+const RENEW_REFUSALS = ["other_ledger", "not_attested", "not_a_proof", "nothing_new"];
+
+function renewScreen() {
+    const input = el("input", { type: "file", id: "renew-file", accept: ".cbor,application/cbor" });
+    const notice = el("div", { role: "status", "aria-live": "polite" });
+    const button = el("button", { type: "submit", class: "primary", text: t("renew.button") });
+    const form = el("form", { novalidate: true },
+                    el("div", { class: "field" }, el("label", { for: "renew-file", text: t("renew.file") }), input),
+                    notice, button, " ", backButton(t("nav.things")));
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const file = input.files?.[0];
+        if (!file) {
+            notice.replaceChildren(problem(t("renew.no_file")));
+            return;
+        }
+        button.disabled = true;
+        status(t("status.working"));
+        try {
+            const upload = await uploadFile(file);
+            const renewed = await api("POST", "long-term/renew", { upload });
+            saveBytes(fromBase64url(renewed.file), renewed.name);
+            notice.replaceChildren(
+                el("p", { class: "notice", id: "renew-done", text: t("renew.done", {
+                    name: renewed.name, size: renewed.tree_size, time: isoText(renewed.timestamp) }) }),
+                el("p", { id: "renew-long-term", text: longTermWords(renewed.long_term) }),
+                el("p", { class: "hint", text: t("renew.send") }));
+        } catch (error) {
+            const code = error.answer?.error?.code;
+            notice.replaceChildren(problem(RENEW_REFUSALS.includes(code) ? t(`renew.${code}`)
+                                                                         : t("error.server", { message: error.message })));
+        } finally {
+            button.disabled = false;
+            status("");
+        }
+    });
+    show(el("h1", { text: t("renew.title") }), el("p", { text: t("renew.intro") }), form);
 }
 
 /// The organization's guardians (spec v0.20): who must approve what the
@@ -5359,9 +5569,9 @@ function heldProgress(h) {
 
 /// The fields of other statements that their bytes must hold as shown.
 const HELD_KEYS = {
-    "actor-rotate-key": ["subject", "key"],
+    "actor-rotate-key": ["subject", "key", "algorithm"],
     "actor-revoke": ["subject", "reason"],
-    "ledger-rotate-log-key": ["key"],
+    "ledger-rotate-log-key": ["key", "algorithm"],
     "ledger-set-guardians": ["guardians", "guarded"],
     "record-transition": ["record", "from_state", "to_state"],
 };
@@ -5553,7 +5763,7 @@ function statementFacts(summary) {
         fact("approve.code_sha256", summary.code_sha256);
     }
     if (summary.by_organization) {
-        fact("approve.signer", t("approve.by_organization"));
+        fact("approve.signer", t(summary.long_term ? "long_term.signer" : "approve.by_organization"));
     }
     fact("act.role", summary.role);
     fact("act.reason", summary.reason);
@@ -5617,14 +5827,27 @@ function statementFacts(summary) {
     } else if (summary.type === "actor-rotate-key" || summary.type === "actor-revoke") {
         fact("approvals.whose", summary.subject_name ?? summary.subject);
         if (summary.key) {
-            fact("approvals.new_key", `${summary.key.slice(0, 16)}...`);
+            fact("approvals.new_key", newKeyText(summary));
         }
     } else if (summary.type === "ledger-rotate-log-key") {
-        fact("approvals.new_key", `${summary.key.slice(0, 16)}...`);
+        fact("approvals.new_key", newKeyText(summary));
     } else if (summary.type === "record-transition") {
         fact("approvals.moves", t("approvals.moves_line", { from: summary.from_state, to: summary.to_state }));
     }
+    // One of the steps that prepare the ledger for the long term.
+    if (summary.long_term) {
+        fact("long_term.fact", t(`long_term.step.${summary.long_term}`));
+    }
     return facts;
+}
+
+/// A rotation's new key: its algorithm (long-term or not) and its start.
+function newKeyText(summary) {
+    const kind = summary.algorithm
+        ? t(postQuantum(summary.algorithm) ? "long_term.key_long" : "long_term.key_today",
+            { algorithm: summary.algorithm })
+        : "";
+    return `${kind}${kind ? " " : ""}${summary.key.slice(0, 16)}...`;
 }
 
 /// What the person confirms, as the console prepared it and this page
@@ -5734,10 +5957,11 @@ async function approveScreen(prepared, files = new Map(), after = null) {
             if (done.status === "waiting") {
                 // Held until enough of them approve: what follows waits too.
                 const machineSteps = summary.type === "actor-register" && summary.kind !== 1;
+                const continues = prepared.continues
+                    ?? (machineSteps ? "approvals.machine_continues" : prepared.progress ? "approvals.steps_wait" : null);
                 show(el("h1", { text: t("approvals.sent_title_done") }),
                      el("p", { role: "status", text: t("approvals.sent_done", { time: timeText(done.lapses_at) }) }),
-                     machineSteps || prepared.progress ? el("p", { class: "hint", text: t(machineSteps
-                         ? "approvals.machine_continues" : "approvals.steps_wait") }) : null,
+                     continues ? el("p", { class: "hint", text: t(continues) }) : null,
                      el("p", { class: "id", text: done.id }), heldProgress(done),
                      goButton(t("approvals.open_list"), "#/approvals"));
                 return;
@@ -5760,6 +5984,7 @@ async function approveScreen(prepared, files = new Map(), after = null) {
                  : summary.script_approval || summary.withdraws ? goButton(t("nav.scripts"), "#/scripts")
                  : access ? goButton(t("nav.parties"), "#/parties")
                  : PEOPLE_KEYS[summary.type] ? goButton(t("nav.people"), "#/people")
+                 : summary.long_term ? goButton(t("nav.settings"), "#/settings")
                  : calling ? goButton(t("thing.open"),
                                       `#/instance/${summary.instance ?? done.statement_id}`)
                  : backButton(t("nav.things")));
@@ -6036,7 +6261,7 @@ function chrome() {
         ? t("session.signed_in_as", { user: state.who.user, role: t(`role.${state.who.role}`) })
         : "";
     const hash = location.hash;
-    const current = hash.startsWith("#/things") || hash.startsWith("#/new") ||
+    const current = hash.startsWith("#/things") || hash.startsWith("#/new") || hash.startsWith("#/renew") ||
                     hash.startsWith("#/thing/") || hash.startsWith("#/instance/") ||
                     hash.startsWith("#/act/") ? "things"
         : hash.startsWith("#/create/") ? "rules"
@@ -6123,6 +6348,7 @@ async function route() {
             : hash.startsWith("#/people") ? peopleScreen()
             : hash.startsWith("#/automation") ? automationScreen()
             : hash.startsWith("#/things") ? thingsScreen()
+            : hash.startsWith("#/renew") ? renewScreen()
             : hash.startsWith("#/reports") ? reportsScreen()
             : newVersion ? newDocumentScreen(newVersion[1])
             : hash.startsWith("#/new") ? newDocumentScreen()

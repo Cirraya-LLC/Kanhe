@@ -4,10 +4,13 @@
 #pragma once
 
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include <kanhe/console/keystore.hpp>
+#include <kanhe/core/crypto.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/ledger/environment.hpp>
@@ -15,6 +18,9 @@
 /// A first run for one person: a new ledger whose owner is that person,
 /// acting in person. The console makes every key and seals it: the root key
 /// (used here and for recovery only), the log key, and the owner's own key.
+/// For records that must verify for decades, the root key, the log key, and
+/// the console's witness key are ML-DSA-65 (spec v0.21, section 11.1);
+/// otherwise Ed25519, as are the owner's and the machine's keys either way.
 /// The root key registers the owner, the owner's passkey, and the owner's
 /// delegation: every statement type but the ledger's own key rotations, may
 /// delegate, and requires presence. Then the owner does everything else, one
@@ -40,10 +46,30 @@ inline constexpr std::string_view machine_name = "console";
 /// its public key goes in the console's invitation codes.
 inline constexpr std::string_view witness_key_name = "witness";
 
+/// Moving a ledger made with classical keys to post-quantum ones (spec v0.21,
+/// section 11.1; Settings, "Keep records verifiable for decades"): the next
+/// log key and the next root key, ML-DSA-65, sealed under these names until
+/// the ledger has rotated to them; then each takes its key's own name, and
+/// the key it replaced is kept under the retired name.
+inline constexpr std::string_view next_log_key_name = "log-next";
+inline constexpr std::string_view next_root_key_name = "root-next";
+inline constexpr std::string_view retired_log_key_name = "log-retired";
+inline constexpr std::string_view retired_root_key_name = "root-retired";
+/// The algorithm of the console's long-term keys.
+inline constexpr crypto::SigAlg long_term_algorithm = crypto::SigAlg::ml_dsa_65;
+
 /// The witness key's public key, made and sealed first if the console has
 /// none (a console set up before it had one). Needs only the node key's
 /// public key.
 [[nodiscard]] crypto::PublicKey witness_public_key(KeyStore& keys);
+
+/// The log keys the console's node signs with: the sealed log key, and,
+/// while it is classical, the next one (post-quantum, made and sealed first
+/// if the console has none), held ahead of the rotation to it so that the
+/// node signs with it the moment that rotation is registered, as a server
+/// holds both across a rotation (serve --log-key OLD --log-key NEW). None
+/// without a sealed log key. Needs the store unlocked.
+[[nodiscard]] std::vector<std::shared_ptr<const crypto::Signer>> served_log_keys(KeyStore& keys);
 
 struct SetUp {
     /// The ledger directory, which holds no ledger yet.
@@ -57,6 +83,9 @@ struct SetUp {
     std::optional<std::string> prf;
     /// An unlock passphrase, for consoles that start unattended.
     std::optional<std::string> passphrase;
+    /// Whether its records must verify for decades: then the root key, the
+    /// log key, and the witness key are post-quantum (ML-DSA-65).
+    bool long_term = false;
 };
 
 struct FirstRun {

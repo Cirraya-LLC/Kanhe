@@ -193,6 +193,7 @@ nlohmann::json describe_statement(const protocol::Statement& s,
     } else if (const auto* rotated = std::get_if<protocol::ActorRotateKeyBody>(&s.body)) {
         out["subject"] = to_hex(rotated->actor.bytes());
         out["key"] = to_hex(rotated->key.bytes);
+        out["algorithm"] = std::string(crypto::name(rotated->key.algorithm));
         if (const auto* subject = state.actor(rotated->actor)) {
             out["subject_name"] = subject->display_name;
         }
@@ -204,6 +205,7 @@ nlohmann::json describe_statement(const protocol::Statement& s,
         }
     } else if (const auto* log_key = std::get_if<protocol::LedgerRotateLogKeyBody>(&s.body)) {
         out["key"] = to_hex(log_key->key.bytes);
+        out["algorithm"] = std::string(crypto::name(log_key->key.algorithm));
     } else if (const auto* set = std::get_if<protocol::LedgerSetGuardiansBody>(&s.body)) {
         // The guardians (spec v0.20) with their names, or none; and what they
         // guard (null: everything the organization signs).
@@ -405,6 +407,11 @@ http::Response Console::prepare_route(const http::Request& request) const {
     if (action.starts_with("guardians.") && signer.role != Role::owner) {
         return error(403, "forbidden", "only an owner sets the organization's guardians");
     }
+    // Moving the ledger's keys to post-quantum ones (spec v0.21): the
+    // organization signs each rotation, after an owner's passkey.
+    if (action.starts_with("long-term.") && signer.role != Role::owner) {
+        return error(403, "forbidden", "only an owner prepares the ledger for the long term");
+    }
     // A script is code that makes records: approving it is as deploying
     // rules (and the ledger takes it only from a person in person).
     if ((action == "script.approve" || action == "script.withdraw") && signer.role != Role::owner &&
@@ -478,11 +485,14 @@ http::Response Console::prepare_route(const http::Request& request) const {
         body = protocol::Body{std::move(registration)};
         draft = std::move(d);
     } else if (action.starts_with("person.") || action.starts_with("machine.") ||
-               action.starts_with("guardians.") || action == "delegation.revoke") {
+               action.starts_with("guardians.") || action.starts_with("long-term.") ||
+               action == "delegation.revoke") {
         // A step of approving a person or adding a machine, revoking what
-        // someone may do, or setting the organization's guardians.
+        // someone may do, setting the organization's guardians, or giving
+        // the ledger a post-quantum key.
         auto step = action.starts_with("machine.")     ? machine_step(signer, intent)
                     : action.starts_with("guardians.") ? guardians_step(signer, intent)
+                    : action.starts_with("long-term.") ? long_term_step(signer, intent)
                                                        : person_step(signer, intent);
         if (auto* refused = std::get_if<http::Response>(&step)) {
             return std::move(*refused);
@@ -750,6 +760,11 @@ http::Response Console::prepare_route(const http::Request& request) const {
         }
     }
     summary["consents"] = prepared.bundles.size();
+    // One of the steps that prepare the ledger for the long term.
+    if (prepared.activity.starts_with("long-term.")) {
+        summary["long_term"] =
+            prepared.activity == "long-term.log-key" ? "rotate-log-key" : "rotate-root-key";
+    }
     prepared.user = signer.user;
     prepared.key = machine.as_organization ? std::string(root_key_name) : user->key;
     prepared.as_organization = machine.as_organization;
@@ -912,6 +927,10 @@ Console::sign_approval(const http::Request& request) const {
         return error(403, "forbidden", problem);
     }
     std::optional<protocol::SignedStatement> signed_statement;
+    if (by_organization) {
+        // A top key the ledger rotated to takes the top key's name first.
+        settle_long_term_keys();
+    }
     {
         // The person's key is opened for this one signature, then dropped.
         const auto key = services_.keys->open(prepared->key);
@@ -987,10 +1006,20 @@ Console::sign_approval(const http::Request& request) const {
             signer.role == Role::owner) {
             follow["machine"] = prepared->then;
         }
+        // A step of preparing the ledger for the long term: its new key takes
+        // its name once registered; and sent for approval by an owner, the
+        // console takes the next step by itself then.
+        if (prepared->activity.starts_with("long-term.")) {
+            follow["detail"] = {{"key", prepared->activity == "long-term.log-key" ? "log" : "top"}};
+            follow["long_term"] = {{"continue", for_approval && signer.role == Role::owner}};
+        }
         // Registered at once (its signer met its rules after all), the page
-        // takes the machine's next step itself.
+        // takes the machine's next step itself, and the conversion's.
         nlohmann::json at_once = follow;
         at_once.erase("machine");
+        if (at_once.contains("long_term")) {
+            at_once["long_term"]["continue"] = false;
+        }
         Signing signing{std::move(signed_statement->encoded),
                         false,
                         {},

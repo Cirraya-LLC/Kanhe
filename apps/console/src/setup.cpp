@@ -2,12 +2,15 @@
 // Copyright 2026 Cirraya
 
 #include <filesystem>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/session.hpp>
@@ -16,6 +19,7 @@
 #include <kanhe/console/setup.hpp>
 #include <kanhe/console/users.hpp>
 #include <kanhe/core/bytes.hpp>
+#include <kanhe/node/long_term.hpp>
 
 namespace kanhe::console {
 
@@ -60,6 +64,44 @@ crypto::PublicKey witness_public_key(KeyStore& keys) {
     }
     keys.seal(witness_key_name, *made);
     return made->public_key();
+}
+
+std::vector<std::shared_ptr<const crypto::Signer>> served_log_keys(KeyStore& keys) {
+    // Made once: two would leave the node holding one that is never sealed.
+    static std::mutex making;
+    const std::lock_guard lock(making);
+    std::optional<crypto::PublicKey> log;
+    std::optional<crypto::PublicKey> next;
+    for (const SealedKeyInfo& k : keys.keys()) {
+        if (k.name == log_key_name) {
+            log = k.public_key;
+        } else if (k.name == next_log_key_name) {
+            next = k.public_key;
+        }
+    }
+    std::vector<std::shared_ptr<const crypto::Signer>> out;
+    if (!log) {
+        return out;
+    }
+    out.push_back(std::make_shared<crypto::openssl::KeyPair>(keys.open(log_key_name)));
+    if (next) {
+        if (*next != *log) {
+            out.push_back(std::make_shared<crypto::openssl::KeyPair>(keys.open(next_log_key_name)));
+        }
+        return out;
+    }
+    if (node::post_quantum_algorithm(log->algorithm)) {
+        return out;
+    }
+    // The next log key, held ahead of the rotation to it: sealed before the
+    // node holds it, so that a restart finds it again.
+    auto made = crypto::openssl::KeyPair::generate(long_term_algorithm);
+    if (!made) {
+        return out;
+    }
+    keys.seal(next_log_key_name, *made);
+    out.push_back(std::make_shared<crypto::openssl::KeyPair>(std::move(*made)));
+    return out;
 }
 
 namespace {
@@ -119,12 +161,18 @@ FirstRun set_up(const SetUp& request, KeyStore& keys, ledger::Entropy& entropy) 
 namespace {
 
 FirstRun make_first_run(const SetUp& request, KeyStore& keys, ledger::Entropy& entropy) {
-    auto root = crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519);
-    auto log = crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519);
+    // Records that must verify for decades: the ledger's own keys and the
+    // console's witness key post-quantum, so that its genesis names them.
+    // People's keys sign with their passkeys, which have no post-quantum
+    // kind yet; the ledger's checkpoints cover what they sign.
+    const crypto::SigAlg ledger_keys =
+        request.long_term ? long_term_algorithm : crypto::SigAlg::ed25519;
+    auto root = crypto::openssl::KeyPair::generate(ledger_keys);
+    auto log = crypto::openssl::KeyPair::generate(ledger_keys);
     auto owner = crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519);
     auto vault = crypto::openssl::HpkeKey::generate();
     auto machine = crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519);
-    auto witness = crypto::openssl::KeyPair::generate(crypto::SigAlg::ed25519);
+    auto witness = crypto::openssl::KeyPair::generate(ledger_keys);
     if (!root || !log || !owner || !vault || !machine || !witness) {
         throw std::runtime_error("making the ledger's keys failed");
     }

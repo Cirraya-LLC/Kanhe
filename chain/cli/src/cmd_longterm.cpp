@@ -20,6 +20,7 @@
 #include <vector>
 
 #include <kanhe/client/approvals.hpp>
+#include <kanhe/client/long_term.hpp>
 #include <kanhe/core/protocol/keys.hpp>
 #include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/statement.hpp>
@@ -51,21 +52,8 @@ Json key_entry(const Session& session, const crypto::PublicKey& key) {
     return out;
 }
 
-/// One step of the conversion.
-struct Step {
-    std::string name;
-    /// "planned", "rotated" or "made" (by this run), "done" (before it),
-    /// "kept" (post-quantum already), "sent-for-approval", or "failed".
-    std::string status = "planned";
-    std::optional<crypto::PublicKey> from;
-    std::optional<crypto::PublicKey> to;
-    /// A key to be generated (--generate), not made yet: where it goes.
-    std::optional<std::string> to_file;
-    std::optional<protocol::Id> statement;
-    std::optional<std::uint64_t> index;
-    std::optional<std::uint64_t> tree_size;
-    std::optional<std::string> error;
-};
+/// One step of the conversion (shared with the web console).
+using Step = client::LongTermStep;
 
 Json step_json(const Session& session, const Step& s) {
     Json out{{"step", s.name}, {"status", s.status}};
@@ -168,15 +156,10 @@ std::vector<std::pair<std::string, protocol::Id>> held_rotations(Session& sessio
         // an actor-rotate-key, of its own root key (not a person's key).
         const protocol::Id id = client::held_id(session, item.value("id", std::string()));
         const auto file = client::fetch_held(session, id);
-        const protocol::Statement& statement = file.statement.statement;
-        if (statement.actor_id && *statement.actor_id != ledger_id) {
-            continue;
-        }
-        if (std::holds_alternative<protocol::LedgerRotateLogKeyBody>(statement.body)) {
-            out.emplace_back("the log key's rotation", id);
-        } else if (const auto* body = std::get_if<protocol::ActorRotateKeyBody>(&statement.body);
-                   body != nullptr && body->actor == ledger_id) {
-            out.emplace_back("the root key's rotation", id);
+        if (const auto which = client::long_term_rotation(file.statement.statement, ledger_id)) {
+            out.emplace_back(*which == "rotate-log-key" ? "the log key's rotation"
+                                                        : "the root key's rotation",
+                             id);
         }
     }
     return out;
@@ -239,30 +222,13 @@ int cmd_ledger_long_term(const Args& args) {
     // the key given), or kept (post-quantum already, another key).
     const crypto::PublicKey current_root = state.root_key();
     const crypto::PublicKey current_log = state.log_key();
-    auto plan = [&](std::string name, const crypto::PublicKey& current,
-                    const std::optional<crypto::PublicKey>& wanted, const std::string& file) {
-        Step s;
-        s.name = std::move(name);
-        s.from = current;
-        if (wanted && current == *wanted) {
-            s.status = "done";
-            s.to = current;
-        } else if (ml_dsa_key(current)) {
-            s.status = "kept";
-            s.to = current;
-        } else if (wanted) {
-            s.to = wanted;
-        } else {
-            s.to_file = file;
+    std::vector<Step> steps = client::plan_long_term(state, new_root, new_log);
+    for (Step& s : steps) {
+        // A key --generate makes, below.
+        if (s.status == "planned" && !s.to && s.name != "checkpoint") {
+            s.to_file = s.name == "rotate-log-key" ? log_file : root_file;
         }
-        return s;
-    };
-    std::vector<Step> steps;
-    steps.push_back(plan("rotate-log-key", current_log, new_log, log_file));
-    steps.push_back(plan("rotate-root-key", current_root, new_root, root_file));
-    Step checkpoint_step;
-    checkpoint_step.name = "checkpoint";
-    steps.push_back(std::move(checkpoint_step));
+    }
     Step& log_step = steps[0];
     Step& root_step = steps[1];
     Step& made = steps[2];
@@ -273,18 +239,7 @@ int cmd_ledger_long_term(const Args& args) {
                                        key_words(session, current_root),
                                        key_words(session, current_log))};
     }
-    // A log key rotated before (a resumed run) replaced the one before it.
-    if (log_step.status == "done") {
-        log_step.from = state.log_keys().size() >= 2
-                            ? std::optional(state.log_keys()[state.log_keys().size() - 2].key)
-                            : std::nullopt;
-    }
-    if (root_step.status == "done") {
-        root_step.from = state.root_keys().size() >= 2
-                             ? std::optional(state.root_keys()[state.root_keys().size() - 2].key)
-                             : std::nullopt;
-    }
-    const bool rotates = log_step.status == "planned" || root_step.status == "planned";
+    const bool rotates = client::long_term_rotates(steps);
 
     // The key files given must be the keys in effect.
     if (!session.remote()) {
@@ -458,9 +413,7 @@ int cmd_ledger_long_term(const Args& args) {
             continue;
         }
         sending = s;
-        protocol::Body body = s == &log_step
-                                  ? protocol::Body{protocol::LedgerRotateLogKeyBody{*s->to}}
-                                  : protocol::Body{protocol::ActorRotateKeyBody{ledger_id, *s->to}};
+        protocol::Body body = client::long_term_body(ledger_id, *s);
         const protocol::Id id =
             session.submit(*root_signer, std::move(body), std::nullopt, std::nullopt, std::nullopt);
         s->status = "rotated";
@@ -470,11 +423,9 @@ int cmd_ledger_long_term(const Args& args) {
 
     // Then a checkpoint with the log key in effect, unless the latest
     // already covers the whole log and is signed by it.
-    const auto& latest = session.ledger().latest_checkpoint();
-    if (latest && latest->checkpoint.tree_size == session.ledger().size() &&
-        latest->kid == kid_of(session, session.state().log_key())) {
+    if (const auto covered = client::long_term_checkpointed(session.ledger())) {
         made.status = "done";
-        made.tree_size = latest->checkpoint.tree_size;
+        made.tree_size = *covered;
     } else if (session.remote()) {
         try {
             made.tree_size = session.checkpoint(LogKey{}).checkpoint.tree_size;

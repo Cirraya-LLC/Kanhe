@@ -32,6 +32,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <kanhe/client/long_term.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/console.hpp>
@@ -47,6 +48,7 @@
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/node/approvals.hpp>
 #include <kanhe/node/contracts.hpp>
+#include <kanhe/node/long_term.hpp>
 
 #include "responses.hpp"
 #include "summaries.hpp"
@@ -165,10 +167,11 @@ cbor::Value approve_arguments(const std::string& function, const cbor::Value& ar
 /// What the organization signs, and so waits for its guardians when they
 /// guard everything: the console's steps that the organization's root key
 /// signs (machines and AI agents, credentials, the machine's certificates
-/// and answers) and a lost passkey's recovery.
+/// and answers), a lost passkey's recovery, and the ledger's new keys for the
+/// long term (which they guard whatever they guard).
 const std::vector<std::string>& organization_work() {
-    static const std::vector<std::string> work{"machines", "credentials", "certificates", "answers",
-                                               "recovery"};
+    static const std::vector<std::string> work{"machines", "credentials", "certificates",
+                                               "answers",  "recovery",    "long-term"};
     return work;
 }
 
@@ -357,6 +360,8 @@ void Console::follow_up() const {
     if (!running) {
         return;
     }
+    // A key the ledger rotated to takes its key's own name.
+    settle_long_term_keys();
     const std::filesystem::path dir = services_.directory / "follow-ups";
     const std::filesystem::path ledger_dir = services_.directory.parent_path();
     const protocol::Timestamp now = services_.clock->now();
@@ -462,6 +467,16 @@ void Console::run_follow_up(const protocol::Id& statement, const nlohmann::json&
     }
     if (const auto then = what.find("machine"); then != what.end() && then->is_object()) {
         continue_machine(by, statement, *then);
+    }
+    if (const auto lt = what.find("long_term"); lt != what.end() && lt->is_object()) {
+        // A step of preparing the ledger for the long term: its key settled,
+        // and the next step taken by itself if an owner sent it for approval.
+        const auto go_on = lt->find("continue");
+        try {
+            continue_long_term(by, go_on != lt->end() && go_on->is_boolean() && go_on->get<bool>());
+        } catch (const std::exception&) {
+            // Taken from Settings then.
+        }
     }
     if (const std::string activity = text_of(what, "activity"); !activity.empty()) {
         nlohmann::json detail = what.value("detail", nlohmann::json::object());
@@ -663,6 +678,18 @@ http::Response Console::approvals_route(const http::Request& request) const {
             const protocol::Statement& st = parsed->statement;
             summary = describe_statement(st, state);
             summary.update(provenance_summary(state, st));
+            // A new post-quantum key of the ledger's: a step of preparing it
+            // for the long term (spec v0.21).
+            if (const auto which = client::long_term_rotation(st, state.ledger_id())) {
+                const auto* log_key = std::get_if<protocol::LedgerRotateLogKeyBody>(&st.body);
+                const auto* root_key = std::get_if<protocol::ActorRotateKeyBody>(&st.body);
+                const auto* key = log_key != nullptr    ? &log_key->key
+                                  : root_key != nullptr ? &root_key->key
+                                                        : nullptr;
+                if (key != nullptr && node::post_quantum_algorithm(key->algorithm)) {
+                    summary["long_term"] = std::string(*which);
+                }
+            }
             if (const auto* g = std::get_if<protocol::RecordRegisterBody>(&st.body)) {
                 // What the page shows of a registration: its terms or public
                 // metadata, its files by name, and whether its fields are

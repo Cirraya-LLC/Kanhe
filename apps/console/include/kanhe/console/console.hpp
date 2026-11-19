@@ -41,6 +41,7 @@
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/ledger/ledger.hpp>
 #include <kanhe/node/http.hpp>
+#include <kanhe/node/long_term.hpp>
 #include <kanhe/node/peers.hpp>
 
 /// The web console's server side: the page's files, compiled into the
@@ -375,6 +376,15 @@ public:
     void set_approvals(ApprovalHooks hooks) {
         const std::lock_guard lock(api_mutex_);
         approvals_ = std::move(hooks);
+    }
+
+    /// The log keys the node signs with (node::ApiOptions::log_keys), by
+    /// their public keys: the log key's rotation to a post-quantum one is
+    /// prepared only to a key the node holds already, so that it signs with
+    /// it the moment the rotation is registered (served_log_keys).
+    void set_node_log_keys(std::vector<crypto::PublicKey> keys) {
+        const std::lock_guard lock(api_mutex_);
+        node_log_keys_ = std::move(keys);
     }
 
     /// Keeps a witness's cosignature of one of this ledger's checkpoints
@@ -819,6 +829,33 @@ private:
     void add_kept_proofs(nlohmann::json& made, const protocol::Id& record,
                          const std::vector<protocol::Source>& sources,
                          const protocol::Id& ledger) const;
+    /// Evidence for decades (long_term.cpp, spec v0.21). GET
+    /// /console/api/long-term: the ledger's long-term status (as GET
+    /// /v1/status gives it), the conversion's steps, and what holds it up;
+    /// POST .../checkpoint, the conversion's checkpoint with the new log
+    /// key; POST .../renew, a proof file of this ledger renewed with its
+    /// newest attested checkpoint (client::renew_bundle).
+    [[nodiscard]] http::Response long_term_route(const http::Request& request) const;
+    [[nodiscard]] nlohmann::json long_term_view(Role role) const;
+    [[nodiscard]] http::Response renew_route(const Signed& who, const nlohmann::json& body) const;
+    /// The status as node::LongTermWatch gives it, reading what the ledger
+    /// stored since the last call; null without a ledger.
+    [[nodiscard]] nlohmann::json long_term_status() const;
+    /// The conversion's next rotation (long-term.convert): the log key's,
+    /// then the top key's, to the console's next key (ML-DSA-65), signed by
+    /// the organization after an owner's passkey.
+    [[nodiscard]] std::variant<PersonStep, http::Response>
+    long_term_step(const Signed& who, const nlohmann::json& intent) const;
+    /// Once the ledger has rotated to a next key the console keeps sealed,
+    /// that key takes its key's own name ("log", "root"), and the one it
+    /// replaced is kept as retired. Any thread; nothing if locked.
+    void settle_long_term_keys() const;
+    /// After one of the conversion's rotations is registered: the keys
+    /// settled; and with `go_on` (it waited for approvals, and an owner sent
+    /// it), the next rotation signed by the organization and sent by itself
+    /// (held again if it needs approvals), or, with none left, the
+    /// checkpoint.
+    void continue_long_term(const std::string& by, bool go_on) const;
     [[nodiscard]] nlohmann::json settings_view(Role role) const;
     [[nodiscard]] http::Response enroll_begin(const http::Request& request) const;
     [[nodiscard]] http::Response enroll_finish(const http::Request& request) const;
@@ -971,6 +1008,14 @@ private:
         const std::lock_guard lock(api_mutex_);
         return approvals_;
     }
+    [[nodiscard]] Checkpointer checkpointer() const {
+        const std::lock_guard lock(api_mutex_);
+        return checkpointer_;
+    }
+    [[nodiscard]] std::vector<crypto::PublicKey> node_log_keys() const {
+        const std::lock_guard lock(api_mutex_);
+        return node_log_keys_;
+    }
     /// Tells the node the ledger's API may open (set up, or unlocked).
     void ready_now() const;
 
@@ -986,6 +1031,7 @@ private:
     Held held_;
     Cosignatures cosignatures_;
     ApprovalHooks approvals_;
+    std::vector<crypto::PublicKey> node_log_keys_;
     std::function<void()> on_ready_;
     mutable std::mutex mutex_;
     std::vector<Origin> origins_;
@@ -1033,6 +1079,10 @@ private:
     mutable std::jthread certifier_;
     /// One backup at a time.
     mutable std::mutex backup_mutex_;
+    /// The ledger's long-term status, read once per cosignature and token.
+    mutable node::LongTermWatch long_term_watch_;
+    /// The console's next keys made, and settled, one at a time.
+    mutable std::mutex long_term_mutex_;
     /// One credential issued at a time, so that two never take one status
     /// list entry; and the credential key sealed under it.
     mutable std::mutex credential_mutex_;

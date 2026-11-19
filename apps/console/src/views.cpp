@@ -116,6 +116,18 @@ http::Response Console::home_route(const Signed& who) const {
     });
     out["approvals"] = std::move(approvals);
     out["backup"] = backup_view();
+    // Reminders for the long term (spec v0.21): a log key that a quantum
+    // computer could forge, and time-stamp authorities' certificates that
+    // expire within 90 days.
+    const nlohmann::json long_term = long_term_status();
+    if (long_term.is_object()) {
+        const auto log_key = long_term.find("log_key");
+        out["long_term"] = {{"log_key_classical", log_key != long_term.end() &&
+                                                      log_key->is_object() &&
+                                                      !log_key->value("post_quantum", false)},
+                            {"certificates_expiring",
+                             long_term.value("certificates_expiring", nlohmann::json::array())}};
+    }
     return json(200, out);
 }
 

@@ -404,6 +404,22 @@ run delegation list --ledger "$SCRIPTED" --json > out.txt
 grep -q '"require_presence": *true' out.txt || fail "the owner's delegation requires presence"
 run kanhe-console setup --help > out.txt
 grep -q "for scripts" out.txt || fail "console setup --help"
+grep -q -- "--long-term" out.txt || fail "console setup --help names --long-term"
+# For records that must verify for decades: the ledger's own keys and the
+# console's witness key ML-DSA-65 from its genesis (the first run's question,
+# answered yes); the owner's key as before.
+LASTING="$WORK/lasting"
+run kanhe-console setup --ledger "$LASTING" --name "Lasting Owner" --credential owner.passkey \
+    --long-term --json > lasting.json
+[ "$(json 'd["long_term"]' < lasting.json)" = True ] || fail "console setup --long-term --json"
+run status --ledger "$LASTING" --json > lasting-status.json
+[ "$(json 'd["long_term"]["genesis_post_quantum"], d["long_term"]["root_key"]["algorithm"], d["long_term"]["log_key"]["algorithm"]' < lasting-status.json)" = "True ML-DSA-65 ML-DSA-65" ] ||
+    fail "setup --long-term makes post-quantum root and log keys"
+[ "$(run kanhe-console key list --ledger "$LASTING" --json | json 'sorted(k["name"] for k in d["keys"])')" = "['log', 'machine', 'owner', 'root', 'witness']" ] ||
+    fail "setup --long-term seals the same keys"
+run status --ledger "$SCRIPTED" --json > scripted-status.json
+[ "$(json 'd["long_term"]["post_quantum"]' < scripted-status.json)" = False ] ||
+    fail "setup without --long-term keeps today's keys"
 
 # The scripted ledger, served by its console: unlocked by the file, its API opens.
 start_console() {

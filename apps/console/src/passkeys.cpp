@@ -274,8 +274,16 @@ http::Response Console::enroll_finish(const http::Request& request) const {
         }
         const std::string prf = text_field(*body, "prf");
         const bool slot = is_prf_output(prf);
-        const SetUp setup{ledger_directory, ceremony->name, std::move(*credential),
-                          slot ? std::optional(prf) : std::nullopt, std::nullopt};
+        // Whether its records must verify for decades (spec v0.21): the page
+        // asks, recommending yes; without an answer, today's keys.
+        const auto long_term = body->find("long_term");
+        const SetUp setup{ledger_directory,
+                          ceremony->name,
+                          std::move(*credential),
+                          slot ? std::optional(prf) : std::nullopt,
+                          std::nullopt,
+                          long_term != body->end() && long_term->is_boolean() &&
+                              long_term->get<bool>()};
         FirstRun run;
         try {
             run = set_up(setup, *services_.keys, *services_.entropy);
@@ -291,6 +299,7 @@ http::Response Console::enroll_finish(const http::Request& request) const {
         fields["first_run"] = true;
         fields["recovery_code"] = run.recovery_code;
         fields["ledger"] = to_hex(run.ledger.bytes());
+        fields["long_term"] = setup.long_term;
         return json(200, fields);
     }
     const Role role = invitation->role;

@@ -591,6 +591,10 @@ Every verification report states the bundle's long-term status: the latest post-
 attestation that covers it, or none, with the advice to renew before 2030. `kanhe status` says
 the same of a ledger: whether its keys are post-quantum, when a witness last cosigned with an
 ML-DSA key, and which time-stamp authority's certificate expires soon, with what to do.
+The web console asks at its first run whether its records must verify for decades (yes, the
+default, makes its ledger's root and log keys ML-DSA-65 from the genesis), prepares a ledger
+begun with classical keys from Settings, as `ledger long-term` does, and renews proof files
+someone brings back ([apps/console](apps/console/README.md)).
 
 ```sh
 # A ledger begun with classical keys has exported evidence.cbor; its status advises.

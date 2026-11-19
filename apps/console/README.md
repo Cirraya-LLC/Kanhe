@@ -24,7 +24,7 @@ organization's guardians. Not yet: Windows.
 
 | Path | What it holds |
 |---|---|
-| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, approvals and guardians, parties, people, automation, backups, the witness, and the relay |
+| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, approvals and guardians, evidence for decades, parties, people, automation, backups, the witness, and the relay |
 | `web/` | The page (`index.html`, `console.js`, `console.css`) and its catalogs in three languages (`web/i18n/`) |
 | `wasm/` | Its checks in the browser, built to WebAssembly (`tools/wasm/build.sh`) and embedded when `KANHE_CONSOLE_WASM_DIR` names them |
 | `cli/` | The `kanhe-console` program |
@@ -40,8 +40,10 @@ kanhe-console settings show
 
 - **The first run.** On a directory with no ledger, `console run` opens a one-time setup page
   (valid for an hour; also in `console/setup-link` in the ledger directory). The person gives a
-  name (a nickname works; it also names the ledger) and creates a passkey; the console makes the
-  ledger, its root and log keys, and the person's own key, all sealed, and registers the person
+  name (a nickname works; it also names the ledger), answers one question, "Will these records
+  need to verify in 20 years or more?", yes by default, and creates a passkey; the console makes
+  the ledger, its root and log keys (ML-DSA-65, post-quantum, for a yes; Ed25519 otherwise), and
+  the person's own key, all sealed, and registers the person
   as the owner: acting in person with that passkey, under a delegation of every statement type
   but the ledger's key rotations, which requires presence. It also registers the console's
   *machine* (a device, its key sealed too) with a delegation for contract calls only: while the
@@ -49,8 +51,9 @@ kanhe-console settings show
   online until their consents come in, and as its keeper, which fires the time rules that come
   due. Then the recovery sheet (the
   recovery code, shown once, to print or save) and a backup folder, and Home. For scripts,
-  `console setup --name NAME --credential FILE` does the same with a passkey from
-  `presence enroll`.
+  `console setup --name NAME --credential FILE [--long-term]` does the same with a passkey from
+  `presence enroll`. The console's own witness key follows the answer too; people's passkeys
+  stay as they are (there are no post-quantum passkeys yet).
 - **A lost passkey.** "Lost your passkey?" on the sign-in page takes the recovery code and a
   new passkey: the root key makes the new passkey the owner's only one on the ledger, the lost
   one stops signing in, confirming, and unlocking, and the owner's other sessions end; while the
@@ -347,6 +350,29 @@ kanhe-console settings show
   once they have approved it the new passkey becomes the owner's only one and signs in, the lost
   one stops, and the owner's other sessions end. Until then nothing changes. As `kanhe ledger
   guardians set|show|remove` do.
+- **Evidence for decades** (spec v0.21, section 11.1). A future quantum computer could forge
+  the signatures in use today; Settings, "Keep records verifiable for decades", says in plain
+  words where the ledger stands, as `kanhe status` does: whether its top (root) key and log key
+  are post-quantum, whether it began so, when a witness whose key is post-quantum last cosigned,
+  and which time-stamp authority's certificate expires within 90 days. For a ledger that began
+  with today's keys, "Prepare for the long term" does what `kanhe ledger long-term` does, with
+  the same plan (`client::plan_long_term`): the log key's rotation, then the root key's, each to
+  an ML-DSA-65 key the console makes and keeps sealed where it keeps the current ones, each
+  signed by the organization after an owner's passkey (one tap each), then a checkpoint with the
+  new log key. The console's node holds the next log key ahead of its rotation (sealed as
+  `log-next`, made when it opens a classical ledger), so it signs with it the moment the rotation
+  is registered; once the ledger has rotated to a new key, that key becomes `log` or `root`, and
+  the one it replaced is kept as `log-retired` or `root-retired`. While guardians guard the
+  rotations, each goes for their approval, and once they have approved one, the console takes
+  the next step by itself. Whatever stops it, it goes on from where it stopped: the steps are
+  found again from the ledger. Home reminds owners and admins while the log key is classical
+  ("prepare for the long term before 2030"), and when a time-stamp authority's certificate
+  expires within 90 days. "Renew a proof file" on the Things screen takes a proof file someone
+  brings back and adds this ledger's newest checkpoint that a witness cosigned or a time-stamp
+  authority stamped (`client::renew_bundle`, as `kanhe evidence renew --ledger` does), verified
+  with the witnesses this console asks, and says in words whether a post-quantum attestation now
+  covers it; a proof file of another ledger is refused. Proofs exported now carry the newest
+  checkpoint already; the Verify screen shows a proof's long-term status too.
 - **Confirming: one tap per statement.** `console user link NAME --actor ID --key KEY` lets a user
   act as a person of the ledger; `console user passkeys NAME --out DIR` writes their passkeys
   for `actor set-presence`. The console then prepares what the person asks for (registering,

@@ -22,6 +22,7 @@
 #include <sys/wait.h>
 #include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include <kanhe/client/peers.hpp>
 #include <kanhe/client/support.hpp>
@@ -554,11 +555,16 @@ int run_person_console(const Args& args, const std::filesystem::path& dir,
         options.witness = [web](ByteView request) {
             return web->witness_cosign(request);
         };
-        // The log key signs checkpoints, receipts, and evidence once unlocked.
-        if (std::ranges::any_of(keys.keys(), [](const auto& k) { return k.name == "log"; })) {
-            options.log_keys.push_back(
-                std::make_shared<crypto::openssl::KeyPair>(keys.open("log")));
+        // The log key signs checkpoints, receipts, and evidence once unlocked;
+        // while it is classical, beside the next one, post-quantum, which it
+        // signs with once the ledger rotates to it (Settings, for the long
+        // term).
+        std::vector<crypto::PublicKey> served_keys;
+        for (auto& key : console::served_log_keys(keys)) {
+            served_keys.push_back(key->public_key());
+            options.log_keys.push_back(std::move(key));
         }
+        web->set_node_log_keys(std::move(served_keys));
         serve_credentials(options, keys, web);
         // The console's machine, set up at the first run: the ledger's
         // registrar and keeper while the console is unlocked.
@@ -1138,8 +1144,9 @@ int cmd_console_setup(const Args& args) {
     ledger::SystemEntropy entropy;
     console::FirstRun run;
     try {
-        run =
-            console::set_up({dir, args.need("name"), passkey, std::nullopt, unlock}, keys, entropy);
+        run = console::set_up(
+            {dir, args.need("name"), passkey, std::nullopt, unlock, args.has("long-term")}, keys,
+            entropy);
     } catch (const std::invalid_argument& e) {
         throw UsageError{e.what()};
     } catch (const std::exception& e) {
@@ -1149,11 +1156,16 @@ int cmd_console_setup(const Args& args) {
         print_json({{"ledger", id_json(run.ledger)},
                     {"owner", id_json(run.owner)},
                     {"user", args.need("name")},
+                    {"long_term", args.has("long-term")},
                     {"recovery_code", run.recovery_code}});
         return exit_ok;
     }
     std::println("made the ledger {} with its owner {}, who signs in with the passkey in {}",
                  hex_id(run.ledger), args.need("name"), file);
+    if (args.has("long-term")) {
+        std::println("Its root key, log key, and the console's witness key are ML-DSA-65 "
+                     "(post-quantum), for records that must verify for decades.");
+    }
     std::println("");
     std::println("The console's recovery code (shown once: write it down and keep it safe):");
     std::println("");

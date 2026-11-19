@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -25,8 +26,10 @@
 #include <nlohmann/json.hpp>
 
 #include <kanhe/client/backups.hpp>
+#include <kanhe/client/long_term.hpp>
 #include <kanhe/client/peers.hpp>
 #include <kanhe/client/public_witness.hpp>
+#include <kanhe/client/public_witnesses.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/relay.hpp>
 #include <kanhe/client/relay_server.hpp>
@@ -422,9 +425,11 @@ struct ConsoleWorld {
         return web.handle(r);
     }
 
-    /// Registers `passkey` with an invitation code; returns the answer.
+    /// Registers `passkey` with an invitation code; returns the answer. At
+    /// the first run, `long_term` answers its question.
     http::Response enroll(const kanhe::test::SoftPasskey& passkey, const std::string& code,
-                          const std::string& name = {}, const std::string& prf = {}) {
+                          const std::string& name = {}, const std::string& prf = {},
+                          std::optional<bool> long_term = std::nullopt) {
         const auto begun = post("/console/api/enroll/begin", {{"code", code}, {"name", name}});
         if (begun.status != 200) {
             return begun;
@@ -432,13 +437,17 @@ struct ConsoleWorld {
         const auto options = nlohmann::json::parse(body(begun));
         const auto challenge =
             *kanhe::from_base64url(options["public_key"]["challenge"].get<std::string>());
-        return post("/console/api/enroll/finish",
-                    {{"ceremony", options["ceremony"]},
-                     {"attestation_object", kanhe::to_base64url(passkey.attestation(provider()))},
-                     {"client_data_json",
-                      kanhe::to_base64url(passkey.client_data("webauthn.create", challenge))},
-                     {"label", "laptop"},
-                     {"prf", prf}});
+        nlohmann::json finish{
+            {"ceremony", options["ceremony"]},
+            {"attestation_object", kanhe::to_base64url(passkey.attestation(provider()))},
+            {"client_data_json",
+             kanhe::to_base64url(passkey.client_data("webauthn.create", challenge))},
+            {"label", "laptop"},
+            {"prf", prf}};
+        if (long_term) {
+            finish["long_term"] = *long_term;
+        }
+        return post("/console/api/enroll/finish", finish);
     }
 
     /// Signs in with `passkey` (and its PRF output, if any); returns the answer.
@@ -1056,8 +1065,10 @@ struct FirstRunWorld {
     bool ready = false;
     nlohmann::json made;
 
-    /// With `prf`, the passkey gives its PRF output when it is made.
-    explicit FirstRunWorld(const std::string& prf = {}) {
+    /// With `prf`, the passkey gives its PRF output when it is made; with
+    /// `long_term`, the first run's question is answered.
+    explicit FirstRunWorld(const std::string& prf = {},
+                           std::optional<bool> long_term = std::nullopt) {
         // The ledger checks statements' times against the system's clock.
         w.clock.set(kanhe::ledger::SystemClock{}.now());
         w.web.set_on_ready([this] { ready = true; });
@@ -1068,7 +1079,8 @@ struct FirstRunWorld {
         // The first run asks for the PRF output at once, with the console's salt.
         CHECK(nlohmann::json::parse(body(begun))["public_key"]["extensions"]["prf"]["eval"]["first"]
                   .is_string());
-        const auto answer = w.enroll(alice, w.invite("", console::Role::owner), "Alice", prf);
+        const auto answer =
+            w.enroll(alice, w.invite("", console::Role::owner), "Alice", prf, long_term);
         REQUIRE(answer.status == 200);
         made = nlohmann::json::parse(body(answer));
     }
@@ -2774,7 +2786,7 @@ TEST_CASE("guardians: set by an owner, approved by the new guardians, then in ef
     CHECK(shown["in_effect"].is_null());
     REQUIRE(shown["waiting"].size() == 1);
     CHECK(shown["may_change"] == true);
-    CHECK(shown["organization_work"].size() == 5);
+    CHECK(shown["organization_work"].size() == 6);
     CHECK(json_of(w.get("/console/api/guardians", w.chan.token))["may_change"] == false);
     // An owner sees the organization's statement among what was sent.
     CHECK(json_of(w.get("/console/api/approvals", w.alice.token))["sent"].size() == 1);
@@ -4967,6 +4979,396 @@ TEST_CASE("a machine's grant sent for the guardians' approval is set up once the
     INFO(body(setup));
     CHECK(setup.status == 200);
     CHECK(answer_of(f.w.get("/console/api/automation", g.owner))["set_up"].empty());
+}
+
+namespace {
+
+/// The console's node for the long term (spec v0.21): the log keys it signs
+/// with, as `kanhe-console run` gives them (the next one held ahead of its
+/// rotation while the log key is classical), and checkpoints made with them,
+/// as LedgerApi::checkpoint_now makes them.
+struct LongTermNode {
+    std::vector<std::shared_ptr<const kanhe::crypto::Signer>> ring;
+
+    LongTermNode(FirstRunWorld& f, Served& served) : ring(console::served_log_keys(f.w.keys)) {
+        std::vector<kanhe::crypto::PublicKey> keys;
+        for (const auto& key : ring) {
+            keys.push_back(key->public_key());
+        }
+        f.w.web.set_node_log_keys(keys);
+        f.w.web.set_checkpointer([this, &served](auto respond) {
+            std::vector<const kanhe::crypto::Signer*> signers;
+            for (const auto& key : ring) {
+                signers.push_back(key.get());
+            }
+            const auto made = served.session.ledger().checkpoint(kanhe::ledger::LogKeys(signers));
+            http::Response r;
+            r.status = made ? 200 : 500;
+            const std::string text =
+                made ? std::string("{}")
+                     : nlohmann::json{{"error", {{"message", made.error().detail}}}}.dump();
+            r.body.assign(text.begin(), text.end());
+            respond(std::move(r));
+        });
+    }
+};
+
+std::vector<std::string> sealed_names(console::KeyStore& keys) {
+    std::vector<std::string> out;
+    for (const auto& k : keys.keys()) {
+        out.push_back(k.name);
+    }
+    std::ranges::sort(out);
+    return out;
+}
+
+const nlohmann::json convert{{"action", "long-term.convert"}};
+
+} // namespace
+
+TEST_CASE("a first run for records that last decades makes the ledger's keys post-quantum",
+          "[console][setup][long-term]") {
+    FirstRunWorld f({}, true);
+    Served served(f);
+    CHECK(f.made["long_term"] == true);
+    const std::string owner = f.made["session"].get<std::string>();
+    // Its genesis names ML-DSA-65 root and log keys; the console's witness
+    // key is ML-DSA-65 too; the owner's and the machine's keys are as before.
+    const auto& state = served.session.state();
+    CHECK(state.root_key().algorithm == kanhe::crypto::SigAlg::ml_dsa_65);
+    CHECK(state.log_key().algorithm == kanhe::crypto::SigAlg::ml_dsa_65);
+    CHECK(f.w.keys.open("witness").public_key().algorithm == kanhe::crypto::SigAlg::ml_dsa_65);
+    CHECK(f.w.keys.open("owner").public_key().algorithm == kanhe::crypto::SigAlg::ed25519);
+    CHECK(f.w.keys.open("machine").public_key().algorithm == kanhe::crypto::SigAlg::ed25519);
+    // The node needs no next log key, so none is made.
+    LongTermNode node(f, served);
+    CHECK(node.ring.size() == 1);
+    CHECK(sealed_names(f.w.keys) ==
+          std::vector<std::string>{"log", "machine", "owner", "root", "witness"});
+    // Settings say so; there is nothing to convert, and Home has no reminder.
+    const auto lt = answer_of(f.w.get("/console/api/long-term", owner));
+    CHECK(lt["status"]["post_quantum"] == true);
+    CHECK(lt["status"]["genesis_post_quantum"] == true);
+    CHECK(lt["next"].is_null());
+    CHECK(lt["remaining"].empty());
+    CHECK(answer_of(f.w.get("/console/api/home", owner))["long_term"]["log_key_classical"] ==
+          false);
+    const auto refused = f.w.post_as("/console/api/prepare", convert, owner);
+    CHECK(refused.status == 409);
+    CHECK(body(refused).find("post-quantum already") != std::string::npos);
+}
+
+TEST_CASE("a classical ledger is prepared for the long term: two taps, then a checkpoint",
+          "[console][long-term]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const auto old_root = served.session.state().root_key();
+    const auto old_log = served.session.state().log_key();
+    CHECK(old_log.algorithm == kanhe::crypto::SigAlg::ed25519);
+    // The node holds the next log key ahead of the rotation: made once,
+    // sealed, and the same at the next start.
+    LongTermNode node(f, served);
+    REQUIRE(node.ring.size() == 2);
+    const auto next_log = node.ring[1]->public_key();
+    CHECK(next_log.algorithm == kanhe::crypto::SigAlg::ml_dsa_65);
+    const auto again = console::served_log_keys(f.w.keys);
+    REQUIRE(again.size() == 2);
+    CHECK(again[1]->public_key() == next_log);
+    CHECK(f.w.keys.open("log-next").public_key() == next_log);
+
+    // Classical: Home reminds, and Settings say what it takes.
+    CHECK(answer_of(f.w.get("/console/api/home", owner))["long_term"]["log_key_classical"] == true);
+    auto lt = answer_of(f.w.get("/console/api/long-term", owner));
+    CHECK(lt["status"]["post_quantum"] == false);
+    CHECK(lt["next"] == "rotate-log-key");
+    CHECK(lt["may_convert"] == true);
+    CHECK(lt["remaining"] == nlohmann::json::array({"rotate-log-key", "rotate-root-key"}));
+    CHECK(lt["steps"][0]["from"]["algorithm"] == "Ed25519");
+    CHECK(lt["steps"][0]["to"]["algorithm"] == "ML-DSA-65");
+    CHECK(lt["guardians"] == false);
+
+    // The log key's rotation, signed by the organization after the tap.
+    const auto first = f.w.post_as("/console/api/prepare", convert, owner);
+    INFO(body(first));
+    REQUIRE(first.status == 200);
+    const auto prepared = answer_of(first);
+    CHECK(prepared["summary"]["type"] == "ledger-rotate-log-key");
+    CHECK(prepared["summary"]["algorithm"] == "ML-DSA-65");
+    CHECK(prepared["summary"]["by_organization"] == true);
+    CHECK(prepared["summary"]["long_term"] == "rotate-log-key");
+    CHECK(prepared["summary"]["approvals"]["needed"] == false);
+    const auto rotated = approve(f.w, owner, prepared, f.alice);
+    INFO(body(rotated));
+    REQUIRE(rotated.status == 201);
+    // The new log key is in effect, and is the console's log key now.
+    CHECK(served.session.state().log_key() == next_log);
+    CHECK(f.w.keys.open("log").public_key() == next_log);
+    CHECK(f.w.keys.open("log-retired").public_key() == old_log);
+    CHECK(sealed_names(f.w.keys) ==
+          std::vector<std::string>{"log", "log-retired", "machine", "owner", "root", "witness"});
+
+    // Then the top key's.
+    lt = answer_of(f.w.get("/console/api/long-term", owner));
+    CHECK(lt["next"] == "rotate-root-key");
+    CHECK(lt["steps"][0]["status"] == "kept");
+    const auto second = f.w.post_as("/console/api/prepare", convert, owner);
+    INFO(body(second));
+    REQUIRE(second.status == 200);
+    const auto prepared_root = answer_of(second);
+    CHECK(prepared_root["summary"]["type"] == "actor-rotate-key");
+    CHECK(prepared_root["summary"]["subject"] ==
+          kanhe::to_hex(served.session.state().ledger_id().bytes()));
+    CHECK(prepared_root["summary"]["algorithm"] == "ML-DSA-65");
+    CHECK(prepared_root["summary"]["long_term"] == "rotate-root-key");
+    const auto next_root = f.w.keys.open("root-next").public_key();
+    REQUIRE(approve(f.w, owner, prepared_root, f.alice).status == 201);
+    CHECK(served.session.state().root_key() == next_root);
+    CHECK(f.w.keys.open("root").public_key() == next_root);
+    CHECK(f.w.keys.open("root-retired").public_key() == old_root);
+    CHECK(f.w.post_as("/console/api/prepare", convert, owner).status == 409);
+
+    // Then the checkpoint with the new log key.
+    lt = answer_of(f.w.get("/console/api/long-term", owner));
+    CHECK(lt["status"]["post_quantum"] == true);
+    const auto finished =
+        f.w.post_as("/console/api/long-term/checkpoint", nlohmann::json::object(), owner);
+    INFO(body(finished));
+    REQUIRE(finished.status == 200);
+    const auto done = answer_of(finished);
+    CHECK(done["status"]["post_quantum"] == true);
+    CHECK(done["status"]["genesis_post_quantum"] == false);
+    CHECK(done["status"]["log_key"]["algorithm"] == "ML-DSA-65");
+    CHECK(done["steps"][2]["status"] == "done");
+    CHECK(done["next"].is_null());
+    CHECK(kanhe::client::long_term_checkpointed(served.session.ledger()));
+    // Home reminds no more; the node, started again, holds the new key only.
+    CHECK(answer_of(f.w.get("/console/api/home", owner))["long_term"]["log_key_classical"] ==
+          false);
+    const auto restarted = console::served_log_keys(f.w.keys);
+    REQUIRE(restarted.size() == 1);
+    CHECK(restarted[0]->public_key() == next_log);
+    // The organization's statements sign with the new top key.
+    HeldAtNode held_at{served.session.ledger(), f.w.clock, f.w.dir.path};
+    held_at.serve(f.w.web);
+    const auto guardians =
+        f.w.post_as("/console/api/prepare",
+                    {{"action", "guardians.set"},
+                     {"k", 1},
+                     {"guardians", nlohmann::json::array({actor_of(f, owner, "Alice")})},
+                     {"within_days", 7},
+                     {"no_spare", true}},
+                    owner);
+    REQUIRE(guardians.status == 200);
+    // Signed with the new top key, and held for its guardian's approval.
+    const auto held = approve(f.w, owner, answer_of(guardians), f.alice);
+    INFO(body(held));
+    CHECK(held.status == 202);
+    std::vector<std::string> actions;
+    for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+        actions.push_back(a.action);
+    }
+    CHECK(std::ranges::contains(actions, std::string("long-term.log-key")));
+    CHECK(std::ranges::contains(actions, std::string("long-term.root-key")));
+    CHECK(std::ranges::contains(actions, std::string("long-term.checkpoint")));
+}
+
+TEST_CASE("preparing for the long term is an owner's, unlocked, with the next key held",
+          "[console][long-term]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string admin = f.w.session_for("Ann", console::Role::admin);
+    const std::string viewer = f.w.session_for("Vera", console::Role::viewer);
+    LongTermNode node(f, served);
+    CHECK(f.w.post_as("/console/api/prepare", convert, admin).status == 403);
+    CHECK(f.w.post_as("/console/api/prepare", convert, viewer).status == 403);
+    auto lt = answer_of(f.w.get("/console/api/long-term", admin));
+    CHECK(lt["may_convert"] == false);
+    CHECK(lt["why_not"] == "owner");
+    CHECK(
+        f.w.post_as("/console/api/long-term/checkpoint", nlohmann::json::object(), viewer).status ==
+        403);
+    CHECK(f.w.post_as("/console/api/long-term/renew", {{"upload", "x"}}, viewer).status == 403);
+    CHECK(f.w.post_as("/console/api/long-term/elsewhere", nlohmann::json::object(), owner).status ==
+          404);
+    CHECK(f.w.post_as("/console/api/long-term", nlohmann::json::object(), owner).status == 405);
+    // A node that does not hold the next log key: never rotated to.
+    f.w.web.set_node_log_keys({node.ring[0]->public_key()});
+    lt = answer_of(f.w.get("/console/api/long-term", owner));
+    CHECK(lt["why_not"] == "restart");
+    const auto restart = f.w.post_as("/console/api/prepare", convert, owner);
+    CHECK(restart.status == 409);
+    CHECK(body(restart).find("restart the console") != std::string::npos);
+    // Locked: nothing is signed.
+    const std::string code = f.made["recovery_code"].get<std::string>();
+    f.w.keys.lock();
+    CHECK(answer_of(f.w.get("/console/api/long-term", owner))["why_not"] == "locked");
+    CHECK(f.w.post_as("/console/api/prepare", convert, owner).status == 423);
+    REQUIRE(f.w.keys.unlock({console::SlotKind::recovery, {}}, code));
+}
+
+TEST_CASE("a proof file is renewed with this ledger's newest attested checkpoint",
+          "[console][long-term]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    LongTermNode node(f, served);
+    const auto id = register_photo(f, owner, "the photo itself");
+    const auto exported = proof(f.w, owner, {{"record", kanhe::to_hex(id.bytes())}});
+    REQUIRE(exported.status == 200);
+    const std::string old_proof(exported.body.begin(), exported.body.end());
+    auto renew = [&](const std::string& content, const std::string& token = {}) {
+        const std::string as = token.empty() ? owner : token;
+        const auto uploaded = upload(f.w, as, "proof.cbor", content);
+        REQUIRE(uploaded.status == 200);
+        return f.w.post_as("/console/api/long-term/renew",
+                           {{"upload", answer_of(uploaded)["upload"]}}, as);
+    };
+    auto code_of = [](const http::Response& r) {
+        return answer_of(r)["error"]["code"].get<std::string>();
+    };
+    // Not a proof file.
+    const auto junk = renew("not a proof");
+    CHECK(junk.status == 422);
+    CHECK(code_of(junk) == "not_a_proof");
+
+    // The ledger prepared for the long term: two taps, and its checkpoint.
+    for (int step = 0; step < 2; ++step) {
+        const auto prepared = f.w.post_as("/console/api/prepare", convert, owner);
+        REQUIRE(prepared.status == 200);
+        REQUIRE(approve(f.w, owner, answer_of(prepared), f.alice).status == 201);
+    }
+    REQUIRE(
+        f.w.post_as("/console/api/long-term/checkpoint", nlohmann::json::object(), owner).status ==
+        200);
+    // Nothing has attested a checkpoint since the proof was made.
+    const auto unattested = renew(old_proof);
+    CHECK(unattested.status == 409);
+    CHECK(code_of(unattested) == "not_attested");
+
+    // A witness whose key is ML-DSA-65 cosigns the latest checkpoint (dated),
+    // following the ledger from its genesis.
+    TempDirectory archive;
+    auto witness_key = kanhe::crypto::openssl::KeyPair::generate(kanhe::crypto::SigAlg::ml_dsa_65);
+    REQUIRE(witness_key);
+    kanhe::Bytes genesis;
+    REQUIRE(served.session.ledger().visit_entry(
+        0, [&](kanhe::ByteView e) { genesis.assign(e.begin(), e.end()); }));
+    const auto ledger_id = served.session.state().ledger_id();
+    kanhe::client::add_witnessed(archive.path,
+                                 kanhe::client::state_from_genesis(genesis, "archive", ledger_id));
+    const auto request = served.session.ledger().cosign_request(0);
+    REQUIRE(request);
+    const auto cosignature = kanhe::client::witness_cosign(
+        archive.path, *witness_key, *kanhe::protocol::encode_cosign_request(*request),
+        f.w.clock.now());
+    INFO((cosignature ? std::string() : std::string(cosignature.error().detail)));
+    REQUIRE(cosignature);
+    REQUIRE(served.session.ledger().add_cosignature(*cosignature, witness_key->public_key()));
+
+    // Renewed, though this console does not trust that witness yet.
+    const auto untrusted = renew(old_proof);
+    INFO(body(untrusted));
+    REQUIRE(untrusted.status == 200);
+    const auto first = answer_of(untrusted);
+    CHECK(first["name"] == "proof-renewed.cbor");
+    CHECK(first["renewals"] == 1);
+    CHECK(first["added"]["key_rotations"] == 2);
+    CHECK(first["added"]["cosignatures"] == 1);
+    CHECK(first["tree_size"].get<std::uint64_t>() > first["from_size"].get<std::uint64_t>());
+    CHECK(first["long_term"]["post_quantum"] == false);
+    const auto renewed_bytes = *kanhe::from_base64url(first["file"].get<std::string>());
+    // Whoever trusts the witness finds a post-quantum attestation covering it.
+    kanhe::protocol::VerifyOptions options;
+    options.expected_ledger = ledger_id;
+    options.trusted_witnesses.push_back(witness_key->public_key());
+    const auto checked = kanhe::ledger::verify_bundle(provider(), renewed_bytes, options);
+    INFO((checked ? std::string() : std::string(checked.error().detail)));
+    REQUIRE(checked);
+    // Renewed again with nothing newer: nothing to add.
+    const auto again = renew(std::string(renewed_bytes.begin(), renewed_bytes.end()));
+    CHECK(again.status == 409);
+    CHECK(code_of(again) == "nothing_new");
+
+    // Once this console asks that witness, the renewal says it covers it.
+    kanhe::client::save_used_witnesses(
+        f.w.dir.path, {kanhe::client::UsedWitness{"archive", "https://archive.example.org",
+                                                  witness_key->public_key(), f.w.clock.now()}});
+    const auto trusted = renew(old_proof);
+    INFO(body(trusted));
+    REQUIRE(trusted.status == 200);
+    const auto lt = answer_of(trusted)["long_term"];
+    CHECK(lt["post_quantum"] == true);
+    REQUIRE(lt["attested_by"].size() >= 1);
+    CHECK(lt["attested_by"][0]["kind"] == "witness");
+    CHECK(lt["attested_by"][0]["algorithm"] == "ml-dsa-65");
+    std::vector<std::string> actions;
+    for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+        actions.push_back(a.action);
+    }
+    CHECK(std::ranges::contains(actions, std::string("evidence.renew")));
+
+    // A proof file of another ledger is refused, with what to do.
+    FirstRunWorld other;
+    Served other_served(other);
+    const std::string other_owner = other.made["session"].get<std::string>();
+    const auto other_id = register_photo(other, other_owner, "another photo");
+    const auto elsewhere =
+        proof(other.w, other_owner, {{"record", kanhe::to_hex(other_id.bytes())}});
+    REQUIRE(elsewhere.status == 200);
+    const auto refused = renew(std::string(elsewhere.body.begin(), elsewhere.body.end()));
+    CHECK(refused.status == 409);
+    CHECK(code_of(refused) == "other_ledger");
+}
+
+TEST_CASE("under guardians, each new key waits for them, and the console goes on by itself",
+          "[console][long-term][guardians]") {
+    GuardedWorld g;
+    FirstRunWorld& f = g.f;
+    LongTermNode node(f, g.served);
+    const auto next_log = node.ring.at(1)->public_key();
+    auto lt = answer_of(f.w.get("/console/api/long-term", g.owner));
+    CHECK(lt["guardians"] == true);
+    // The log key's rotation: for the guardians' approval.
+    const auto prepared = f.w.post_as("/console/api/prepare", convert, g.owner);
+    INFO(body(prepared));
+    REQUIRE(prepared.status == 200);
+    CHECK(answer_of(prepared)["summary"]["approvals"]["needed"] == true);
+    CHECK(answer_of(prepared)["summary"]["approvals"]["rules"][0]["source"] == "guardians");
+    const auto sent = approve(f.w, g.owner, answer_of(prepared), f.alice);
+    INFO(body(sent));
+    REQUIRE(sent.status == 202);
+    const std::string first = answer_of(sent)["id"].get<std::string>();
+    lt = answer_of(f.w.get("/console/api/long-term", g.owner));
+    CHECK(lt["why_not"] == "held");
+    REQUIRE(lt["held"].size() == 1);
+    CHECK(lt["held"][0]["step"] == "rotate-log-key");
+    CHECK(f.w.post_as("/console/api/prepare", convert, g.owner).status == 409);
+    REQUIRE(give_held(f, first, g.bob, g.bob_key).status == 202);
+    REQUIRE(give_held(f, first, g.carol, g.carol_key).status == 201);
+    CHECK(g.served.session.state().log_key() == next_log);
+
+    // At the next look, the new log key is the console's, and the top key's
+    // rotation goes for their approval by itself.
+    REQUIRE(f.w.get("/console/api/home", g.owner).status == 200);
+    CHECK(f.w.keys.open("log").public_key() == next_log);
+    lt = answer_of(f.w.get("/console/api/long-term", g.owner));
+    REQUIRE(lt["held"].size() == 1);
+    CHECK(lt["held"][0]["step"] == "rotate-root-key");
+    const std::string second = lt["held"][0]["id"].get<std::string>();
+    REQUIRE(give_held(f, second, g.bob, g.bob_key).status == 202);
+    REQUIRE(give_held(f, second, g.carol, g.carol_key).status == 201);
+
+    // Then the checkpoint with the new log key, by itself too.
+    REQUIRE(f.w.get("/console/api/home", g.owner).status == 200);
+    CHECK(g.served.session.state().root_key().algorithm == kanhe::crypto::SigAlg::ml_dsa_65);
+    CHECK(f.w.keys.open("root").public_key() == g.served.session.state().root_key());
+    CHECK(kanhe::client::long_term_checkpointed(g.served.session.ledger()));
+    lt = answer_of(f.w.get("/console/api/long-term", g.owner));
+    CHECK(lt["status"]["post_quantum"] == true);
+    CHECK(lt["next"].is_null());
+    CHECK(lt["held"].empty());
 }
 
 #endif

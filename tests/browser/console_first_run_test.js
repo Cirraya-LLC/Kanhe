@@ -2,8 +2,10 @@
 // Copyright 2026 Cirraya
 //
 // One person's first run, in a real browser: on an empty directory, the
-// setup link leads through a name and a passkey, the recovery sheet, and the
-// backup folder to Home, in under ten clicks. Then Settings; then the
+// setup link leads through a name and a passkey (and one question, answered
+// yes already: records that must verify for decades get post-quantum keys),
+// the recovery sheet, and the backup folder to Home, in under ten clicks.
+// Then Settings; then the
 // laptop's passkey is lost, and the recovery code registers a new one on
 // another device (another virtual authenticator), after which the lost one
 // signs in no more.
@@ -101,6 +103,10 @@ const slotKinds = () =>
     await page.goto(setup);
     await page.getByRole("heading", { name: "Set up your console" }).waitFor();
     await page.getByText("Step 1 of 3").waitFor();
+    // The one question, answered yes already: keeping it costs no click.
+    await page.getByText("Will these records need to verify in 20 years or more? " +
+                         "(certificates, diplomas, deeds, contracts)").waitFor();
+    assert.equal(await page.getByLabel(/^\s*Yes \(recommended\)/).isChecked(), true);
     await page.getByLabel("Your name").fill("Alice");
     await click(page.getByRole("button", { name: "Create my passkey" }));
 
@@ -142,6 +148,10 @@ const slotKinds = () =>
     assert.deepEqual(slotKinds(), ["passkey", "recovery"]);
     const keys = JSON.parse(run("kanhe-console", "key", "list", "--json")).keys.map((k) => k.name).sort();
     assert.deepEqual(keys, ["log", "machine", "owner", "root", "witness"]);
+    // Yes: the ledger's own keys are post-quantum from its genesis.
+    const longTerm = JSON.parse(run("status", "--json")).long_term;
+    assert.equal(longTerm.genesis_post_quantum, true);
+    assert.equal(longTerm.root_key.algorithm, "ML-DSA-65");
     const settings = JSON.parse(run("kanhe-console", "settings", "show", "--json"));
     assert.equal(settings.backup_folder, suggested);
     assert.ok(fs.statSync(suggested).isDirectory());
