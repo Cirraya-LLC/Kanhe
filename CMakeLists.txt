@@ -33,6 +33,12 @@ set(KANHE_PUBLIC_WITNESSES "" CACHE STRING
 # Its front end (packs, lexer, parser) is built either way.
 set(KANHE_BO "AUTO" CACHE STRING "Build the Bo compiler: AUTO, ON, or OFF")
 set_property(CACHE KANHE_BO PROPERTY STRINGS AUTO ON OFF)
+# Zero-knowledge range proofs (Longfellow ZK) and their helper program,
+# kanhe-range; not in the browser or the core alone, so far.
+include(CMakeDependentOption)
+cmake_dependent_option(KANHE_RANGE_PROOFS
+    "Build zero-knowledge range proofs (Longfellow ZK) and kanhe-range" ON
+    "NOT EMSCRIPTEN;NOT KANHE_CORE_ONLY" OFF)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -51,6 +57,9 @@ if(EMSCRIPTEN)
     add_subdirectory(apps/console/wasm)
 elseif(NOT KANHE_CORE_ONLY)
     add_subdirectory(chain/crypto/pkcs11)
+    if(KANHE_RANGE_PROOFS)
+        add_subdirectory(chain/crypto/longfellow)
+    endif()
     add_subdirectory(chain/ledger)
     add_subdirectory(chain/node)
     # The chain's client library, shared by its command line and the console.

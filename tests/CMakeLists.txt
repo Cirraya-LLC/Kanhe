@@ -368,6 +368,15 @@ if(TARGET kanhe_bo)
         COMMAND bash ${PROJECT_SOURCE_DIR}/examples/idc-hosting/idc-hosting.sh $<TARGET_FILE:kanhe>)
 endif()
 
+# Zero-knowledge range proofs (Longfellow ZK), where the build has them; and
+# kanhe-range, their helper for other programs, end to end.
+if(TARGET kanhe_crypto_longfellow)
+    target_sources(kanhe_tests PRIVATE crypto/longfellow_range_test.cpp)
+    target_link_libraries(kanhe_tests PRIVATE kanhe::crypto_longfellow)
+    add_test(NAME range_helper_end_to_end
+        COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/range.sh $<TARGET_FILE:kanhe-range>)
+endif()
+
 # Keys on tokens (HSMs, USB keys), when SoftHSM is installed to stand in.
 if(TARGET kanhe_crypto_pkcs11)
     target_sources(kanhe_tests PRIVATE crypto/pkcs11_uri_test.cpp)

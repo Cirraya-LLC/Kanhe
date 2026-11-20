@@ -12,7 +12,8 @@
 // testvectors/merkle-sha256.json. A registrar's pending calls
 // (node/contracts.hpp) and invitation codes (client/peers.hpp) are built here
 // as CBOR, without the node or the client library. The Bo pack reader starts
-// from the official packs.
+// from the official packs. The range proof verifier starts from proofs of its
+// statement (range_proof_statement.hpp).
 //
 //   make_seeds DIR    writes DIR/<target>/<name> for each target
 
@@ -62,12 +63,18 @@
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
+#if defined(KANHE_HAVE_RANGE_PROOFS)
+#include <kanhe/crypto/longfellow.hpp>
+#endif
 #include <kanhe/ledger/backup.hpp>
 #include <kanhe/ledger/ledger.hpp>
 #include <kanhe/verifier/credentials.hpp>
 #include <kanhe/verifier/gzip.hpp>
 #include <kanhe/verifier/jcs.hpp>
 
+#if defined(KANHE_HAVE_RANGE_PROOFS)
+#include "range_proof_statement.hpp"
+#endif
 #include "support/timestamp_authority.hpp"
 
 namespace {
@@ -1921,6 +1928,21 @@ void renewal_seeds(const Seeds& seeds) {
     }
 }
 
+#if defined(KANHE_HAVE_RANGE_PROOFS)
+/// Proofs of range_proof_fuzz's statement: two, as proofs differ in the
+/// lengths of their runs and Merkle paths.
+void range_proof_seeds(const Seeds& seeds) {
+    namespace statement = fuzz::range_statement;
+    for (const char* name : {"proof-1", "proof-2"}) {
+        seeds.write("range_proof_fuzz", name,
+                    must(crypto::longfellow::prove_range(statement::salt(), statement::value,
+                                                         statement::low, statement::high,
+                                                         as_bytes(statement::transcript)),
+                         "range proof"));
+    }
+}
+#endif
+
 void merkle_seeds(const Seeds& seeds) {
     std::ifstream in(KANHE_TESTVECTORS_DIR "/merkle-sha256.json");
     if (!in) {
@@ -1993,6 +2015,9 @@ int main(int argc, char** argv) {
         invitation_seeds(seeds);
         search_query_seeds(seeds);
         merkle_seeds(seeds);
+#if defined(KANHE_HAVE_RANGE_PROOFS)
+        range_proof_seeds(seeds);
+#endif
         claim_seeds(seeds);
         membership_seeds(seeds);
         script_seeds(seeds);

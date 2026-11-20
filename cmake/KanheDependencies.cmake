@@ -73,6 +73,72 @@ if(NOT EMSCRIPTEN AND NOT KANHE_CORE_ONLY)
     target_link_libraries(kanhe_nuraft PUBLIC OpenSSL::SSL Threads::Threads)
 endif()
 
+# Longfellow ZK (Google, Apache-2.0): zero-knowledge range proofs
+# (chain/crypto/longfellow). Built here from its sources, like NuRaft: the
+# library is header templates and a few compiled files, which are built with
+# the project's compiler as a library apart, not held to the project's
+# warnings, their headers included as system headers.
+if(KANHE_RANGE_PROOFS)
+    FetchContent_Declare(longfellow
+        URL https://github.com/google/longfellow-zk/archive/1c0662989b919fe7b53a209a0a96f61f0e1b45c7.tar.gz
+        URL_HASH SHA256=f47d594cd1dca9090a103bfc0f90c40fae7ae756d462bf38b56a36d24770717d
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+        # Sources only: its own build would add tests, benchmarks, and flags.
+        SOURCE_SUBDIR do-not-build)
+    FetchContent_MakeAvailable(longfellow)
+    # GF(2^128) multiplies with carry-less multiplication: PCLMULQDQ on
+    # x86-64, PMULL (the crypto extension) on 64-bit Arm. The flag it needs,
+    # if the compiler's default target lacks it.
+    include(CheckCXXSourceCompiles)
+    set(_kanhe_clmul_probe [=[
+#if defined(__x86_64__) || defined(__i386__)
+#include <immintrin.h>
+int main() {
+    const __m128i a = _mm_set_epi64x(3, 5);
+    return _mm_cvtsi128_si32(_mm_clmulepi64_si128(a, a, 0x00));
+}
+#elif defined(__aarch64__)
+#include <arm_neon.h>
+int main() {
+    return static_cast<int>(vmull_p64(static_cast<poly64_t>(3), static_cast<poly64_t>(5)) & 1);
+}
+#else
+int main() { return 0; }
+#endif
+]=])
+    set(KANHE_CLMUL_FLAGS "")
+    check_cxx_source_compiles("${_kanhe_clmul_probe}" KANHE_CLMUL_BY_DEFAULT)
+    if(NOT KANHE_CLMUL_BY_DEFAULT)
+        foreach(flag -mpclmul -march=armv8-a+crypto)
+            string(MAKE_C_IDENTIFIER "KANHE_CLMUL_WITH${flag}" result)
+            set(CMAKE_REQUIRED_FLAGS ${flag})
+            check_cxx_source_compiles("${_kanhe_clmul_probe}" ${result})
+            unset(CMAKE_REQUIRED_FLAGS)
+            if(${result})
+                set(KANHE_CLMUL_FLAGS ${flag})
+                break()
+            endif()
+        endforeach()
+        if(NOT KANHE_CLMUL_FLAGS)
+            message(FATAL_ERROR "Range proofs need carry-less multiplication (PCLMULQDQ or "
+                "PMULL); configure with -DKANHE_RANGE_PROOFS=OFF to build without them")
+        endif()
+    endif()
+    set(longfellow_lib "${longfellow_SOURCE_DIR}/lib")
+    add_library(kanhe_longfellow STATIC
+        "${longfellow_lib}/util/log.cc"
+        "${longfellow_lib}/util/crypto.cc"
+        "${longfellow_lib}/circuits/sha/flatsha256_witness.cc"
+        "${longfellow_lib}/circuits/sha/sha256_constants.cc")
+    target_include_directories(kanhe_longfellow SYSTEM PUBLIC "${longfellow_lib}")
+    # Its hash and pseudo-random function call OpenSSL's SHA256_* and AES
+    # functions, deprecated since OpenSSL 3.0.
+    target_compile_definitions(kanhe_longfellow PUBLIC OPENSSL_SUPPRESS_DEPRECATED)
+    target_compile_options(kanhe_longfellow PUBLIC ${KANHE_CLMUL_FLAGS} PRIVATE -w)
+    target_compile_features(kanhe_longfellow PUBLIC cxx_std_17)
+    target_link_libraries(kanhe_longfellow PUBLIC OpenSSL::Crypto)
+endif()
+
 # Nayuki's QR Code generator (MIT): QR codes that open the browser verifier.
 if(NOT EMSCRIPTEN AND NOT KANHE_CORE_ONLY)
     FetchContent_Declare(qrcodegen

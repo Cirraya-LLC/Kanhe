@@ -29,6 +29,7 @@ Where each component ends up:
 | Asio (standalone) | 1.38.2 | BSL-1.0 | <https://github.com/chriskohlhoff/asio> | `kanhe`, `kanhe-console`, `kanhe-index` (header-only, compiled in) |
 | NuRaft | 3.0.0 | Apache-2.0 | <https://github.com/eBay/NuRaft> | `kanhe`, `kanhe-console`, `kanhe-index` (linked statically) |
 | SQLite (amalgamation) | 3.54.1 | Public domain (notice below) | <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> | `kanhe-index`, `kanhe-console` (linked statically): the search index |
+| Longfellow ZK | commit `1c0662989b919fe7b53a209a0a96f61f0e1b45c7` (2026-10-31) | Apache-2.0 | <https://github.com/google/longfellow-zk> | `kanhe-range` (compiled in): zero-knowledge range proofs |
 | QR Code generator library (C++) | 1.8.0 | MIT | <https://github.com/nayuki/QR-Code-generator> | `kanhe`, `kanhe-console` (linked statically): printed certificates' QR codes |
 | p11-kit's PKCS #11 header (`pkcs11.h`) | from the system's p11-kit, at build time | Permissive (notice below) | <https://github.com/p11-glue/p11-kit> | `kanhe`, `kanhe-console`, `kanhe-index`, when built with PKCS #11 support (the Docker image is); the header's types and constants only |
 | GCC runtime (libstdc++, libgcc) | GCC 16 | GPL-3.0-or-later WITH GCC-exception-3.1 | <https://gcc.gnu.org/> | the programs in the Docker image (linked statically); other builds link the system's C++ runtime dynamically |
@@ -56,9 +57,10 @@ Where each component ends up:
 
 ### Apache License 2.0
 
-OpenSSL, NuRaft, and (build and test only) Playwright and the OpenSSL command-line tool are
-licensed under the Apache License, Version 2.0, the license of Kanhe itself; its full text is
-in [`LICENSE`](LICENSE) and at <https://www.apache.org/licenses/LICENSE-2.0>.
+OpenSSL, NuRaft, Longfellow ZK, and (build and test only) Playwright and the OpenSSL
+command-line tool are licensed under the Apache License, Version 2.0, the license of Kanhe
+itself; its full text is in [`LICENSE`](LICENSE) and at
+<https://www.apache.org/licenses/LICENSE-2.0>.
 
 - **OpenSSL:** Copyright 1995-2025 The OpenSSL Project Authors. All Rights Reserved.
 - **NuRaft:** Copyright 2017-present eBay Inc. NuRaft contains code derived from cornerstone
@@ -66,6 +68,7 @@ in [`LICENSE`](LICENSE) and at <https://www.apache.org/licenses/LICENSE-2.0>.
   (<https://github.com/greensky00/latency-collector>), under the Apache License 2.0, and from
   crc32 by Stephan Brumme (<https://github.com/stbrumme/crc32>), Copyright 2011-2016 Stephan
   Brumme, under the zlib License (below).
+- **Longfellow ZK:** Copyright 2024-2026 Google LLC.
 - **JSON for Modern C++** contains parts of Abseil, Copyright 2018 The Abseil Authors, under the
   Apache License 2.0.
 

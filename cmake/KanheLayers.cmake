@@ -8,12 +8,14 @@
 # verifier), never a ledger, a node, or the client library. A link against the
 # direction fails the configure. So a change to the language or an application
 # leaves the chain's tests as they were. The core links nothing at all (it
-# stays portable to WASM and other compilers), and the search index links the
+# stays portable to WASM and other compilers), the cryptographic backends link
+# the core alone (and their own libraries), and the search index links the
 # chain and SQLite, never the language or the console.
 
 set(_kanhe_chain_targets
-    kanhe_core kanhe_crypto_openssl kanhe_crypto_pkcs11 kanhe_verifier kanhe_ledger
-    kanhe_node kanhe_client kanhe_cli_base kanhe_cli_chain kanhe kanhe_tests)
+    kanhe_core kanhe_crypto_openssl kanhe_crypto_pkcs11 kanhe_crypto_longfellow
+    kanhe_longfellow kanhe-range kanhe_verifier kanhe_ledger kanhe_node kanhe_client
+    kanhe_cli_base kanhe_cli_chain kanhe kanhe_tests)
 set(_kanhe_not_for_the_chain
     kanhe_bo kanhe::bo kanhe_bo_front kanhe::bo_front kanhe_console
     kanhe::console kanhe_search kanhe::search kanhe_sqlite)
@@ -22,6 +24,12 @@ set(_kanhe_not_for_the_language
     kanhe_ledger kanhe::ledger kanhe_node kanhe::node kanhe_client kanhe::client
     kanhe_console kanhe::console kanhe_search kanhe::search kanhe_sqlite
     kanhe_cli_chain)
+
+set(_kanhe_crypto_targets kanhe_crypto_openssl kanhe_crypto_pkcs11 kanhe_crypto_longfellow
+    kanhe_longfellow)
+set(_kanhe_not_for_crypto
+    kanhe_verifier kanhe::verifier kanhe_ledger kanhe::ledger kanhe_node kanhe::node
+    kanhe_client kanhe::client kanhe_cli_base kanhe_cli_chain)
 
 set(_kanhe_index_targets kanhe_search kanhe-index)
 set(_kanhe_not_for_the_index
@@ -47,6 +55,8 @@ function(kanhe_check_layers)
         "the chain links neither the Bo language, an application, nor SQLite")
     _kanhe_refuse_links("${_kanhe_language_targets}" "${_kanhe_not_for_the_language}"
         "the Bo language links only the chain's core, crypto, and verifier")
+    _kanhe_refuse_links("${_kanhe_crypto_targets}" "${_kanhe_not_for_crypto}"
+        "the cryptographic backends link only the core")
     _kanhe_refuse_links("${_kanhe_index_targets}" "${_kanhe_not_for_the_index}"
         "the search index links the chain and SQLite, not the Bo language or the console")
     if(TARGET kanhe_core)

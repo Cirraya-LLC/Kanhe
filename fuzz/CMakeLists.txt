@@ -41,6 +41,11 @@ kanhe_add_fuzzer(credential_fuzz kanhe::verifier)
 # document and status list, as `kanhe credential verify` checks one.
 kanhe_add_fuzzer(credential_verify_fuzz kanhe::verifier kanhe::crypto_openssl)
 kanhe_add_fuzzer(gzip_fuzz kanhe::verifier)
+# Zero-knowledge range proofs (Longfellow ZK), from anyone, against one
+# statement.
+if(TARGET kanhe_crypto_longfellow)
+    kanhe_add_fuzzer(range_proof_fuzz kanhe::crypto_longfellow)
+endif()
 # The state in a snapshot file, its contracts' code the v0.6 vectors' contract.
 kanhe_add_fuzzer(state_snapshot_fuzz)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
@@ -161,6 +166,10 @@ if(TARGET kanhe_bo_front)
     target_link_libraries(make_seeds PRIVATE kanhe::bo_front)
     target_compile_definitions(make_seeds PRIVATE KANHE_HAVE_BO_FRONT=1
         KANHE_BO_GOLDEN_DIR="${PROJECT_SOURCE_DIR}/tests/bo/golden")
+endif()
+if(TARGET kanhe_crypto_longfellow)
+    target_link_libraries(make_seeds PRIVATE kanhe::crypto_longfellow)
+    target_compile_definitions(make_seeds PRIVATE KANHE_HAVE_RANGE_PROOFS=1)
 endif()
 target_compile_definitions(make_seeds PRIVATE
     KANHE_TESTVECTORS_DIR="${PROJECT_SOURCE_DIR}/testvectors")
