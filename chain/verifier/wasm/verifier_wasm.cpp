@@ -8,7 +8,13 @@
 // "kind" set to "record" or "contract".
 // Strings returned to JavaScript are allocated with malloc; release them with
 // kanhe_free.
+//
+// Range proofs (spec v0.22) are checked with the Longfellow layer when the
+// build has it (KANHE_RANGE_PROOFS), and reported as not checked otherwise.
+// Its circuit is embedded compressed (embed-circuit.js) and loaded when the
+// first range proof is checked, never for evidence without one.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -16,6 +22,7 @@
 #include <exception>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <kanhe/core/cbor.hpp>
@@ -26,12 +33,56 @@
 #include <kanhe/verifier/credentials.hpp>
 #include <kanhe/verifier/report.hpp>
 
+#if defined(KANHE_RANGE_PROOFS)
+#include <kanhe/crypto/longfellow.hpp>
+#include <kanhe/verifier/gzip.hpp>
+
+namespace kanhe::verifier_wasm {
+// The range proofs' circuit, as one GZIP member (range_circuit.cpp).
+extern const std::uint8_t range_circuit_gzip[];
+extern const std::size_t range_circuit_gzip_size;
+extern const std::size_t range_circuit_size;
+} // namespace kanhe::verifier_wasm
+#endif
+
 namespace {
 
 using namespace kanhe;
 using verifier::Json;
 
-protocol::VerifyOptions options;
+#if defined(KANHE_RANGE_PROOFS)
+/// The circuit, decompressed and loaded once, when a range proof is first
+/// checked; the decompressed copy is freed once the circuit is read.
+Status range_circuit() {
+    static const Status loaded = []() -> Status {
+        const auto circuit = verifier::gzip_decompress(
+            ByteView(verifier_wasm::range_circuit_gzip, verifier_wasm::range_circuit_gzip_size),
+            verifier_wasm::range_circuit_size);
+        if (!circuit) {
+            return std::unexpected(circuit.error());
+        }
+        return crypto::longfellow::load_range_circuit(*circuit);
+    }();
+    return loaded;
+}
+#endif
+
+/// The options before any is set: range proofs checked when the build can.
+protocol::VerifyOptions initial_options() {
+    protocol::VerifyOptions initial;
+#if defined(KANHE_RANGE_PROOFS)
+    initial.range_verifier = [](ByteView commitment, std::uint64_t low, std::uint64_t high,
+                                ByteView transcript, ByteView proof) -> Status {
+        if (const auto ready = range_circuit(); !ready) {
+            return ready;
+        }
+        return crypto::longfellow::verify_range(commitment, low, high, transcript, proof);
+    };
+#endif
+    return initial;
+}
+
+protocol::VerifyOptions options = initial_options();
 /// The distrust entries since the last reset (spec v0.21), read again as
 /// one list each time one is added: an algorithm is distrusted once.
 std::vector<std::string> distrust_entries;
@@ -83,7 +134,7 @@ EMSCRIPTEN_KEEPALIVE const char* kanhe_version() {
 }
 
 EMSCRIPTEN_KEEPALIVE void kanhe_reset() {
-    options = {};
+    options = initial_options();
     distrust_entries.clear();
 }
 
@@ -99,6 +150,19 @@ EMSCRIPTEN_KEEPALIVE int kanhe_add_distrust(const char* entry) {
         return -1;
     }
     options.distrust = std::move(*parsed);
+    return 0;
+}
+
+/// Requires every range proof to carry this context (spec v0.22, section
+/// 11.3), a challenge the reader gave the prover, as `kanhe verify
+/// --range-context` takes it: 1 to 64 bytes in hex. Returns 0, or -1 if `hex`
+/// is not that.
+EMSCRIPTEN_KEEPALIVE int kanhe_set_range_context(const char* hex) {
+    auto bytes = from_hex(hex);
+    if (!bytes || bytes->empty() || bytes->size() > protocol::max_range_context) {
+        return -1;
+    }
+    options.range_context = std::move(*bytes);
     return 0;
 }
 

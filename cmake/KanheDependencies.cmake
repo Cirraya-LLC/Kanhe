@@ -88,7 +88,9 @@ if(KANHE_RANGE_PROOFS)
     FetchContent_MakeAvailable(longfellow)
     # GF(2^128) multiplies with carry-less multiplication: PCLMULQDQ on
     # x86-64, PMULL (the crypto extension) on 64-bit Arm. The flag it needs,
-    # if the compiler's default target lacks it.
+    # if the compiler's default target lacks it. Other targets, WebAssembly
+    # among them, need none: the library multiplies there with 64-bit
+    # integer multiplications instead.
     include(CheckCXXSourceCompiles)
     set(_kanhe_clmul_probe [=[
 #if defined(__x86_64__) || defined(__i386__)
@@ -134,6 +136,13 @@ int main() { return 0; }
     # Its hash and pseudo-random function call OpenSSL's SHA256_* and AES
     # functions, deprecated since OpenSSL 3.0.
     target_compile_definitions(kanhe_longfellow PUBLIC OPENSSL_SUPPRESS_DEPRECATED)
+    if(EMSCRIPTEN)
+        # The browser's OpenSSL is built without its deprecated interfaces
+        # (tools/wasm/build-openssl.sh), whose headers then hide SHA256_Init
+        # and the like, though libcrypto keeps them (its own SHA-256 uses
+        # them). The interface of OpenSSL 1.1.1 declares them.
+        target_compile_definitions(kanhe_longfellow PUBLIC OPENSSL_API_COMPAT=10101)
+    endif()
     target_compile_options(kanhe_longfellow PUBLIC ${KANHE_CLMUL_FLAGS} PRIVATE -w)
     target_compile_features(kanhe_longfellow PUBLIC cxx_std_17)
     target_link_libraries(kanhe_longfellow PUBLIC OpenSSL::Crypto)

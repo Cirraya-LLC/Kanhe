@@ -12,6 +12,7 @@
 //     attachments: { "report.pdf": pdfBytes }, // contents to check
 //     trustNodes: [{ ledger: "<64 hex digits>", name: "HK Trust" }], // trust nodes believed
 //     distrust: ["ed25519@2035-01-01"],        // algorithms not relied on from a date (spec v0.21)
+//     rangeContext: "<2 to 128 hex digits>",   // a challenge every range proof must carry (spec v0.22)
 //   });
 //   report.verified  // true or false; report.error explains a failure
 //
@@ -19,7 +20,7 @@
 //   const where = verifier.credentialAddresses(jwsBytes); // {evidence, did_document, status_list, ledger}
 //   const report = verifier.verifyCredential(jwsBytes, evidenceBytes, {
 //     didDocument: didJsonBytes, statusList: statusListJwsBytes, // when fetched
-//     ledgerId, witnesses, timestampRoots, trustNodes, distrust, // as for verify
+//     ledgerId, witnesses, timestampRoots, trustNodes, distrust, rangeContext, // as for verify
 //   });
 // The credential, the DID document, and the status list are best given as the
 // bytes read or fetched (a Uint8Array), which are checked as `kanhe credential
@@ -102,6 +103,16 @@ async function createKanheVerifier(factory) {
       if (withString(entry.trim(), (p) => module._kanhe_add_distrust(p)) !== 0) {
         return { verified: false, error: "the distrust option takes ALG@YYYY-MM-DD, ALG one of ed25519, ecdsa, sm2, " +
                  "rsa, ml-dsa-44, ml-dsa-65, ml-dsa-87, or classical, each algorithm once: " + entry };
+      }
+    }
+    // A challenge the reader gave the prover (spec v0.22, section 11.3): 1 to
+    // 64 bytes in hex. Every range proof the evidence carries must then carry
+    // exactly it; evidence without range proofs meets it, and proves nothing.
+    if (options.rangeContext) {
+      const hex = options.rangeContext.trim().toLowerCase();
+      if (withString(hex, (p) => module._kanhe_set_range_context(p)) !== 0) {
+        return { verified: false, error: "the range proofs' challenge must be 1 to 64 bytes in hex (2 to 128 hex digits): " +
+                 options.rangeContext };
       }
     }
     for (const [name, content] of Object.entries(options.attachments || {})) {

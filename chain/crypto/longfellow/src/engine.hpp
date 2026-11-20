@@ -28,8 +28,14 @@ struct Statement {
 /// The pinned circuit id.
 extern const Block pinned_circuit_id;
 
-/// Builds the circuit once per process (thread-safe) and checks its id.
+/// Whether a circuit is in use: one loaded, or else (unless the build has
+/// KANHE_RANGE_LOAD_ONLY) the one built from code once per process
+/// (thread-safe), which is used only if it has the pinned id.
 [[nodiscard]] Status ready();
+
+/// Reads a serialized circuit, computes its id again from its terms, and
+/// puts it in use if none is and the id is the pinned one (thread-safe).
+[[nodiscard]] Status load(ByteView serialized);
 
 /// The circuit, serialized, read back and checked.
 [[nodiscard]] Result<Bytes> circuit_bytes();

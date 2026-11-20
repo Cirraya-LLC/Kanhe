@@ -114,6 +114,45 @@ TEST_CASE("Range proofs: the circuit is built once and is the pinned one", "[cry
           Bytes(id.begin(), id.end()));
 }
 
+TEST_CASE("Range proofs: a serialized circuit is loaded only if it is the pinned one",
+          "[crypto][range]") {
+    // As a verifier that does not build the circuit loads it (the browser
+    // verifier). With one built already, the bytes are checked, and the
+    // circuit in use stays.
+    const auto bytes = range::range_circuit_bytes();
+    REQUIRE(bytes);
+    CHECK(range::load_range_circuit(*bytes));
+    const Honest& h = honest();
+    CHECK(range::verify_range(h.commitment, h.low, h.high, h.transcript, h.proof));
+
+    // Cut short, empty, or with a byte after it: refused, never aborting.
+    const auto code = [](ByteView serialized) {
+        const auto loaded = range::load_range_circuit(serialized);
+        REQUIRE_FALSE(loaded);
+        return loaded.error().code;
+    };
+    CHECK(code(ByteView(*bytes).first(bytes->size() - 1)) == Errc::malformed);
+    CHECK(code(ByteView(*bytes).first(bytes->size() / 2)) == Errc::malformed);
+    CHECK(code({}) == Errc::malformed);
+    Bytes longer = *bytes;
+    longer.push_back(0);
+    CHECK(code(longer) == Errc::malformed);
+    // Another id after the same terms; another version, a constant, or a
+    // term changed: refused. (Not every byte matters: the encoding is
+    // malleable, and a file that reads to the pinned id holds the circuit.)
+    Bytes renamed = *bytes;
+    renamed.back() ^= 1;
+    CHECK(code(renamed) == Errc::malformed);
+    for (const std::size_t at : {std::size_t{0}, std::size_t{100}, bytes->size() - 40}) {
+        CAPTURE(at);
+        Bytes changed = *bytes;
+        changed[at] ^= 1;
+        CHECK(code(changed) == Errc::malformed);
+    }
+    // The circuit in use is unchanged.
+    CHECK(range::verify_range(h.commitment, h.low, h.high, h.transcript, h.proof));
+}
+
 TEST_CASE("Range proofs: commitments", "[crypto][range]") {
     // SHA-256("Kanhe range v1" || salt || BE64(value)), the salt 00 01 .. 1f.
     const Bytes s = salt(0);

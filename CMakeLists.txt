@@ -33,12 +33,13 @@ set(KANHE_PUBLIC_WITNESSES "" CACHE STRING
 # Its front end (packs, lexer, parser) is built either way.
 set(KANHE_BO "AUTO" CACHE STRING "Build the Bo compiler: AUTO, ON, or OFF")
 set_property(CACHE KANHE_BO PROPERTY STRINGS AUTO ON OFF)
-# Zero-knowledge range proofs (Longfellow ZK) and their helper program,
-# kanhe-range; not in the browser or the core alone, so far.
+# Zero-knowledge range proofs (Longfellow ZK): their helper program,
+# kanhe-range, and in the browser, the verifier's checks of them; not in the
+# core alone, so far.
 include(CMakeDependentOption)
 cmake_dependent_option(KANHE_RANGE_PROOFS
     "Build zero-knowledge range proofs (Longfellow ZK) and kanhe-range" ON
-    "NOT EMSCRIPTEN;NOT KANHE_CORE_ONLY" OFF)
+    "NOT KANHE_CORE_ONLY" OFF)
 
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -52,7 +53,10 @@ add_subdirectory(chain/crypto/openssl)
 add_subdirectory(chain/verifier)
 if(EMSCRIPTEN)
     # The browser verifier needs no ledger node and no command line; nor do
-    # the console's checks in the browser.
+    # the console's checks in the browser. It checks range proofs.
+    if(KANHE_RANGE_PROOFS)
+        add_subdirectory(chain/crypto/longfellow)
+    endif()
     add_subdirectory(chain/verifier/wasm)
     add_subdirectory(apps/console/wasm)
 elseif(NOT KANHE_CORE_ONLY)

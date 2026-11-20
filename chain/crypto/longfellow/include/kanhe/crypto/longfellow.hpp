@@ -26,9 +26,12 @@
 ///
 /// The circuit is built from code, once per process, on first use (about
 /// 0.4 s and 47 MB at its peak in an optimized build) and shared by the prover
-/// and the verifier. It is checked against its pinned id: if the circuit built
-/// differs from the pinned one, every call that needs it fails with
-/// `Errc::crypto_failure`.
+/// and the verifier, unless one was loaded first (`load_range_circuit`). It is
+/// checked against its pinned id: if the circuit built differs from the
+/// pinned one, every call that needs it fails with `Errc::crypto_failure`. A
+/// build for WebAssembly never builds it: there, loading it takes about a
+/// quarter of the time and half the memory. It must be loaded, and until it
+/// is, every call that needs it fails with `Errc::crypto_failure`.
 ///
 /// The proof system's parameters are those of Longfellow's version 7: Ligero
 /// with rate 7 and 132 queries, the LCH14 Reed-Solomon code, and transcript
@@ -95,10 +98,22 @@ inline constexpr std::string_view range_commitment_prefix = "Kanhe range v1";
 /// absorbs.
 [[nodiscard]] ByteView range_circuit_id() noexcept;
 
-/// Builds the circuit now, if it has not been built, and checks it against its
-/// pinned id; a server calls this when it starts, instead of paying for it on
-/// its first proof. Fails with `Errc::crypto_failure` on a mismatch.
+/// Builds the circuit now, if it has not been built or loaded, and checks it
+/// against its pinned id; a server calls this when it starts, instead of
+/// paying for it on its first proof. Fails with `Errc::crypto_failure` on a
+/// mismatch, or in a build for WebAssembly if no circuit has been loaded.
 [[nodiscard]] Status prepare_range_circuit();
+
+/// Loads the circuit from its serialized form (the published circuit file,
+/// decompressed: about 2 MB), for a verifier that does not build it.
+/// Longfellow's circuit reader parses it and computes its id again from its
+/// terms, and the circuit is used only if that id is the pinned one. The
+/// first circuit built or loaded stays in use; a later call only checks the
+/// bytes it is given. Malformed input never aborts: it fails, with
+/// `Errc::malformed` if it does not parse, has bytes left over, or carries an
+/// id its terms do not give, and `Errc::crypto_failure` if it is another
+/// circuit.
+[[nodiscard]] Status load_range_circuit(ByteView serialized);
 
 /// The circuit in Longfellow's serialized form (about 2 MB), for verifiers
 /// that load a circuit instead of building it. It is read back, and its id

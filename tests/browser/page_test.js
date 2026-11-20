@@ -9,7 +9,9 @@
 // opens it; and, with SoftHSM, a record approved by several people under an
 // organization's guardians, in the three languages; and long-term evidence,
 // renewed after its ledger moved to post-quantum keys, with algorithms
-// distrusted, in the three languages.
+// distrusted, in the three languages; and range proofs from the
+// specification's test vectors, with a challenge required, in the three
+// languages.
 // Usage: node page_test.js PAGE EVIDENCE_DIR KANHE
 "use strict";
 const assert = require("node:assert/strict");
@@ -567,6 +569,147 @@ async function verdict(page) {
       await showing(page, "verdict-title", /^\u6309\u4f60\u4e0d\u4fe1\u4efb\u7684\u7b97\u6cd5\uff0c\u9a8c\u8bc1\u672a\u901a\u8fc7$/);
       await distrust(page, "ed25519@2035-02-30");
       await showing(page, "verdict-detail", /^\u201ced25519@2035-02-30\u201d\u7684\u65e5\u671f\u5e76\u4e0d\u5b58\u5728$/);
+      await page.close();
+    }
+
+    // 11e. Range proofs (v0.22), from the specification's test vectors: three
+    // proofs of one record, each statement in words with the challenge it
+    // carries and verified, and the record's provable values, in the three
+    // languages; negative values; a challenge required and met, missed, of
+    // another, and mistyped; required of evidence that carries no proof; and
+    // a tampered proof.
+    {
+      const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testvectors", "protocol-v0.22.json"), "utf8"));
+      const vector = (name) => vectors.bundles.find((b) => b.name === name);
+      let loads = 0;
+      const choose = async (page, name) => {
+        const file = name + "-" + ++loads + ".cbor";
+        await page.setInputFiles("#bundle-file", { name: file, mimeType: "application/cbor",
+                                                   buffer: Buffer.from(vector(name).evidence, "hex") });
+        await page.waitForFunction((f) => document.getElementById("bundle-name").textContent.startsWith(f + " "), file);
+      };
+      const pin = async (page, name) => {
+        await page.fill("#ledger", vector(name).options.ledger_id);
+        await page.dispatchEvent("#ledger", "change");
+      };
+      const challenge = async (page, hex) => {
+        await page.fill("#range-context", hex);
+        await page.dispatchEvent("#range-context", "change");
+      };
+      // Each row: the statement, the challenge line or null, and the status.
+      const rows = (page) => page.evaluate(() => [...document.querySelectorAll("#ranges tr")].map((tr) => {
+        const [statement, status] = tr.children;
+        const context = statement.querySelector(".range-context");
+        return [statement.firstChild.textContent, context ? context.textContent : null, status.textContent];
+      }));
+      // The technical lines from the one labelled `label`, `n` of them, then
+      // the labels of all but the first (empty, as a list's go).
+      const factsFrom = (page, label, n) => page.evaluate(([label, n]) => {
+        const dt = [...document.querySelectorAll("#facts dt")];
+        const dd = [...document.querySelectorAll("#facts dd")];
+        const at = dt.findIndex((x) => x.textContent === label);
+        return at < 0 ? null : dd.slice(at, at + n).map((x) => x.textContent).concat(dt.slice(at + 1, at + n).map((x) => x.textContent));
+      }, [label, n]);
+      const CHALLENGE = "acebe9f17b00eadb695631b515db1e07";
+      page = await open("file://" + pagePath);
+      await pin(page, "range-proofs-three");
+      await choose(page, "range-proofs-three");
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      assert.equal(await page.isHidden("#ranges-section"), false);
+      assert.deepEqual(await rows(page), [
+        ["birth_date is at most 2008-11-20", null, "verified"],
+        ["monthly_salary is at least HKD 30,000.00", "challenge " + CHALLENGE, "verified"],
+        ["score is between 60 and 99.5", null, "verified"]]);
+      assert.deepEqual(await factsFrom(page, "Provable values", 3),
+        ["birth_date: a date", "monthly_salary: an amount in HKD with 2 decimal places",
+         "score: a number with 1 decimal place", "", ""]);
+      assert.deepEqual(await factsFrom(page, "Provable values", 4).then((l) => l[3]),
+                       "(the issuer's word that each commitment is its field's value)");
+      assert.deepEqual(await factsFrom(page, "Proof system", 1),
+        ["Longfellow ZK (system 1): zero-knowledge and hash-based, with no trusted setup"]);
+
+      // In Traditional Chinese, as the specification's table words them.
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a57\u8b49");
+      assert.deepEqual(await rows(page), [
+        ["birth_date \u4e0d\u9ad8\u65bc 2008-11-20", null, "\u5df2\u9a57\u8b49"],
+        ["monthly_salary \u4e0d\u4f4e\u65bc HKD 30,000.00", "\u6311\u6230\u503c " + CHALLENGE, "\u5df2\u9a57\u8b49"],
+        ["score \u4ecb\u4e4e 60 \u81f3 99.5", null, "\u5df2\u9a57\u8b49"]]);
+      assert.deepEqual(await factsFrom(page, "\u53ef\u8b49\u660e\u7684\u503c", 3),
+        ["birth_date\uff1a\u65e5\u671f", "monthly_salary\uff1aHKD \u91d1\u984d\uff0c2 \u4f4d\u5c0f\u6578", "score\uff1a\u6578\u5b57\uff0c1 \u4f4d\u5c0f\u6578", "", ""]);
+      assert.equal(await page.textContent("#ranges-section h3 span"), "\u7bc4\u570d\u8b49\u660e");
+
+      // In Simplified Chinese; then negative values and a date before 1970.
+      await page.selectOption("#language", "zh-Hans");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a8c\u8bc1");
+      assert.deepEqual(await rows(page), [
+        ["birth_date \u4e0d\u9ad8\u4e8e 2008-11-20", null, "\u5df2\u9a8c\u8bc1"],
+        ["monthly_salary \u4e0d\u4f4e\u4e8e HKD 30,000.00", "\u6311\u6218\u503c " + CHALLENGE, "\u5df2\u9a8c\u8bc1"],
+        ["score \u4ecb\u4e8e 60 \u81f3 99.5", null, "\u5df2\u9a8c\u8bc1"]]);
+      assert.deepEqual(await factsFrom(page, "\u53ef\u8bc1\u660e\u7684\u503c", 3),
+        ["birth_date\uff1a\u65e5\u671f", "monthly_salary\uff1aHKD \u91d1\u989d\uff0c2 \u4f4d\u5c0f\u6570", "score\uff1a\u6570\u5b57\uff0c1 \u4f4d\u5c0f\u6570", "", ""]);
+      await pin(page, "range-proof-negative-values");
+      await choose(page, "range-proof-negative-values");
+      assert.equal((await verdict(page)).kind, "ok");
+      assert.deepEqual(await rows(page), [
+        ["founded \u4e0d\u9ad8\u4e8e 1950-01-01", null, "\u5df2\u9a8c\u8bc1"],
+        ["temperature \u4ecb\u4e8e -20 \u81f3 -10.0", null, "\u5df2\u9a8c\u8bc1"]]);
+      await page.selectOption("#language", "en");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "Verified");
+      assert.deepEqual((await rows(page)).map((r) => r[0]),
+                       ["founded is at most 1950-01-01", "temperature is between -20 and -10.0"]);
+      assert.deepEqual(await factsFrom(page, "Provable values", 2),
+                       ["founded: a date", "temperature: a number with 1 decimal place", ""]);
+
+      // A challenge required, in the advanced options: met, then missed by a
+      // proof without one, and by a proof with another; both verify without
+      // it, so the page says that the challenge alone failed them.
+      await page.click("#advanced > summary");
+      await pin(page, "range-proof-context-required");
+      await challenge(page, CHALLENGE.toUpperCase());
+      await choose(page, "range-proof-context-required");
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      assert.deepEqual(await rows(page),
+        [["monthly_salary is at least HKD 30,000.00", "challenge " + CHALLENGE + ": the one you gave", "verified"]]);
+      await choose(page, "range-context-missing");
+      v = await verdict(page);
+      assert.deepEqual([v.kind, v.title], ["bad", "Not verified with your challenge"]);
+      assert.match(v.detail, /^Without the challenge this evidence verifies\. But a range proof in it does not carry your challenge, so it may have been made before you asked, or for someone else: ./);
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u6309\u4f60\u7684\u6311\u6230\u503c\uff0c\u9a57\u8b49\u4e0d\u901a\u904e");
+      await page.selectOption("#language", "zh-Hans");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u6309\u4f60\u7684\u6311\u6218\u503c\uff0c\u9a8c\u8bc1\u672a\u901a\u8fc7");
+      await page.selectOption("#language", "en");
+      await challenge(page, "7305214e6e895121ec618e1378863595");
+      await choose(page, "range-proof-context-required");
+      assert.equal((await verdict(page)).title, "Not verified with your challenge");
+      // Mistyped: shown before anything is checked.
+      await challenge(page, "abc");
+      v = await verdict(page);
+      assert.deepEqual([v.kind, v.title, v.detail], ["warn", "Check the challenge",
+        "The challenge must be 1 to 64 bytes in hex: an even number of hex digits, 2 to 128."]);
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u8acb\u6aa2\u67e5\u6311\u6230\u503c");
+      await page.selectOption("#language", "en");
+      // Required of evidence that carries no proof: it verifies, proves
+      // nothing, and the outcome says so.
+      await challenge(page, CHALLENGE);
+      await choose(page, "range-provable-no-proofs");
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      assert.equal(await page.isHidden("#ranges-section"), true);
+      assert.match(await page.textContent("#summary"),
+                   /Range proofsnone: this file holds no range proof, so it proves no range, and your challenge was not used/);
+      assert.equal((await factsFrom(page, "Provable values", 3)).length, 5);
+      await challenge(page, "");
+      await choose(page, "range-provable-no-proofs");
+      assert.doesNotMatch(await page.textContent("#summary"), /Range proofs/);
+      // One bit of a proof flipped.
+      await choose(page, "range-proof-tampered");
+      v = await verdict(page);
+      assert.deepEqual([v.kind, v.title], ["bad", "Not verified"]);
       await page.close();
     }
 

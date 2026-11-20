@@ -22,6 +22,15 @@ kanhe_target_defaults(kanhe_crypto_longfellow)
 # faster than -O2).
 set_source_files_properties(src/engine.cpp PROPERTIES COMPILE_OPTIONS -O3)
 
+# The browser verifier loads the published circuit (load_range_circuit)
+# instead of building it: in WebAssembly, loading takes about a quarter of
+# the time and half the memory. Its build leaves the circuit's compiler out,
+# and needs no kanhe-range.
+if(EMSCRIPTEN)
+    target_compile_definitions(kanhe_crypto_longfellow PRIVATE KANHE_RANGE_LOAD_ONLY=1)
+    return()
+endif()
+
 # kanhe-range: proofs and checks as JSON on standard input and output, for
 # programs that do not link this library.
 add_executable(kanhe-range cli/kanhe_range.cpp)

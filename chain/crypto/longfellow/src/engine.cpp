@@ -21,6 +21,10 @@
 // The order in which the gates are made is part of the circuit, and so of its
 // id: the id is pinned, and a circuit built otherwise, by this code or by
 // another version of the library's compiler, is refused.
+//
+// A circuit can also be loaded from its serialized form (load), which a
+// build with KANHE_RANGE_LOAD_ONLY must do before any proof: it leaves the
+// circuit's compiler out (the browser verifier, where loading is faster).
 
 #include "engine.hpp"
 
@@ -29,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <vector>
 
@@ -37,12 +42,14 @@
 #include <kanhe/crypto/longfellow.hpp>
 
 #include "arrays/dense.h"
+#if !defined(KANHE_RANGE_LOAD_ONLY)
 #include "circuits/compiler/compiler.h"
 #include "circuits/logic/bit_plucker.h"
-#include "circuits/logic/bit_plucker_encoder.h"
 #include "circuits/logic/compiler_backend.h"
 #include "circuits/logic/logic.h"
 #include "circuits/sha/flatsha256_circuit.h"
+#endif
+#include "circuits/logic/bit_plucker_encoder.h"
 #include "circuits/sha/flatsha256_witness.h"
 #include "gf2k/gf2_128.h"
 #include "gf2k/lch14_reed_solomon.h"
@@ -90,6 +97,7 @@ constexpr std::array<std::uint32_t, 8> sha256_iv = {0x6a09e667U, 0xbb67ae85U, 0x
                                                     0xa54ff53aU, 0x510e527fU, 0x9b05688cU,
                                                     0x1f83d9abU, 0x5be0cd19U};
 
+#if !defined(KANHE_RANGE_LOAD_ONLY)
 std::unique_ptr<Circuit> build_circuit(const Field& F) {
     using Backend = proofs::CompilerBackend<Field>;
     using Logic = proofs::Logic<Field, Backend>;
@@ -186,39 +194,75 @@ std::unique_ptr<Circuit> build_circuit(const Field& F) {
 
     return Q.mkcircuit(/*nc=*/1);
 }
+#endif
 
 bool has_pinned_id(const std::uint8_t* id) {
     return std::equal(pinned_circuit_id.begin(), pinned_circuit_id.end(), id);
 }
 
-/// The circuit and its field, built once per process.
+/// The circuit in use and its field.
 struct Engine {
-    Engine() {
-        // The library logs its steps to standard error; only its errors here.
-        proofs::set_log_level(proofs::ERROR);
-        circuit = build_circuit(field);
-        if (circuit == nullptr) {
-            return;
-        }
-        // The compiler's id, and the same computed again from the circuit.
-        Block recomputed{};
-        proofs::circuit_id(recomputed.data(), *circuit, field);
-        matches = circuit->npub_in == public_inputs && has_pinned_id(circuit->id) &&
-                  has_pinned_id(recomputed.data());
-    }
-
     const Field field;
     std::unique_ptr<const Circuit> circuit;
-    bool matches = false;
 };
 
-const Engine& engine() {
-    static const Engine instance;
-    return instance;
+/// The engine, once a circuit has been built or loaded: set once, then
+/// neither replaced nor changed until the process ends, so that a pointer to
+/// it stays valid without the lock.
+std::mutex engine_mutex;
+std::unique_ptr<const Engine> current_engine;
+
+void quiet() {
+    // The library logs its steps to standard error; only its errors here.
+    static std::once_flag once;
+    std::call_once(once, [] { proofs::set_log_level(proofs::ERROR); });
 }
 
-std::unexpected<Error> mismatch() {
+#if defined(KANHE_RANGE_LOAD_ONLY)
+std::unexpected<Error> not_ready() {
+    return fail(Errc::crypto_failure, "the range circuit has not been loaded");
+}
+#else
+bool build_tried = false;
+
+std::unexpected<Error> not_ready() {
     return fail(Errc::crypto_failure, "the range circuit built does not match its pinned id");
+}
+
+/// The circuit built from code, if it is the pinned one: the compiler's id,
+/// and the same computed again from the circuit.
+std::unique_ptr<const Engine> built() {
+    quiet();
+    auto engine = std::make_unique<Engine>();
+    auto circuit = build_circuit(engine->field);
+    if (circuit == nullptr) {
+        return nullptr;
+    }
+    Block recomputed{};
+    proofs::circuit_id(recomputed.data(), *circuit, engine->field);
+    if (circuit->npub_in != public_inputs || !has_pinned_id(circuit->id) ||
+        !has_pinned_id(recomputed.data())) {
+        return nullptr;
+    }
+    engine->circuit = std::move(circuit);
+    return engine;
+}
+#endif
+
+/// The engine: the circuit loaded, or else built the first time it is
+/// needed (once per process, even if it does not match).
+Result<const Engine*> engine() {
+    const std::lock_guard lock(engine_mutex);
+#if !defined(KANHE_RANGE_LOAD_ONLY)
+    if (current_engine == nullptr && !build_tried) {
+        build_tried = true;
+        current_engine = built();
+    }
+#endif
+    if (current_engine == nullptr) {
+        return not_ready();
+    }
+    return current_engine.get();
 }
 
 /// The prover's randomness from a seed: the AES-256-CTR keystream under it,
@@ -292,14 +336,45 @@ void wipe(std::array<T, N>& values) {
 } // namespace
 
 Status ready() {
-    return engine().matches ? Status{} : mismatch();
+    const auto e = engine();
+    if (!e) {
+        return std::unexpected(e.error());
+    }
+    return {};
+}
+
+Status load(ByteView serialized) {
+    quiet();
+    auto loaded = std::make_unique<Engine>();
+    proofs::ReadBuffer buffer(serialized.data(), serialized.size());
+    proofs::CircuitReader<Field> reader(loaded->field, proofs::GF2_128_ID);
+    // The reader computes the id again from the terms it read, and refuses
+    // a circuit whose terms do not give the id it carries.
+    auto circuit = reader.from_bytes(buffer, /*enforce_circuit_id=*/true);
+    if (circuit == nullptr) {
+        return fail(Errc::malformed,
+                    "the range circuit does not parse, or does not have the id it carries");
+    }
+    if (buffer.remaining() != 0) {
+        return fail(Errc::malformed, "the range circuit has bytes left over");
+    }
+    if (circuit->npub_in != public_inputs || !has_pinned_id(circuit->id)) {
+        return fail(Errc::crypto_failure, "the range circuit loaded does not match its pinned id");
+    }
+    loaded->circuit = std::move(circuit);
+    const std::lock_guard lock(engine_mutex);
+    if (current_engine == nullptr) {
+        current_engine = std::move(loaded);
+    }
+    return {};
 }
 
 Result<Bytes> circuit_bytes() {
-    const Engine& e = engine();
-    if (!e.matches) {
-        return mismatch();
+    const auto engine_in_use = engine();
+    if (!engine_in_use) {
+        return std::unexpected(engine_in_use.error());
     }
+    const Engine& e = **engine_in_use;
     proofs::CircuitWriter<Field> writer(e.field, proofs::GF2_128_ID);
     Bytes bytes;
     writer.to_bytes(*e.circuit, bytes);
@@ -316,12 +391,12 @@ Result<Bytes> circuit_bytes() {
 
 Result<Bytes> prove(const Statement& statement, const Block& salt, std::uint64_t value,
                     ByteView transcript, const Block* seed) {
-    const Engine& e = engine();
-    if (!e.matches) {
-        return mismatch();
+    const auto e = engine();
+    if (!e) {
+        return std::unexpected(e.error());
     }
-    const Field& F = e.field;
-    const Circuit& c = *e.circuit;
+    const Field& F = (*e)->field;
+    const Circuit& c = *(*e)->circuit;
     const auto bit = [&](std::uint64_t b) {
         return b != 0 ? F.one() : F.zero();
     };
@@ -402,12 +477,12 @@ Result<Bytes> prove(const Statement& statement, const Block& salt, std::uint64_t
 }
 
 Status verify(const Statement& statement, ByteView transcript, ByteView proof) {
-    const Engine& e = engine();
-    if (!e.matches) {
-        return mismatch();
+    const auto e = engine();
+    if (!e) {
+        return std::unexpected(e.error());
     }
-    const Field& F = e.field;
-    const Circuit& c = *e.circuit;
+    const Field& F = (*e)->field;
+    const Circuit& c = *(*e)->circuit;
 
     proofs::ZkProof<Field> zk(c, ligero_rate, ligero_queries);
     proofs::ReadBuffer buffer(proof.data(), proof.size());

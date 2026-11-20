@@ -117,6 +117,10 @@ Status prepare_range_circuit() {
     return engine::ready();
 }
 
+Status load_range_circuit(ByteView serialized) {
+    return engine::load(serialized);
+}
+
 Result<Bytes> range_circuit_bytes() {
     return engine::circuit_bytes();
 }

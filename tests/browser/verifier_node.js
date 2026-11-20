@@ -430,6 +430,74 @@ const text = (name) => fs.readFileSync(path.join(dir, name), "utf8").trim();
                      [[false, null, ["new_guardians"]], [false, ["record-revoke"], ["guardians", "new_guardians"]],
                       [true, null, ["guardians"]]]);
   }
+  // Range proofs (spec v0.22, section 11.3), in the specification's test
+  // vectors: each bundle verifies or fails as they decide, and a verified
+  // one's report shows their facts, matched as testvectors/evidence-v1.json
+  // says: a fact object matches a report object that has each of its keys
+  // with a matching value, a list one of the same length element by
+  // element, and anything else an equal value. The page's verifier checks
+  // the proofs themselves (system 1), on the circuit it loads for the first.
+  const vectors = JSON.parse(fs.readFileSync(path.join(__dirname, "..", "..", "testvectors", "protocol-v0.22.json"), "utf8"));
+  const fromHex = (hex) => Uint8Array.from(Buffer.from(hex, "hex"));
+  const vector = (name) => vectors.bundles.find((b) => b.name === name);
+  const rangeOptions = (b) => ({ ledgerId: b.options.ledger_id, rangeContext: b.options.range_context });
+  const matches = (fact, got, where) => {
+    if (Array.isArray(fact)) {
+      assert.ok(Array.isArray(got) && got.length === fact.length, where + ": " + JSON.stringify(got));
+      fact.forEach((f, i) => matches(f, got[i], where + "[" + i + "]"));
+    } else if (fact !== null && typeof fact === "object") {
+      assert.ok(got !== null && typeof got === "object" && !Array.isArray(got), where + ": " + JSON.stringify(got));
+      for (const [key, f] of Object.entries(fact)) {
+        assert.ok(key in got, where + "." + key + " is missing");
+        matches(f, got[key], where + "." + key);
+      }
+    } else {
+      assert.deepEqual(got, fact, where);
+    }
+  };
+  assert.ok(vectors.bundles.some((b) => b.range_systems));
+  for (const b of vectors.bundles) {
+    const checked = verifier.verify(fromHex(b.evidence), rangeOptions(b));
+    assert.equal(checked.verified, b.verified, b.name + ": " + (checked.error || "verified"));
+    if (b.verified) matches(b.facts, checked, b.name);
+  }
+  // The words, with values as claims write them, and the challenge in hex.
+  const three = verifier.verify(fromHex(vector("range-proofs-three").evidence), rangeOptions(vector("range-proofs-three")));
+  assert.deepEqual(three.provable.map((p) => [p.field, p.encoding.type, p.encoding.scale, p.encoding.currency]),
+                   [["birth_date", "date", null, null], ["monthly_salary", "money", 2, "HKD"], ["score", "number", 1, null]]);
+  assert.deepEqual(three.range_proofs.map((p) => [p.text, p.context, p.system, p.status]),
+                   [["birth_date is at most 2008-11-20", null, 1, "verified"],
+                    ["monthly_salary is at least HKD 30,000.00", "acebe9f17b00eadb695631b515db1e07", 1, "verified"],
+                    ["score is between 60 and 99.5", null, 1, "verified"]]);
+  assert.match(three.text, /birth_date is at most 2008-11-20/);
+  // One bit of a proof flipped: the evidence fails.
+  assert.equal(verifier.verify(fromHex(vector("range-proof-tampered").evidence),
+                               rangeOptions(vector("range-proof-tampered"))).verified, false);
+  // A required challenge: met; missed by a proof without one, which verifies
+  // without the requirement (so the page can say that the challenge alone
+  // failed it); and another challenge. The requirement does not outlive its
+  // call.
+  const required = vector("range-proof-context-required");
+  assert.equal(verifier.verify(fromHex(required.evidence), rangeOptions(required)).verified, true);
+  const missing = vector("range-context-missing");
+  const missed = verifier.verify(fromHex(missing.evidence), rangeOptions(missing));
+  assert.equal(missed.verified, false);
+  assert.ok(missed.error);
+  assert.equal(verifier.verify(fromHex(missing.evidence), { ledgerId: missing.options.ledger_id }).verified, true);
+  const other = vector("range-context-other");
+  assert.equal(verifier.verify(fromHex(other.evidence), rangeOptions(other)).verified, false);
+  assert.equal(verifier.verify(fromHex(other.evidence), { ledgerId: other.options.ledger_id }).verified, true);
+  // Evidence without range proofs meets a required challenge, and proves
+  // nothing; a challenge that is not 1 to 64 bytes in hex is refused before
+  // anything is checked.
+  const plain = verifier.verify(bundle, { ledgerId, attachments, rangeContext: "00ff" });
+  assert.equal(plain.verified, true, plain.error);
+  assert.deepEqual([plain.provable, plain.range_proofs], [[], []]);
+  for (const bad of ["abc", "0g", "00".repeat(65)]) {
+    assert.match(verifier.verify(bundle, { ledgerId, rangeContext: bad }).error, /challenge must be 1 to 64 bytes/, bad);
+  }
+  assert.equal(verifier.verify(bundle, { ledgerId, rangeContext: "AB".repeat(64), attachments }).verified, true);
+
   console.log("wasm verifier (node): ok, version " + verifier.version);
 })().catch((e) => {
   console.error(e);

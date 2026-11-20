@@ -29,7 +29,7 @@ Where each component ends up:
 | Asio (standalone) | 1.38.2 | BSL-1.0 | <https://github.com/chriskohlhoff/asio> | `kanhe`, `kanhe-console`, `kanhe-index` (header-only, compiled in) |
 | NuRaft | 3.0.0 | Apache-2.0 | <https://github.com/eBay/NuRaft> | `kanhe`, `kanhe-console`, `kanhe-index` (linked statically) |
 | SQLite (amalgamation) | 3.54.1 | Public domain (notice below) | <https://www.sqlite.org/2026/sqlite-amalgamation-3540100.zip> | `kanhe-index`, `kanhe-console` (linked statically): the search index |
-| Longfellow ZK | commit `1c0662989b919fe7b53a209a0a96f61f0e1b45c7` (2026-10-31) | Apache-2.0 | <https://github.com/google/longfellow-zk> | `kanhe-range` (compiled in): zero-knowledge range proofs |
+| Longfellow ZK | commit `1c0662989b919fe7b53a209a0a96f61f0e1b45c7` (2026-10-31) | Apache-2.0 | <https://github.com/google/longfellow-zk> | `kanhe-range`, browser verifier (compiled in): zero-knowledge range proofs |
 | QR Code generator library (C++) | 1.8.0 | MIT | <https://github.com/nayuki/QR-Code-generator> | `kanhe`, `kanhe-console` (linked statically): printed certificates' QR codes |
 | p11-kit's PKCS #11 header (`pkcs11.h`) | from the system's p11-kit, at build time | Permissive (notice below) | <https://github.com/p11-glue/p11-kit> | `kanhe`, `kanhe-console`, `kanhe-index`, when built with PKCS #11 support (the Docker image is); the header's types and constants only |
 | GCC runtime (libstdc++, libgcc) | GCC 16 | GPL-3.0-or-later WITH GCC-exception-3.1 | <https://gcc.gnu.org/> | the programs in the Docker image (linked statically); other builds link the system's C++ runtime dynamically |

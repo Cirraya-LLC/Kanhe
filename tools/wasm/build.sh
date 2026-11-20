@@ -6,6 +6,8 @@
 # Produces BUILD_DIR/kanhe-verify.html (self-contained: open it from disk or
 # host it anywhere), BUILD_DIR/kanhe-verifier.js (the module, for Node.js),
 # and the web console's checks, BUILD_DIR/kanhe-console.mjs and .wasm.
+# Embedding the range proofs' circuit (testvectors/range-circuit-1.bin.zst)
+# needs a Node.js that reads zstd: 22.15 or later, as Emscripten's own is.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
