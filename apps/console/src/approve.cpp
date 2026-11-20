@@ -28,6 +28,7 @@
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/console.hpp>
+#include <kanhe/console/kinds.hpp>
 #include <kanhe/console/people.hpp>
 #include <kanhe/console/setup.hpp>
 #include <kanhe/core/bytes.hpp>
@@ -36,6 +37,7 @@
 #include <kanhe/core/protocol/claims.hpp>
 #include <kanhe/core/protocol/common.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state.hpp>
@@ -314,6 +316,9 @@ nlohmann::json registration_terms(const protocol::RecordRegisterBody& g) {
         }
     }
     summary["metadata"] = metadata;
+    // Its provable values (spec v0.22), which the page checks in the bytes
+    // too.
+    summary["provable"] = provable_view(g.provable);
     return summary;
 }
 
@@ -736,6 +741,14 @@ http::Response Console::prepare_route(const http::Request& request) const {
         // script's) or its public metadata, which the page checks in the
         // bytes too.
         summary.update(registration_terms(g));
+        // The openings of its provable values (spec v0.22): from these and
+        // the values shown, the page computes each commitment itself.
+        nlohmann::json openings = nlohmann::json::array();
+        for (const protocol::RangeOpening& o : draft->vault.openings) {
+            openings.push_back(
+                {{"field", o.name}, {"salt", to_base64url(o.salt)}, {"x", std::to_string(o.x)}});
+        }
+        summary["openings"] = std::move(openings);
         summary["fields"] = fields;
         summary["files"] = files;
         summary["keep_files"] = draft->keep_files;

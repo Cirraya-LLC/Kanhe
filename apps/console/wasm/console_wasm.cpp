@@ -18,6 +18,7 @@
 #include <emscripten/emscripten.h>
 #include <optional>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -33,11 +34,25 @@
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/verifier/report.hpp>
+
+#if defined(KANHE_RANGE_PROOFS)
+#include <kanhe/crypto/longfellow.hpp>
+#include <kanhe/verifier/gzip.hpp>
+
+// The range proofs' circuit, as one GZIP member: the browser verifier's,
+// written by its embed-circuit.js into this build too.
+namespace kanhe::verifier_wasm {
+extern const std::uint8_t range_circuit_gzip[];
+extern const std::size_t range_circuit_gzip_size;
+extern const std::size_t range_circuit_size;
+} // namespace kanhe::verifier_wasm
+#endif
 
 namespace {
 
@@ -182,6 +197,21 @@ Json describe(const protocol::Statement& s) {
                                {"record", to_hex(source.record.bytes())}});
         }
         out["sources"] = sources;
+        // Its provable values (v0.22): each field, its encoding as a report
+        // gives it, and its commitment, which the page computes itself from
+        // the opening the console shows.
+        Json provable = Json::array();
+        for (const protocol::ProvableValue& p : g->provable) {
+            using Type = protocol::ProvableEncoding::Type;
+            const protocol::ProvableEncoding& e = p.encoding;
+            provable.push_back({{"field", p.name},
+                                {"encoding",
+                                 {{"type", std::string(protocol::name(e.type))},
+                                  {"scale", e.type == Type::date ? Json() : Json(e.scale)},
+                                  {"currency", e.type == Type::money ? Json(e.currency) : Json()}}},
+                                {"commitment", to_hex(p.commitment)}});
+        }
+        out["provable"] = provable;
         // A script's approval (v0.18): its files' digests, which the page
         // compares with those it computed from the files.
         if (g->record_type == protocol::script_type && g->metadata) {
@@ -332,6 +362,39 @@ Json describe(const protocol::Statement& s) {
         }
     }
     return out;
+}
+
+#if defined(KANHE_RANGE_PROOFS)
+/// The range proofs' circuit (spec v0.22), decompressed and loaded once,
+/// when a proof file's first range proof is checked.
+Status range_circuit() {
+    static const Status loaded = []() -> Status {
+        const auto circuit = verifier::gzip_decompress(
+            ByteView(verifier_wasm::range_circuit_gzip, verifier_wasm::range_circuit_gzip_size),
+            verifier_wasm::range_circuit_size);
+        if (!circuit) {
+            return std::unexpected(circuit.error());
+        }
+        return crypto::longfellow::load_range_circuit(*circuit);
+    }();
+    return loaded;
+}
+#endif
+
+/// A proof's options before any is set: range proofs checked when the build
+/// can.
+protocol::VerifyOptions initial_options() {
+    protocol::VerifyOptions initial;
+#if defined(KANHE_RANGE_PROOFS)
+    initial.range_verifier = [](ByteView commitment, std::uint64_t low, std::uint64_t high,
+                                ByteView transcript, ByteView proof) -> Status {
+        if (const auto ready = range_circuit(); !ready) {
+            return ready;
+        }
+        return crypto::longfellow::verify_range(commitment, low, high, transcript, proof);
+    };
+#endif
+    return initial;
 }
 
 /// A field's salt: 16 or 32 bytes (spec v0.21), base64url.
@@ -532,14 +595,32 @@ EMSCRIPTEN_KEEPALIVE char* kanhe_digest(const std::uint8_t* content, std::size_t
 }
 
 /// Verifying a proof, as `kanhe verify` and the standalone page do: the
-/// files it may check, given one by one since the last reset, then the
-/// proof, a record's evidence or a contract instance's.
+/// files it may check, given one by one since the last reset, a relying
+/// party's challenge its range proofs must carry, then the proof, a record's
+/// evidence or a contract instance's. Range proofs (spec v0.22) are checked
+/// as the standalone page checks them when the build has them, on the same
+/// circuit, loaded with the first one; otherwise they are reported as not
+/// checked.
 namespace {
-protocol::VerifyOptions proof_options;
+
+protocol::VerifyOptions proof_options = initial_options();
+
 } // namespace
 
 EMSCRIPTEN_KEEPALIVE void kanhe_proof_reset() {
-    proof_options = {};
+    proof_options = initial_options();
+}
+
+/// Requires every range proof to carry this challenge (`kanhe verify
+/// --range-context`): 1 to 64 bytes in hex. Returns 0, or -1 if `hex` is
+/// not that.
+EMSCRIPTEN_KEEPALIVE int kanhe_proof_range_context(const std::uint8_t* hex, std::size_t size) {
+    const auto bytes = from_hex(std::string(reinterpret_cast<const char*>(hex), size));
+    if (!bytes || bytes->empty() || bytes->size() > protocol::max_range_context) {
+        return -1;
+    }
+    proof_options.range_context = std::move(*bytes);
+    return 0;
 }
 
 EMSCRIPTEN_KEEPALIVE void kanhe_proof_attachment(const std::uint8_t* name, std::size_t name_size,

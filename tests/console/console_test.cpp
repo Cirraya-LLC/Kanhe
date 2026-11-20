@@ -30,6 +30,7 @@
 #include <kanhe/client/peers.hpp>
 #include <kanhe/client/public_witness.hpp>
 #include <kanhe/client/public_witnesses.hpp>
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/relay.hpp>
 #include <kanhe/client/relay_server.hpp>
@@ -51,6 +52,7 @@
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/exchange.hpp>
 #include <kanhe/core/protocol/log.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/core/protocol/witness.hpp>
 #include <kanhe/crypto/openssl.hpp>
@@ -2817,6 +2819,424 @@ TEST_CASE("guardians: set by an owner, approved by the new guardians, then in ef
         {{"action", "record.endorse"}, {"record", w.hex(w.record)}, {"role", "seen"}}, w.alice);
     REQUIRE(endorsing["summary"]["approvals"]["rules"].size() == 1);
     CHECK(endorsing["summary"]["approvals"]["rules"][0]["source"] == "delegation");
+}
+
+namespace {
+
+using Encoding = kanhe::protocol::ProvableEncoding;
+
+/// A staff record's kind (spec v0.22): a name, and a birth date and a
+/// monthly salary that can be proven later without being shown.
+const nlohmann::json staff_kind{
+    {"sheet", 1},
+    {"kind", "document"},
+    {"type", "example.org.staff/1"},
+    {"name", "Staff"},
+    {"fields",
+     {{{"name", "name"}, {"required", true}},
+      {{"name", "born"}, {"type", "date"}, {"provable", "date"}},
+      {{"name", "salary"}, {"type", "number"}, {"provable", "money:HKD:2"}}}},
+    {"files", "none"}};
+
+/// The staff record of the examples: born on 2001-04-02 (day 11414), paid
+/// HKD 32,000.50 a month.
+const nlohmann::json staff_values{
+    {"name", "Chan Tai Man"}, {"born", "2001-04-02"}, {"salary", "32000.50"}};
+
+/// Registers a staff record from the console, its kind defined first.
+std::string register_staff(FirstRunWorld& f, const std::string& token) {
+    REQUIRE(f.w.post_as("/console/api/kinds", staff_kind, token).status == 200);
+    const auto prepared = f.w.post_as(
+        "/console/api/prepare",
+        {{"action", "record.register"}, {"kind", "example.org.staff/1"}, {"fields", staff_values}},
+        token);
+    REQUIRE(prepared.status == 200);
+    const auto approved = approve(f.w, token, json_of(prepared), f.alice);
+    REQUIRE(approved.status == 201);
+    return json_of(approved)["statement_id"].get<std::string>();
+}
+
+/// A record's openings, as the page asks for them.
+http::Response openings_of(ConsoleWorld& w, const std::string& token, const std::string& record,
+                           const nlohmann::json& body = nlohmann::json::object()) {
+    return w.post_as("/console/api/records/" + record + "/openings", body, token);
+}
+
+/// Proves through the asynchronous handle, waiting for the answer, which
+/// comes from another thread: a proof is made off the ledger's writer.
+http::Response prove(ConsoleWorld& w, const std::string& token, const nlohmann::json& body) {
+    auto r = request("POST", "/console/api/prove", "localhost:7470", w.origin);
+    r.headers.emplace_back("authorization", "Bearer " + token);
+    const std::string text = body.dump();
+    r.body.assign(text.begin(), text.end());
+    auto answered = std::make_shared<std::promise<http::Response>>();
+    auto future = answered->get_future();
+    w.web.handle(r,
+                 [answered](http::Response response) { answered->set_value(std::move(response)); });
+    REQUIRE(future.wait_for(std::chrono::seconds(120)) == std::future_status::ready);
+    return future.get();
+}
+
+std::string error_code(const http::Response& r) {
+    const auto answer = json_of(r);
+    return answer.contains("error") ? answer["error"].value("code", std::string()) : std::string();
+}
+
+} // namespace
+
+TEST_CASE("a kind's provable fields: private numbers and dates, as the command line writes them",
+          "[console][kinds][ranges]") {
+    const console::Kind kind = console::parse_kind(staff_kind);
+    REQUIRE(kind.fields.size() == 3);
+    CHECK_FALSE(kind.fields[0].provable);
+    REQUIRE(kind.fields[1].provable);
+    CHECK(kind.fields[1].provable->type == Encoding::Type::date);
+    REQUIRE(kind.fields[2].provable);
+    CHECK(*kind.fields[2].provable == Encoding{Encoding::Type::money, 2, "HKD"});
+    const auto written = console::kind_json(kind);
+    CHECK_FALSE(written["fields"][0].contains("provable"));
+    CHECK(written["fields"][1]["provable"] == "date");
+    CHECK(written["fields"][2]["provable"] == "money:HKD:2");
+    CHECK(console::parse_kind(written).fields[2].provable == kind.fields[2].provable);
+
+    auto with = [&](nlohmann::json field) {
+        nlohmann::json sheet = staff_kind;
+        sheet["fields"][2] = std::move(field);
+        return sheet;
+    };
+    const auto score = console::parse_kind(
+        with({{"name", "score"}, {"type", "number"}, {"provable", "number:1"}}));
+    CHECK(*score.fields[2].provable == Encoding{Encoding::Type::number, 1, ""});
+    CHECK(console::parse_kind(with({{"name", "n"}, {"type", "number"}, {"provable", "number"}}))
+              .fields[2]
+              .provable->scale == 0);
+    // A text, or a public value, is never provable; the encoding is the
+    // field's type's, its parameters in range.
+    for (const nlohmann::json& refused : {
+             nlohmann::json{{"name", "s"}, {"provable", "number"}},
+             nlohmann::json{{"name", "s"}, {"type", "yes-no"}, {"provable", "number"}},
+             nlohmann::json{
+                 {"name", "s"}, {"type", "number"}, {"private", false}, {"provable", "number"}},
+             nlohmann::json{{"name", "s"}, {"type", "number"}, {"provable", "date"}},
+             nlohmann::json{{"name", "s"}, {"type", "date"}, {"provable", "number"}},
+             nlohmann::json{{"name", "s"}, {"type", "number"}, {"provable", "money:hkd:2"}},
+             nlohmann::json{{"name", "s"}, {"type", "number"}, {"provable", "money:HKD:5"}},
+             nlohmann::json{{"name", "s"}, {"type", "number"}, {"provable", "number:19"}},
+             nlohmann::json{{"name", "s"}, {"type", "number"}, {"provable", true}},
+         }) {
+        INFO(refused.dump());
+        CHECK_THROWS_AS(console::parse_kind(with(refused)), std::invalid_argument);
+    }
+}
+
+TEST_CASE("a document's provable values: committed apart when registered, as the page checks",
+          "[console][documents][ranges]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    REQUIRE(f.w.post_as("/console/api/kinds", staff_kind, owner).status == 200);
+    auto prepare = [&](nlohmann::json fields) {
+        return f.w.post_as("/console/api/prepare",
+                           {{"action", "record.register"},
+                            {"kind", "example.org.staff/1"},
+                            {"fields", std::move(fields)}},
+                           owner);
+    };
+    // A value its encoding cannot read: an amount with more decimals than
+    // its currency's places, a date that is none.
+    CHECK(prepare({{"name", "A"}, {"salary", "32000.505"}}).status == 400);
+    CHECK(prepare({{"name", "A"}, {"born", "2001-02-30"}}).status == 400);
+
+    const auto answer = prepare(staff_values);
+    REQUIRE(answer.status == 200);
+    const auto prepared = json_of(answer);
+    const auto& summary = prepared["summary"];
+    REQUIRE(summary["provable"].size() == 2);
+    CHECK(summary["provable"][0] ==
+          nlohmann::json{
+              {"field", "born"},
+              {"encoding", {{"type", "date"}, {"scale", nullptr}, {"currency", nullptr}}}});
+    CHECK(summary["provable"][1] ==
+          nlohmann::json{{"field", "salary"},
+                         {"encoding", {{"type", "money"}, {"scale", 2}, {"currency", "HKD"}}}});
+    REQUIRE(summary["openings"].size() == 2);
+    CHECK(summary["openings"][0]["x"] == "11414");
+    CHECK(summary["openings"][1]["x"] == "3200050");
+    // The bytes the passkey signs commit to each value with its opening, as
+    // the page computes it, with a salt of its own.
+    const auto payload = kanhe::protocol::decode_payload(
+        *kanhe::from_base64url(prepared["payload"].get<std::string>()));
+    REQUIRE(payload);
+    const auto& body = std::get<kanhe::protocol::RecordRegisterBody>(payload->body);
+    REQUIRE(body.provable.size() == 2);
+    for (std::size_t i = 0; i < body.provable.size(); ++i) {
+        const auto& opening = summary["openings"][i];
+        const auto salt = *kanhe::from_base64url(opening["salt"].get<std::string>());
+        CHECK(salt.size() == 32);
+        CHECK(body.provable[i].name == opening["field"].get<std::string>());
+        CHECK(*kanhe::protocol::range_commitment(provider(), salt,
+                                                 std::stoll(opening["x"].get<std::string>())) ==
+              body.provable[i].commitment);
+        for (const auto& field : summary["fields"]) {
+            if (field["name"] == opening["field"]) {
+                CHECK(field["salt"] != opening["salt"]);
+            }
+        }
+    }
+    const auto approved = approve(f.w, owner, prepared, f.alice);
+    REQUIRE(approved.status == 201);
+    const std::string record = json_of(approved)["statement_id"].get<std::string>();
+    const auto id = *kanhe::protocol::to_id(*kanhe::from_hex(record));
+    // On the ledger, the commitments; in the vault, the openings.
+    CHECK(kanhe::client::registration_of(served.session, id).provable == body.provable);
+    const auto vault = kanhe::client::read_vault(served.session, id, f.w.keys.open_vault_key());
+    REQUIRE(vault.openings.size() == 2);
+    CHECK(vault.openings[0].name == "born");
+    CHECK(vault.openings[0].x == 11414);
+    CHECK(vault.openings[1].x == 3200050);
+    // A value left out is not provable: only those given are.
+    const auto partly = prepare({{"name", "B"}, {"born", "1999-12-31"}});
+    REQUIRE(partly.status == 200);
+    CHECK(json_of(partly)["summary"]["provable"].size() == 1);
+
+    // Its page names them to everyone, as the ledger does; who may prove
+    // them, and who may hand them out.
+    const std::string path = "/console/api/records/" + record;
+    const auto page = json_of(f.w.get(path, owner));
+    REQUIRE(page["provable"].size() == 2);
+    CHECK(page["provable"][1]["field"] == "salary");
+    CHECK(page["may_prove"] == kanhe::client::range_proofs_built());
+    CHECK(page["may_hand_out"] == true);
+    const std::string admin = f.w.session_for("Ada", console::Role::admin);
+    CHECK(json_of(f.w.get(path, admin))["may_hand_out"] == true);
+    for (const auto role : {console::Role::member, console::Role::viewer}) {
+        const auto seen = json_of(
+            f.w.get(path, f.w.session_for(role == console::Role::member ? "Mia" : "Vera", role)));
+        CHECK(seen["provable"].size() == 2);
+        CHECK(seen["may_prove"] == false);
+        CHECK(seen["may_hand_out"] == false);
+    }
+}
+
+TEST_CASE("a document's openings go to its holder, from an owner or an admin only",
+          "[console][ranges]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string record = register_staff(f, owner);
+
+    const auto all = openings_of(f.w, owner, record);
+    REQUIRE(all.status == 200);
+    CHECK(header(all, "Content-Disposition") ==
+          "attachment; filename*=UTF-8''openings-" + record.substr(0, 12) + ".kanheopenings");
+    const auto file = kanhe::protocol::decode_range_openings(all.body);
+    REQUIRE(file);
+    CHECK(file->ledger == served.session.state().ledger_id());
+    CHECK(kanhe::to_hex(file->record.bytes()) == record);
+    REQUIRE(file->openings.size() == 2);
+    CHECK(file->openings[0].name == "born");
+    CHECK(file->openings[0].x == 11414);
+    CHECK(file->openings[1].name == "salary");
+    CHECK(file->openings[1].x == 3200050);
+    // Only those named; never a field that is not provable.
+    const auto born = openings_of(f.w, owner, record, {{"fields", {"born"}}});
+    REQUIRE(born.status == 200);
+    CHECK(kanhe::protocol::decode_range_openings(born.body)->openings.size() == 1);
+    CHECK(openings_of(f.w, owner, record, {{"fields", {"name"}}}).status == 400);
+    CHECK(openings_of(f.w, owner, record, {{"fields", {"born", "born"}}}).status == 400);
+    CHECK(openings_of(f.w, owner, record, {{"fields", "born"}}).status == 400);
+    // An admin may hand them out; a member or a viewer may not.
+    CHECK(openings_of(f.w, f.w.session_for("Ada", console::Role::admin), record).status == 200);
+    CHECK(openings_of(f.w, f.w.session_for("Mia", console::Role::member), record).status == 403);
+    CHECK(openings_of(f.w, f.w.session_for("Vera", console::Role::viewer), record).status == 403);
+    std::vector<std::string> actions;
+    for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+        actions.push_back(a.action);
+    }
+    CHECK(std::ranges::count(actions, std::string("record.openings")) == 3);
+    // A document without provable values; none on this ledger; not POST.
+    const auto photo = kanhe::to_hex(register_photo(f, owner, "the photo itself").bytes());
+    const auto none = openings_of(f.w, owner, photo);
+    CHECK(none.status == 409);
+    CHECK(error_code(none) == "no_provable");
+    CHECK(openings_of(f.w, owner, std::string(64, '0')).status == 404);
+    CHECK(f.w.get("/console/api/records/" + record + "/openings", owner).status == 405);
+    // Locked: the vault cannot be opened.
+    f.w.keys.lock();
+    CHECK(openings_of(f.w, owner, record).status == 423);
+}
+
+TEST_CASE("proving from the console that values lie within bounds, without showing them",
+          "[console][ranges]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string record = register_staff(f, owner);
+    const nlohmann::json both{{"record", record},
+                              {"ranges",
+                               {{{"field", "born"}, {"at_most", "2008-11-21"}},
+                                {{"field", "salary"}, {"at_least", "HKD 30,000.00"}}}},
+                              {"context", "c0ffee"}};
+    if (!kanhe::client::range_proofs_built()) {
+        const auto unbuilt = prove(f.w, owner, both);
+        CHECK(unbuilt.status == 501);
+        CHECK(error_code(unbuilt) == "unsupported");
+        return;
+    }
+    const auto made = prove(f.w, owner, both);
+    INFO(body(made));
+    REQUIRE(made.status == 200);
+    const auto answer = json_of(made);
+    CHECK(answer["name"] == "proof-" + record.substr(0, 12) + ".cbor");
+    REQUIRE(answer["range_proofs"].size() == 2);
+    CHECK(answer["range_proofs"][0]["text"] == "born is at most 2008-11-21");
+    CHECK(answer["range_proofs"][0]["status"] == "verified");
+    CHECK(answer["range_proofs"][0]["context"] == "c0ffee");
+    CHECK(answer["range_proofs"][1]["text"] == "salary is at least HKD 30,000.00");
+    CHECK(answer["provable"].size() == 2);
+    // The file verifies anywhere, with the relying party's challenge, and
+    // discloses neither value.
+    const auto bundle = *kanhe::from_base64url(answer["file"].get<std::string>());
+    CHECK(answer["size"] == bundle.size());
+    kanhe::protocol::VerifyOptions options;
+    options.expected_ledger = served.session.state().ledger_id();
+    options.range_verifier = kanhe::client::range_verifier();
+    options.range_context = kanhe::Bytes{0xc0, 0xff, 0xee};
+    const auto report = kanhe::ledger::verify_bundle(provider(), bundle, options);
+    INFO((report ? std::string() : std::string(report.error().detail)));
+    REQUIRE(report);
+    REQUIRE(report->range_proofs.size() == 2);
+    CHECK(report->range_proofs[0].verified);
+    CHECK(report->range_proofs[1].verified);
+    CHECK(report->disclosed_fields.empty());
+    const std::string bytes(bundle.begin(), bundle.end());
+    CHECK(bytes.find("2001-04-02") == std::string::npos);
+    CHECK(bytes.find("Chan Tai Man") == std::string::npos);
+    // Another relying party's challenge is not this one's.
+    options.range_context = kanhe::Bytes{0x01};
+    CHECK_FALSE(kanhe::ledger::verify_bundle(provider(), bundle, options));
+
+    // Between two bounds, with no challenge; an admin may prove too.
+    const auto between =
+        prove(f.w, f.w.session_for("Ada", console::Role::admin),
+              {{"record", record},
+               {"ranges", {{{"field", "salary"}, {"at_least", "30000"}, {"at_most", "40000"}}}},
+               {"context", ""}});
+    INFO(body(between));
+    REQUIRE(between.status == 200);
+    CHECK(json_of(between)["range_proofs"][0]["text"] ==
+          "salary is between HKD 30,000.00 and HKD 40,000.00");
+    CHECK(json_of(between)["range_proofs"][0]["context"].is_null());
+    std::vector<std::string> actions;
+    for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+        actions.push_back(a.action);
+    }
+    CHECK(std::ranges::count(actions, std::string("evidence.prove")) == 2);
+
+    // Refused: a value outside the bounds, bounds that do not read, a field
+    // that is not provable, a bad challenge.
+    auto one = [&](nlohmann::json range, nlohmann::json context = nullptr) {
+        return prove(f.w, owner,
+                     {{"record", record},
+                      {"ranges", nlohmann::json::array({std::move(range)})},
+                      {"context", std::move(context)}});
+    };
+    const auto outside = one({{"field", "born"}, {"at_least", "2010-01-01"}});
+    CHECK(outside.status == 422);
+    CHECK(error_code(outside) == "not_within");
+    CHECK(error_code(one({{"field", "salary"}, {"at_most", "30000"}})) == "not_within");
+    CHECK(error_code(one({{"field", "salary"}, {"at_least", "30000.505"}})) == "bad_bounds");
+    CHECK(error_code(one({{"field", "salary"}, {"at_least", "USD 30,000.00"}})) == "bad_bounds");
+    CHECK(error_code(one({{"field", "salary"}, {"at_least", "40000"}, {"at_most", "30000"}})) ==
+          "bad_bounds");
+    CHECK(error_code(one({{"field", "born"}, {"at_most", "2008-02-30"}})) == "bad_bounds");
+    CHECK(error_code(one({{"field", "born"}, {"at_least", " "}})) == "bad_bounds");
+    CHECK(one({{"field", "name"}, {"at_least", "A"}}).status == 400);
+    CHECK(error_code(one({{"field", "born"}, {"at_most", "2008-11-21"}}, "xyz")) ==
+          "bad_challenge");
+    CHECK(error_code(one({{"field", "born"}, {"at_most", "2008-11-21"}}, std::string(130, 'a'))) ==
+          "bad_challenge");
+    CHECK(prove(f.w, owner,
+                {{"record", record},
+                 {"ranges",
+                  {{{"field", "born"}, {"at_most", "2008-11-21"}},
+                   {{"field", "born"}, {"at_least", "1990-01-01"}}}}})
+              .status == 400);
+    CHECK(prove(f.w, owner, {{"record", record}, {"ranges", nlohmann::json::array()}}).status ==
+          400);
+    // Who may: those who may read its private data.
+    const nlohmann::json asked{{"record", record},
+                               {"ranges", {{{"field", "born"}, {"at_most", "2008-11-21"}}}}};
+    CHECK(prove(f.w, f.w.session_for("Vera", console::Role::viewer), asked).status == 403);
+    CHECK(prove(f.w, f.w.session_for("Mia", console::Role::member), asked).status == 403);
+    // A document without provable values; none on this ledger; locked.
+    const auto photo = kanhe::to_hex(register_photo(f, owner, "the photo itself").bytes());
+    const auto none =
+        prove(f.w, owner,
+              {{"record", photo}, {"ranges", {{{"field", "taken"}, {"at_most", "2027-01-01"}}}}});
+    CHECK(none.status == 409);
+    CHECK(error_code(none) == "no_provable");
+    nlohmann::json nowhere = asked;
+    nowhere["record"] = std::string(64, '0');
+    CHECK(prove(f.w, owner, nowhere).status == 404);
+    f.w.keys.lock();
+    CHECK(prove(f.w, owner, asked).status == 423);
+}
+
+TEST_CASE("a renewed proof file keeps its range proofs, checked again",
+          "[console][ranges][long-term]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string record = register_staff(f, owner);
+    if (!kanhe::client::range_proofs_built()) {
+        SUCCEED("built without range proofs");
+        return;
+    }
+    const auto made =
+        prove(f.w, owner,
+              {{"record", record}, {"ranges", {{{"field", "born"}, {"at_most", "2008-11-21"}}}}});
+    REQUIRE(made.status == 200);
+    const auto proved = *kanhe::from_base64url(json_of(made)["file"].get<std::string>());
+    // A newer checkpoint, cosigned by a witness.
+    static_cast<void>(register_photo(f, owner, "the photo itself"));
+    REQUIRE(served.session.ledger().checkpoint(f.w.keys.open("log")));
+    TempDirectory archive;
+    auto witness_key = kanhe::crypto::openssl::KeyPair::generate(kanhe::crypto::SigAlg::ed25519);
+    REQUIRE(witness_key);
+    kanhe::Bytes genesis;
+    REQUIRE(served.session.ledger().visit_entry(
+        0, [&](kanhe::ByteView e) { genesis.assign(e.begin(), e.end()); }));
+    const auto ledger_id = served.session.state().ledger_id();
+    kanhe::client::add_witnessed(archive.path,
+                                 kanhe::client::state_from_genesis(genesis, "archive", ledger_id));
+    const auto cosign = served.session.ledger().cosign_request(0);
+    REQUIRE(cosign);
+    const auto cosignature = kanhe::client::witness_cosign(
+        archive.path, *witness_key, *kanhe::protocol::encode_cosign_request(*cosign),
+        f.w.clock.now());
+    REQUIRE(cosignature);
+    REQUIRE(served.session.ledger().add_cosignature(*cosignature, witness_key->public_key()));
+
+    const auto uploaded =
+        upload(f.w, owner, "proof.cbor", std::string(proved.begin(), proved.end()));
+    REQUIRE(uploaded.status == 200);
+    const auto renewed = f.w.post_as("/console/api/long-term/renew",
+                                     {{"upload", json_of(uploaded)["upload"]}}, owner);
+    INFO(body(renewed));
+    REQUIRE(renewed.status == 200);
+    const auto answer = json_of(renewed);
+    REQUIRE(answer["range_proofs"].size() == 1);
+    CHECK(answer["range_proofs"][0]["text"] == "born is at most 2008-11-21");
+    CHECK(answer["range_proofs"][0]["status"] == "verified");
+    kanhe::protocol::VerifyOptions options;
+    options.expected_ledger = ledger_id;
+    options.range_verifier = kanhe::client::range_verifier();
+    const auto report = kanhe::ledger::verify_bundle(
+        provider(), *kanhe::from_base64url(answer["file"].get<std::string>()), options);
+    REQUIRE(report);
+    REQUIRE(report->range_proofs.size() == 1);
+    CHECK(report->range_proofs[0].verified);
 }
 
 #if defined(BO_PROGRAM)

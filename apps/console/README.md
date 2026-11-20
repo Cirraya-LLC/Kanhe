@@ -24,7 +24,7 @@ organization's guardians. Not yet: Windows.
 
 | Path | What it holds |
 |---|---|
-| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, approvals and guardians, evidence for decades, parties, people, automation, backups, the witness, and the relay |
+| `src/` | The console's routes, beside the node's: setup, sign-in, documents and kinds, scripts and sources, things and rules, approvals and guardians, evidence for decades, range proofs, parties, people, automation, backups, the witness, and the relay |
 | `web/` | The page (`index.html`, `console.js`, `console.css`) and its catalogs in three languages (`web/i18n/`) |
 | `wasm/` | Its checks in the browser, built to WebAssembly (`tools/wasm/build.sh`) and embedded when `KANHE_CONSOLE_WASM_DIR` names them |
 | `cli/` | The `kanhe-console` program |
@@ -373,6 +373,28 @@ kanhe-console settings show
   with the witnesses this console asks, and says in words whether a post-quantum attestation now
   covers it; a proof file of another ledger is refused. Proofs exported now carry the newest
   checkpoint already; the Verify screen shows a proof's long-term status too.
+- **Values proven without showing them** (spec v0.22, sections 6 and 11.3). A kind may mark a
+  private number or date "Can be proven later without showing the value", off by default; its
+  encoding comes from the field: a date, or a number with its decimal places, and its currency
+  for an amount of money (`"provable": "date" | "number:SCALE" | "money:CCY:SCALE"` in the kind
+  sheet, as `kanhe record issue --provable` writes it). Each such value of a document registered
+  from the console, or of a certificate its machine issues from a table, is committed apart with
+  a salt of its own, its opening kept in the vault; the confirmation screen says which values
+  can be proven, and the page recomputes each commitment from the value shown and its opening
+  before the tap. A document's page lists them, to everyone, as the ledger does. "Prove a range"
+  (for those who may read its private data) proves from the vault that a value is at least, at
+  most, or between bounds written as people write them (`2008-11-21`, `30000`, `HKD 30,000.00`),
+  with the relying party's challenge code if it gave one: the console checks each opening
+  against the registration, refuses a value outside the bounds, makes the proofs off the
+  ledger's writer, verifies the whole file, and offers it with what it proves in words, as `kanhe
+  evidence prove --ledger` does. "Let the holder prove..." (owners and admins: the file holds the
+  values) saves the record's range openings file, all values or those chosen, each checked
+  against its commitment, after a warning to give it only to the person the values belong to, as
+  `kanhe record openings export` does. The Verify screen shows a proof file's provable values and
+  range proofs in the reader's language, checked in the browser on the published circuit, makes
+  a fresh challenge code to give whoever proves, and requires it of every range proof when given
+  (`kanhe verify --range-context`); "Renew a proof file" keeps a file's range proofs and checks
+  them again.
 - **Confirming: one tap per statement.** `console user link NAME --actor ID --key KEY` lets a user
   act as a person of the ledger; `console user passkeys NAME --out DIR` writes their passkeys
   for `actor set-presence`. The console then prepares what the person asks for (registering,

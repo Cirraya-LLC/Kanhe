@@ -763,6 +763,18 @@ private:
     /// POST /console/api/proof: a record's evidence with the fields and
     /// files the person chose to disclose, as a file.
     void proof_route(const http::Request& request, Respond respond) const;
+    /// Range proofs (ranges.cpp, spec v0.22). POST
+    /// /console/api/records/ID/openings: the openings of the record's
+    /// provable values (all, or the fields named), each checked against its
+    /// commitment, as a range openings file for the holder they belong to;
+    /// owners and admins only, since it holds the values. POST
+    /// /console/api/prove: the record's evidence with range proofs made from
+    /// the vault's openings ({record, ranges: [{field, at_least, at_most}],
+    /// context}), for those who may read its private data; made off the
+    /// ledger's writer, verified, and answered as JSON with the file and the
+    /// report's provable values and range proofs.
+    [[nodiscard]] http::Response openings_route(const http::Request& request) const;
+    void prove_route(const http::Request& request, Respond respond) const;
     /// Whether this user may read a record's private data: owners and
     /// admins every record's, members those they registered and those of
     /// types their delegations let them register, viewers none.

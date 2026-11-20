@@ -11,6 +11,7 @@
 #include <string>
 #include <unistd.h>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/certificates.hpp>
 #include <kanhe/core/bytes.hpp>
@@ -310,6 +311,15 @@ std::vector<CertificateRow> certificate_rows(const Kind& kind, std::string_view 
             }
             if (const auto problem = check_value(f, value)) {
                 bad(line.number, "the field " + label + " is " + *problem);
+            }
+            // A provable value must read in its encoding (spec v0.22).
+            if (f.provable) {
+                try {
+                    static_cast<void>(client::provable_value_x(*f.provable, value));
+                } catch (const client::UsageError& e) {
+                    bad(line.number, "the field " + label +
+                                         " cannot be proven later as it is written: " + e.message);
+                }
             }
             (f.is_private ? row.fields : row.metadata).emplace_back(f.name, value);
         }

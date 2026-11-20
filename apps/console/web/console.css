@@ -397,6 +397,22 @@ li.bad {
     font-weight: 600;
 }
 
+/* Range proofs: one statement a line; a provable number's places and currency. */
+ul.ranges li {
+    margin: 0.5rem 0;
+}
+
+.provable-number label {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: 1rem;
+}
+
+.provable-number input[type="number"] {
+    width: 5rem;
+}
+
 /* The rules editor. */
 .toolbar {
     display: flex;

@@ -1018,6 +1018,25 @@ async function thingScreen(id) {
         }
         parts.push(fields);
     }
+    // Values that can be proven without showing them (v0.22): proven from
+    // here, or by the holder they belong to, given their openings.
+    if ((thing.provable ?? []).length > 0) {
+        const provable = el("p", { text: t("ranges.provable_line", { list: provableList(thing.provable) }) });
+        const buttons = el("p", { class: "actions" });
+        if (thing.may_prove && !thing.private.locked) {
+            const prove = el("button", { type: "button", text: t("prove.button") });
+            prove.addEventListener("click", () => proveScreen(thing));
+            buttons.append(prove);
+        }
+        if (thing.may_hand_out && !thing.private.locked) {
+            const hand = el("button", { type: "button", text: t("openings.button") });
+            hand.addEventListener("click", () => openingsScreen(thing));
+            buttons.append(buttons.children.length ? " " : "", hand);
+        }
+        parts.push(el("h2", { text: t("ranges.title") }), provable,
+                   el("p", { class: "hint", text: t("ranges.thing_hint") }),
+                   buttons.children.length ? buttons : null);
+    }
     parts.push(el("h2", { text: t("thing.files_title") }));
     if (thing.files.length === 0) {
         parts.push(el("p", { text: t("thing.no_files") }));
@@ -1236,6 +1255,141 @@ function claimScreen(thing) {
          el("p", { class: "id", text: thing.id }), form, backButton(t("nav.things")));
 }
 
+/// Proving that values lie within bounds without showing them (v0.22),
+/// from the console's vault: for each provable value, at least, at most,
+/// or between bounds written as people write them; and the relying party's
+/// challenge, if it gave one. The console makes the proof file, verifies it,
+/// and offers it; the page shows what it proves.
+function proveScreen(thing) {
+    const rows = thing.provable.map((p, i) => {
+        const id = `prove-${i}`;
+        const how = el("select", { id: `${id}-how`, "aria-label": t("prove.how", { field: p.field }) },
+                       ["none", "at_least", "at_most", "between"].map((v) =>
+                           el("option", { value: v, text: t(`prove.how.${v}`) })));
+        const type = p.encoding.type === "date" ? "date" : "text";
+        const low = el("input", { id: `${id}-low`, type, maxlength: 64, inputmode: type === "text" ? "decimal" : null,
+                                  "aria-label": t("prove.low", { field: p.field }) });
+        const high = el("input", { id: `${id}-high`, type, maxlength: 64, inputmode: type === "text" ? "decimal" : null,
+                                   "aria-label": t("prove.high", { field: p.field }) });
+        const and = el("span", { text: t("prove.and") });
+        const redraw = () => {
+            low.hidden = !["at_least", "between"].includes(how.value);
+            high.hidden = !["at_most", "between"].includes(how.value);
+            and.hidden = how.value !== "between";
+        };
+        how.addEventListener("change", redraw);
+        redraw();
+        const row = el("fieldset", { class: "kind-field" },
+                       el("legend", { text: t("ranges.provable_item", { field: p.field, encoding: encodingText(p.encoding) }) }),
+                       how, " ", low, " ", and, " ", high,
+                       p.encoding.type !== "date"
+                           ? el("p", { class: "hint", text: t(p.encoding.type === "money" ? "prove.money_hint" : "prove.number_hint", {
+                               currency: p.encoding.currency ?? "", scale: p.encoding.scale }) })
+                           : null);
+        row.read = () => (how.value === "none" ? null : {
+            field: p.field,
+            at_least: low.hidden ? null : low.value.trim(),
+            at_most: high.hidden ? null : high.value.trim(),
+        });
+        return row;
+    });
+    const [challengeField, challenge] = field("prove-challenge", t("prove.challenge"), t("prove.challenge_hint"),
+                                              { spellcheck: "false", maxlength: 128, autocomplete: "off" });
+    const notice = el("div", { role: "status", "aria-live": "polite" });
+    const make = el("button", { type: "submit", class: "primary", text: t("prove.make") });
+    const form = el("form", { novalidate: true }, ...rows, challengeField, notice, make, " ",
+                    (() => {
+                        const back = el("button", { type: "button", text: t("approve.cancel") });
+                        back.addEventListener("click", () => thingScreen(thing.id));
+                        return back;
+                    })());
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const ranges = rows.map((r) => r.read()).filter((r) => r);
+        if (ranges.length === 0) {
+            notice.replaceChildren(problem(t("prove.nothing")));
+            return;
+        }
+        const code = challenge.value.trim().toLowerCase();
+        if (code && !/^([0-9a-f]{2}){1,64}$/.test(code)) {
+            notice.replaceChildren(problem(t("verify.challenge_bad")));
+            return;
+        }
+        make.disabled = true;
+        status(t("prove.working"));
+        notice.replaceChildren(el("p", { text: t("prove.working") }));
+        try {
+            const proved = await api("POST", "prove", { record: thing.id, ranges, context: code || null });
+            saveBytes(fromBase64url(proved.file), proved.name);
+            notice.replaceChildren(
+                el("p", { class: "notice", id: "prove-done", text: t("prove.done", { name: proved.name }) }),
+                el("ul", { class: "ranges" }, proved.range_proofs.map((p) => rangeLine(p, code))),
+                el("p", { class: "hint", text: t(code ? "prove.send_challenge" : "prove.send") }));
+        } catch (error) {
+            const known = ["not_within", "bad_bounds", "bad_challenge", "no_provable", "unsupported"];
+            const why = error.answer?.error?.code;
+            notice.replaceChildren(problem(known.includes(why)
+                ? t(`prove.${why}`, { message: error.message })
+                : error.status === 423 ? t("keys.locked") : t("error.server", { message: error.message })));
+        } finally {
+            make.disabled = false;
+            status("");
+        }
+    });
+    show(el("h1", { text: t("prove.title") }), el("p", { class: "id", text: `${thing.kind ?? thing.type} ${thing.id}` }),
+         el("p", { text: t("prove.intro") }), form);
+}
+
+/// Letting the holder prove (v0.22): the record's openings as a file, for
+/// the person the values belong to, after a warning that it holds them.
+function openingsScreen(thing) {
+    const boxes = thing.provable.map((p) => el("input", { type: "checkbox", value: p.field, checked: true }));
+    const values = el("fieldset", {}, el("legend", { text: t("openings.which") }),
+                      ...thing.provable.map((p, i) => el("label", { class: "check" }, boxes[i], " ",
+                          t("ranges.provable_item", { field: p.field, encoding: encodingText(p.encoding) }))));
+    const understood = el("input", { type: "checkbox", id: "openings-understood" });
+    const notice = el("div", { role: "status", "aria-live": "polite" });
+    const save = el("button", { type: "submit", class: "primary", text: t("openings.save") });
+    const form = el("form", { novalidate: true }, values,
+                    el("div", { class: "error", role: "note" }, el("strong", { text: t("openings.warning_title") }),
+                       el("p", { text: t("openings.warning") })),
+                    el("label", { class: "check" }, understood, " ", t("openings.understood")),
+                    notice, save, " ",
+                    (() => {
+                        const back = el("button", { type: "button", text: t("approve.cancel") });
+                        back.addEventListener("click", () => thingScreen(thing.id));
+                        return back;
+                    })());
+    form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const fields = boxes.filter((b) => b.checked).map((b) => b.value);
+        if (!understood.checked) {
+            notice.replaceChildren(problem(t("openings.confirm_first")));
+            return;
+        }
+        if (fields.length === 0) {
+            notice.replaceChildren(problem(t("openings.none_chosen")));
+            return;
+        }
+        save.disabled = true;
+        try {
+            const saved = await saveDownload(`records/${thing.id}/openings`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ fields }),
+            }, "openings.kanheopenings");
+            notice.replaceChildren(el("p", { class: "notice", id: "openings-done", text: t("openings.done", { name: saved }) }),
+                                   el("p", { class: "hint", text: t("openings.then") }));
+        } catch (error) {
+            notice.replaceChildren(problem(error.status === 423 ? t("keys.locked")
+                                                                : t("error.server", { message: error.message })));
+        } finally {
+            save.disabled = false;
+        }
+    });
+    show(el("h1", { text: t("openings.title") }), el("p", { class: "id", text: `${thing.kind ?? thing.type} ${thing.id}` }),
+         el("p", { text: t("openings.intro") }), form);
+}
+
 /// Sharing proof: the fields to disclose and whether to open the files;
 /// the proof as a file, and the files to send along.
 function shareScreen(thing) {
@@ -1298,8 +1452,90 @@ function shareScreen(thing) {
 
 // --- Verify ----------------------------------------------------------------------------
 
-/// A localized verification report, from the verifier's JSON.
-function reportView(given) {
+// --- Values proven without showing them (v0.22) ----------------------------------------
+
+/// How a provable value is read, in words: a date, a whole number, an
+/// amount in HKD with 2 decimal places.
+function encodingText(e) {
+    const places = e.scale === 0 ? "_0" : e.scale === 1 ? "_1" : "";
+    if (e.type === "date") {
+        return t("ranges.enc_date");
+    }
+    return t(`ranges.enc_${e.type === "money" ? "money" : "number"}${places}`,
+             { currency: e.currency ?? "", scale: e.scale ?? 0 });
+}
+
+/// An encoding as a kind sheet writes it ("money:HKD:2"), as a report gives
+/// it: {type, scale, currency}.
+function encodingOf(text) {
+    const [type, a, b] = String(text ?? "").split(":");
+    if (type === "date") {
+        return { type, scale: null, currency: null };
+    }
+    if (type === "money") {
+        return { type, scale: Number(b), currency: a };
+    }
+    return { type: "number", scale: Number(a ?? 0), currency: null };
+}
+
+/// Provable values in a line: "born (a date), salary (an amount in HKD
+/// with 2 decimal places)".
+const provableList = (list) => list.map((p) => t("ranges.provable_item", {
+    field: p.field, encoding: encodingText(p.encoding) })).join(t("approvals.separator"));
+
+/// A range proof's statement in the reader's language (spec v0.22, section
+/// 11.3): its bounds taken from the report's English words, which write
+/// them as a claim does, and exactly.
+function rangeText(proof) {
+    const words = proof.text.startsWith(`${proof.field} `) ? proof.text.slice(proof.field.length) : null;
+    let m;
+    if (words && proof.low !== null && proof.high !== null && (m = /^ is between (.+) and (.+)$/.exec(words))) {
+        return t("ranges.between", { field: proof.field, low: m[1], high: m[2] });
+    }
+    if (words && proof.high === null && (m = /^ is at least (.+)$/.exec(words))) {
+        return t("ranges.at_least", { field: proof.field, low: m[1] });
+    }
+    if (words && proof.low === null && (m = /^ is at most (.+)$/.exec(words))) {
+        return t("ranges.at_most", { field: proof.field, high: m[1] });
+    }
+    return proof.text;
+}
+
+/// A range proof in a line: its statement, the challenge it carries, and
+/// whether it was checked.
+function rangeLine(proof, challenge = "") {
+    const verified = proof.status === "verified";
+    const carried = proof.context
+        ? t(proof.context === challenge ? "ranges.challenge_yours" : "ranges.challenge", { code: proof.context })
+        : t("ranges.no_challenge");
+    return el("li", { class: verified ? null : "bad" }, el("strong", { text: rangeText(proof) }), " ",
+              t(verified ? "ranges.verified" : "ranges.not_checked"), " ",
+              el("span", { class: "hint", text: carried }));
+}
+
+/// What a verification report says of provable values and range proofs.
+function rangesView(report, challenge = "") {
+    const provable = report.provable ?? [];
+    const proofs = report.range_proofs ?? [];
+    if (provable.length === 0 && proofs.length === 0) {
+        return challenge ? [el("p", { class: "notice", text: t("ranges.none_for_challenge") })] : [];
+    }
+    const parts = [el("h2", { text: t("ranges.title") })];
+    if (provable.length > 0) {
+        parts.push(el("p", { text: t("ranges.provable_line", { list: provableList(provable) }) }),
+                   el("p", { class: "hint", text: t("ranges.issuers_word") }));
+    }
+    if (proofs.length > 0) {
+        parts.push(el("ul", { class: "ranges" }, proofs.map((p) => rangeLine(p, challenge))));
+    } else {
+        parts.push(el("p", { text: t(challenge ? "ranges.none_for_challenge" : "ranges.none") }));
+    }
+    return parts;
+}
+
+/// A localized verification report, from the verifier's JSON; with the
+/// challenge its range proofs were required to carry, if any.
+function reportView(given, challenge = "") {
     const parts = [];
     if (given.error) {
         parts.push(el("div", { class: "error", role: "alert" },
@@ -1366,6 +1602,7 @@ function reportView(given) {
         })));
     }
     parts.push(...reportMadeFrom(report));
+    parts.push(...rangesView(report, challenge));
     const disclosed = Object.entries(report.disclosed_fields ?? {});
     if (disclosed.length > 0) {
         parts.push(el("h2", { text: t("verify.disclosed") }));
@@ -1436,6 +1673,13 @@ function verifyScreen() {
     const filesInput = el("input", { id: "verify-files", type: "file", multiple: true });
     const [ledgerField, ledgerInput] = field("verify-ledger", t("verify.ledger"), t("verify.ledger_hint"),
                                              { spellcheck: "false", maxlength: 64 });
+    // A challenge for range proofs (v0.22): made here and given to whoever
+    // proves, so that a proof carrying it was made after it was asked for.
+    const [challengeField, challengeInput] = field("verify-challenge", t("verify.challenge"),
+                                                   t("verify.challenge_hint"),
+                                                   { spellcheck: "false", maxlength: 128, autocomplete: "off" });
+    const fresh = el("button", { type: "button", text: t("verify.challenge_new") });
+    challengeField.append(fresh);
     const result = el("section", { "aria-live": "polite", "aria-labelledby": "verify-result" });
     let proof = null;
     const files = new Map();
@@ -1448,10 +1692,28 @@ function verifyScreen() {
             result.replaceChildren(problem(t("verify.unavailable")));
             return;
         }
-        const report = checker.verify(proof, files, ledgerInput.value.trim().toLowerCase());
+        const ledger = ledgerInput.value.trim().toLowerCase();
+        const challenge = challengeInput.value.trim().toLowerCase();
+        if (challenge && !/^([0-9a-f]{2}){1,64}$/.test(challenge)) {
+            result.replaceChildren(problem(t("verify.challenge_bad")));
+            return;
+        }
+        const report = checker.verify(proof, files, ledger, challenge);
+        // Not verified with the challenge, but verified without it: a range
+        // proof was made before it was asked for, or for someone else.
+        const without = !report.error || !challenge ? null : checker.verify(proof, files, ledger);
         result.replaceChildren(el("h2", { id: "verify-result", text: t("verify.result") }),
-                               ...reportView(report));
+                               ...(without && !without.error
+                                   ? [el("div", { class: "error", role: "alert" },
+                                         el("strong", { text: t("verify.challenge_failed") }),
+                                         el("p", { text: t("verify.challenge_failed_detail") }))]
+                                   : reportView(report, challenge)));
     };
+    fresh.addEventListener("click", async () => {
+        const bytes = crypto.getRandomValues(new Uint8Array(16));
+        challengeInput.value = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+        await check();
+    });
     const take = async (list) => {
         for (const file of list) {
             const bytes = new Uint8Array(await file.arrayBuffer());
@@ -1474,6 +1736,7 @@ function verifyScreen() {
         await check();
     });
     ledgerInput.addEventListener("change", check);
+    challengeInput.addEventListener("change", check);
     const drop = el("section", { class: "drop", "aria-label": t("verify.drop") },
                     el("p", { text: t("verify.drop") }));
     drop.addEventListener("dragover", (event) => {
@@ -1491,7 +1754,7 @@ function verifyScreen() {
             proofInput),
          el("div", { class: "field" }, el("label", { for: "verify-files", text: t("verify.with_files") }),
             filesInput),
-         ledgerField, result);
+         ledgerField, challengeField, result);
 }
 
 // --- Kinds and new documents --------------------------------------------------------
@@ -1513,7 +1776,8 @@ async function kindsScreen() {
         const fields = el("ul", {}, kind.fields.map((f) => el("li", {
             text: t(f.private ? "kinds.field_private" : "kinds.field_public",
                     { name: f.label || f.name, type: t(`field.${f.type}`) }) +
-                  (f.required ? t("kinds.required") : ""),
+                  (f.required ? t("kinds.required") : "") +
+                  (f.provable ? t("kinds.provable_mark", { encoding: encodingText(encodingOf(f.provable)) }) : ""),
         })));
         const section = el("section", { class: "kind", "aria-labelledby": `kind-${kind.type}` },
                            el("h2", { id: `kind-${kind.type}`, text: kind.name }),
@@ -1570,6 +1834,44 @@ function kindForm() {
         const required = el("input", { type: "checkbox" });
         const printed = el("input", { type: "checkbox" });
         const answers = el("input", { type: "checkbox" });
+        // A private number or date may be provable later without being
+        // shown (v0.22): off by default; a number's decimal places, and its
+        // currency if it is an amount of money.
+        const provable = el("input", { type: "checkbox" });
+        const places = el("input", { type: "number", min: 0, max: 18, value: 0, inputmode: "numeric",
+                                     "aria-label": t("kinds.provable_places", { n }) });
+        const currency = el("input", { type: "text", maxlength: 3, size: 4, spellcheck: "false",
+                                       autocapitalize: "characters", placeholder: "HKD",
+                                       "aria-label": t("kinds.provable_currency", { n }) });
+        const numberPart = el("span", { class: "provable-number" },
+                              el("label", {}, t("kinds.provable_places_label"), " ", places), " ",
+                              el("label", {}, t("kinds.provable_currency_label"), " ", currency));
+        const provablePart = el("span", {},
+                                el("label", { class: "check" }, provable, " ", t("kinds.provable")),
+                                numberPart);
+        const redraw = () => {
+            const kind = kindOf.value;
+            provablePart.hidden = kind !== "number" && kind !== "date";
+            if (provablePart.hidden) {
+                provable.checked = false;
+            }
+            numberPart.hidden = kind !== "number" || !provable.checked;
+        };
+        kindOf.addEventListener("change", redraw);
+        provable.addEventListener("change", () => {
+            // What is proven without being shown is never public.
+            if (provable.checked) {
+                secret.checked = true;
+            }
+            redraw();
+        });
+        secret.addEventListener("change", () => {
+            if (!secret.checked) {
+                provable.checked = false;
+                redraw();
+            }
+        });
+        redraw();
         const row = el("fieldset", { class: "kind-field" },
                        el("legend", { text: t("kinds.field", { n }) }),
                        el("label", { for: `kind-field-${n}`, text: t("kinds.field_label") }), label,
@@ -1577,10 +1879,22 @@ function kindForm() {
                        el("label", { class: "check" }, secret, " ", t("kinds.private")),
                        el("label", { class: "check" }, required, " ", t("kinds.required_box")),
                        el("label", { class: "check" }, printed, " ", t("kinds.printed")),
-                       el("label", { class: "check" }, answers, " ", t("kinds.answers")));
+                       el("label", { class: "check" }, answers, " ", t("kinds.answers")),
+                       provablePart);
+        const encoding = () => {
+            if (!provable.checked || provablePart.hidden) {
+                return null;
+            }
+            if (kindOf.value === "date") {
+                return "date";
+            }
+            const scale = Math.max(0, Math.trunc(Number(places.value) || 0));
+            const code = currency.value.trim().toUpperCase();
+            return code ? `money:${code}:${scale}` : scale ? `number:${scale}` : "number";
+        };
         row.read = () => ({ name: label.value.trim(), type: kindOf.value, private: secret.checked,
                             required: required.checked, printed: printed.checked,
-                            answers: answers.checked });
+                            answers: answers.checked, provable: encoding() });
         rows.append(row);
         label.focus();
     };
@@ -1605,7 +1919,8 @@ function kindForm() {
             await api("POST", "kinds", {
                 sheet: 1, kind: "document", type: type.value.trim(), name: name.value.trim(),
                 fields: fields.map((f) => ({ name: f.name, label: f.name, type: f.type,
-                                             private: f.private, required: f.required })),
+                                             private: f.private, required: f.required,
+                                             ...(f.provable ? { provable: f.provable } : {}) })),
                 files: files.value, keep_files: keep.checked,
                 ...(fields.some((f) => f.printed)
                     ? { printed: fields.filter((f) => f.printed).map((f) => f.name) } : {}),
@@ -1659,7 +1974,10 @@ async function newDocumentScreen(supersedes = null) {
                                                    (f.required ? t("register.required_mark") : "") }),
                       input,
                       el("span", { class: "hint", text: t(f.private ? "register.private_hint"
-                                                                    : "register.public_hint") }));
+                                                                    : "register.public_hint") }),
+                      // Provable later without being shown (v0.22).
+                      f.provable ? el("span", { class: "hint", text: t("register.provable_hint", {
+                          encoding: encodingText(encodingOf(f.provable)) }) }) : null);
         });
         if (kind.files !== "none") {
             fileInput = el("input", { id: "register-files", type: "file", multiple: true,
@@ -2099,6 +2417,11 @@ function renewScreen() {
                 el("p", { class: "notice", id: "renew-done", text: t("renew.done", {
                     name: renewed.name, size: renewed.tree_size, time: isoText(renewed.timestamp) }) }),
                 el("p", { id: "renew-long-term", text: longTermWords(renewed.long_term) }),
+                // Its range proofs (v0.22), kept by the renewal and checked.
+                ...(renewed.range_proofs?.length
+                    ? [el("p", { text: t("renew.range_proofs") }),
+                       el("ul", { class: "ranges" }, renewed.range_proofs.map((p) => rangeLine(p)))]
+                    : []),
                 el("p", { class: "hint", text: t("renew.send") }));
         } catch (error) {
             const code = error.answer?.error?.code;
@@ -5356,7 +5679,10 @@ async function loadChecker() {
                 call("_kanhe_statement_id", signedStatement, fields, hash),
             approvalChallenge: (payload, kid, hash) =>
                 call("_kanhe_approval_challenge", payload, kid, hash),
-            verify: (proof, files, ledger) => {
+            // A proof file, with the files it may check, the ledger it
+            // should come from, and a challenge its range proofs must carry
+            // (hex, or empty for none).
+            verify: (proof, files, ledger, challenge = "") => {
                 module._kanhe_proof_reset();
                 for (const [name, content] of files) {
                     const label = new TextEncoder().encode(name);
@@ -5367,6 +5693,16 @@ async function loadChecker() {
                     module._kanhe_proof_attachment(n, label.length, d, content.length);
                     module._free(n);
                     module._free(d);
+                }
+                if (challenge) {
+                    const hex = new TextEncoder().encode(challenge);
+                    const h = module._malloc(Math.max(hex.length, 1));
+                    module.HEAPU8.set(hex, h);
+                    const taken = module._kanhe_proof_range_context(h, hex.length);
+                    module._free(h);
+                    if (taken !== 0) {
+                        return { verified: false, error: t("verify.challenge_bad") };
+                    }
                 }
                 return call("_kanhe_proof_verify", proof, new TextEncoder().encode(ledger));
             },
@@ -5450,6 +5786,11 @@ function registrationAgrees(check, decoded, prepared, files) {
         (summary.script_approval && canonical(decoded.script_approval) !== canonical(summary.script_approval))) {
         return false;
     }
+    // Its provable values (v0.22): each commitment computed here from the
+    // value shown and its opening.
+    if (!provableAgrees(check, decoded, summary)) {
+        return false;
+    }
     if (decoded.attachments.length !== summary.files.length) {
         return false;
     }
@@ -5461,6 +5802,73 @@ function registrationAgrees(check, decoded, prepared, files) {
         }
         const own = check.commitment(content, new Uint8Array(fromBase64url(f.salt)), prepared.hash);
         return own.ok && own.commitment === a.commitment;
+    });
+}
+
+/// A registration's provable values, by field and encoding only.
+const provableNames = (list) => canonical((list ?? []).map(({ field, encoding }) => ({ field, encoding })));
+
+/// A value as its encoding reads it (spec v0.22, section 6), as a BigInt:
+/// a date as its days from 1970-01-01; a number or an amount times
+/// 10^scale. Null if it does not read: then the page refuses.
+function provableX(encoding, value) {
+    const text = String(value).trim();
+    if (encoding.type === "date") {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text);
+        if (!m) {
+            return null;
+        }
+        const [y, month, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+        const leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+        const length = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+        if (y < 1 || !length || d < 1 || d > length) {
+            return null;
+        }
+        // Days from the civil date, in the proleptic Gregorian calendar.
+        const yy = month <= 2 ? y - 1 : y;
+        const era = Math.floor(yy / 400);
+        const yoe = yy - era * 400;
+        const doy = Math.floor((153 * (month > 2 ? month - 3 : month + 9) + 2) / 5) + d - 1;
+        const doe = yoe * 365 + Math.floor(yoe / 4) - Math.floor(yoe / 100) + doy;
+        return BigInt(era * 146097 + doe - 719468);
+    }
+    const scale = encoding.scale ?? 0;
+    const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(text);
+    if (!m || (m[3] ?? "").length > scale) {
+        return null;
+    }
+    const x = BigInt(m[2] + (m[3] ?? "").padEnd(scale, "0"));
+    return m[1] ? -x : x;
+}
+
+/// The provable values in a registration's bytes are those the console
+/// describes, each committing to the value shown: SHA-256("Kanhe range v1"
+/// || salt || x + 2^63 as 8 bytes, big-endian), on every ledger.
+function provableAgrees(check, decoded, summary) {
+    const provable = decoded.provable ?? [];
+    const openings = summary.openings ?? [];
+    if (provableNames(provable) !== provableNames(summary.provable) ||
+        openings.length !== provable.length) {
+        return false;
+    }
+    return provable.every((p, i) => {
+        const opening = openings[i];
+        const shown = summary.fields.find((f) => f.name === p.field);
+        const salt = new Uint8Array(fromBase64url(opening.salt));
+        const x = shown ? provableX(p.encoding, shown.value) : null;
+        if (opening.field !== p.field || x === null || x !== BigInt(opening.x) || salt.length !== 32) {
+            return false;
+        }
+        const message = new Uint8Array(14 + 32 + 8);
+        message.set(new TextEncoder().encode("Kanhe range v1"));
+        message.set(salt, 14);
+        let v = BigInt.asUintN(64, x + (1n << 63n));
+        for (let k = 7; k >= 0; k--) {
+            message[46 + k] = Number(v & 0xffn);
+            v >>= 8n;
+        }
+        const own = check.digest(message, -16);
+        return own.ok && own.digest === p.commitment;
     });
 }
 
@@ -5592,6 +6000,7 @@ function heldRegistrationAgrees(decoded, summary) {
         canonical(decoded.metadata ?? {}) === canonical(summary.metadata ?? {}) &&
         canonical(decoded.sources ?? []) === canonical(named) &&
         sameTerms(decoded.access, summary.access) && consent && same("claim") && same("script_approval") &&
+        provableNames(decoded.provable) === provableNames(summary.provable) &&
         decoded.attachments.length === files.length &&
         files.every((f, i) => decoded.attachments[i].name === f.name && decoded.attachments[i].size === f.size &&
                                decoded.attachments[i].media_type === f.media_type);
@@ -5728,6 +6137,10 @@ function statementFacts(summary) {
         fact("exchange.until", timeText(summary.consent.until));
     }
     fact("column.type", summary.record_type);
+    // Values it lets be proven later without showing them (v0.22).
+    if (summary.provable?.length) {
+        fact("ranges.provable_fact", provableList(summary.provable));
+    }
     fact("register.replaces", summary.supersedes);
     fact("approve.name", summary.name);
     fact("column.id", summary.record ?? summary.contract);

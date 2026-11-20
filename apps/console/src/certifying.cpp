@@ -31,6 +31,7 @@
 #include <kanhe/core/bytes.hpp>
 #include <kanhe/core/cbor.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/credentials.hpp>
 #include <kanhe/node/published.hpp>
@@ -681,6 +682,7 @@ void Console::issue(Run& run, const std::stop_token& stop) const {
                 }
                 std::optional<Bytes> submission;
                 std::string problem;
+                std::vector<protocol::RangeOpening> openings;
                 served->read_state([&](const protocol::LedgerState& state) {
                     const auto commitment =
                         protocol::commit_fields(*services_.provider, state.hash(), fields);
@@ -702,6 +704,16 @@ void Console::issue(Run& run, const std::stop_token& stop) const {
                         }
                         body.metadata = cbor::Value::map(std::move(metadata));
                     }
+                    // The kind's provable values (spec v0.22), as a document
+                    // registered by hand gets them.
+                    auto provable = provable_draft(run.batch.kind, fields, *services_.provider,
+                                                   *services_.entropy);
+                    if (auto* refused = std::get_if<std::string>(&provable)) {
+                        problem = "line " + std::to_string(row.line) + ": " + *refused;
+                        return;
+                    }
+                    body.provable = std::move(std::get<ProvableDraft>(provable).values);
+                    openings = std::move(std::get<ProvableDraft>(provable).openings);
                     protocol::Statement s;
                     s.ledger_id = state.ledger_id();
                     s.actor_id = *machine;
@@ -726,7 +738,7 @@ void Console::issue(Run& run, const std::stop_token& stop) const {
                         {{cbor::Value::integer(1), cbor::Value::bytes(made->encoded)},
                          {cbor::Value::integer(2),
                           cbor::Value::bytes(client::seal_vault(state.ledger_id(), record,
-                                                                client::Vault{fields, {}, {}},
+                                                                client::Vault{fields, {}, openings},
                                                                 *vault_public))}}));
                     if (encoded) {
                         submission = std::move(*encoded);

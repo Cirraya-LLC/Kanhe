@@ -365,6 +365,32 @@ grep -q "its records stay on the ledger" out.txt || fail "console kind remove"
 expect_exit 2 kanhe-console kind show example.org.photo/1
 run kanhe-console kind add --help > out.txt
 grep -q '"sheet": 1' out.txt || fail "console kind add --help"
+grep -q '"provable": ENCODING' out.txt || fail "console kind add --help names provable fields"
+# Values that can be proven later without being shown: a private date, and an
+# amount of money in a currency, each as the command line writes encodings.
+cat > staff-kind.json << 'JSON'
+{"sheet": 1, "kind": "document", "type": "example.org.staff/1", "name": "Staff",
+ "fields": [{"name": "name", "required": true},
+            {"name": "born", "type": "date", "provable": "date"},
+            {"name": "salary", "type": "number", "provable": "money:HKD:2"}],
+ "files": "none"}
+JSON
+run kanhe-console kind add staff-kind.json > /dev/null
+run kanhe-console kind show example.org.staff/1 > out.txt
+grep -q "field born .* date .* private, provable as date" out.txt || fail "a provable date"
+grep -q "field salary .* number .* private, provable as money:HKD:2" out.txt ||
+    fail "a provable amount"
+[ "$(run kanhe-console kind list --json | json '[f.get("provable") for f in d[0]["fields"]]')" = \
+    "[None, 'date', 'money:HKD:2']" ] || fail "kind list --json names provable fields"
+for refused in '{"name": "note", "provable": "number"}' \
+    '{"name": "born", "type": "date", "private": false, "provable": "date"}' \
+    '{"name": "salary", "type": "number", "provable": "money:hkd:2"}'; do
+    printf '{"sheet": 1, "kind": "document", "type": "x/1", "name": "X", "fields": [{"name": "a"}, %s]}' \
+        "$refused" > bad-kind.json
+    expect_exit 1 kanhe-console kind add bad-kind.json
+    grep -q "provable\|encoding\|currency" out.txt || fail "a provable field refused: $refused"
+done
+run kanhe-console kind remove example.org.staff/1 > /dev/null
 
 # --- console setup: the first run, for scripts -------------------------------------
 # A passkey's credential file, as presence enroll writes one: a CBOR map of its

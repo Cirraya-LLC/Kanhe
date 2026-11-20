@@ -35,6 +35,7 @@
 #include <kanhe/client/errors.hpp>
 #include <kanhe/client/long_term.hpp>
 #include <kanhe/client/public_witnesses.hpp>
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/renewals.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/console.hpp>
@@ -590,6 +591,8 @@ http::Response Console::renew_route(const Signed& who, const nlohmann::json& bod
     } catch (const client::ActionError&) {
         // The same.
     }
+    // Its range proofs (spec v0.22), which a renewal keeps, checked too.
+    options.range_verifier = client::range_verifier();
     std::optional<client::Renewed> renewed;
     try {
         renewed.emplace(client::renew_bundle(encoded, std::move(*made), options));
@@ -626,7 +629,10 @@ http::Response Console::renew_route(const Signed& who, const nlohmann::json& bod
                    {"timestamps", renewed->added.timestamps.size()},
                    {"network_cosignatures", renewed->added.network_cosignatures.size()}}},
                  {"long_term", long_term != report.end() ? nlohmann::json::parse(long_term->dump())
-                                                         : nlohmann::json()}});
+                                                         : nlohmann::json()},
+                 {"range_proofs", report.contains("range_proofs")
+                                      ? nlohmann::json::parse(report["range_proofs"].dump())
+                                      : nlohmann::json::array()}});
 }
 
 http::Response Console::long_term_route(const http::Request& request) const {

@@ -154,11 +154,16 @@ std::vector<CommandSpec> console_commands() {
          cmd_console_kind_add,
          "FILE is a kind sheet (JSON): {\"sheet\": 1, \"kind\": \"document\", \"type\": TYPE,\n"
          "\"name\": NAME, \"fields\": [{\"name\", \"label\", \"type\": text|number|date|yes-no,\n"
-         "\"private\", \"required\"}, ...], \"files\": optional|required|none, \"keep_files\",\n"
-         "\"printed\": [NAMES]}. A kind is the console's form for registering records of TYPE:\n"
-         "private fields are committed by salted hash, public ones go into the record's\n"
-         "metadata. \"printed\" makes it a certificate (certificate issue): the fields shown on\n"
-         "paper, and disclosed to whoever scans its QR code. Kinds are not part of the ledger."},
+         "\"private\", \"required\", \"provable\": ENCODING}, ...], \"files\":\n"
+         "optional|required|none, \"keep_files\", \"printed\": [NAMES]}. A kind is the console's\n"
+         "form for registering records of TYPE: private fields are committed by salted hash,\n"
+         "public ones go into the record's metadata. \"printed\" makes it a certificate\n"
+         "(certificate issue): the fields shown on paper, and disclosed to whoever scans its QR\n"
+         "code. A private number or date may be \"provable\": its records commit to its value\n"
+         "apart too, so that it can later be proven to lie within bounds without being shown\n"
+         "(kanhe evidence prove). ENCODING is date for a date, and for a number: number,\n"
+         "number:SCALE (decimal places, 0 to 18), or money:CCY:SCALE (an amount in a currency,\n"
+         "such as money:HKD:2). Kinds are not part of the ledger."},
         {{"kind", "list"},
          "List the web console's document kinds",
          "Console",

@@ -725,7 +725,9 @@ kanhe evidence proof list for-the-shop.cbor            # the proofs, in words
 kanhe evidence proof remove for-the-shop.cbor born --in-place
 ```
 
-The issuer proves from its own vault in the same way, with `--ledger` instead of `--openings`.
+The issuer proves from its own vault in the same way, with `--ledger` instead of `--openings`;
+in the web console, a kind marks a number or a date provable, and a document's page proves a
+range or saves its openings file for the holder.
 Each opening is checked against the commitment in the record's registration before proving, a
 value outside the bounds makes no proof, and the new bundle is verified before it is written.
 That a commitment is the field's value is the issuer's word, as a claim's answer is, and the

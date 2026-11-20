@@ -320,7 +320,8 @@ void Console::handle(const http::Request& request, Respond respond) const {
         }
         return;
     }
-    if (request.path == "/console/api/proof" && request.method == "POST") {
+    if ((request.path == "/console/api/proof" || request.path == "/console/api/prove") &&
+        request.method == "POST") {
         try {
             if (auto refused = refuse(request)) {
                 respond(std::move(*refused));
@@ -330,7 +331,11 @@ void Console::handle(const http::Request& request, Respond respond) const {
                 respond(error(503, "unavailable", "this console keeps no users or sessions"));
                 return;
             }
-            proof_route(request, std::move(respond));
+            if (request.path.ends_with("/prove")) {
+                prove_route(request, std::move(respond));
+            } else {
+                proof_route(request, std::move(respond));
+            }
         } catch (const std::exception&) {
             respond(error(500, "internal", "the console could not answer; see its files"));
         }
@@ -488,6 +493,10 @@ http::Response Console::route(const http::Request& request) const {
     }
     if (request.path.starts_with("/console/api/instances/")) {
         return ready() ? instance_route(request)
+                       : error(503, "unavailable", "this console keeps no users or sessions");
+    }
+    if (request.path.starts_with("/console/api/records/") && request.path.ends_with("/openings")) {
+        return ready() ? openings_route(request)
                        : error(503, "unavailable", "this console keeps no users or sessions");
     }
     if (request.path.starts_with("/console/api/records/") &&

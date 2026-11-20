@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/console.hpp>
@@ -299,6 +300,15 @@ http::Response Console::record_route(const http::Request& request) const {
             {"may_claim", vault.has_value() && !r->revoked && !r->superseded_by &&
                               protocol::find_record_type(r->record_type) == nullptr},
             {"private", {{"allowed", allowed}, {"locked", allowed && locked}, {"fields", fields}}},
+            // Its provable values (v0.22), public in its registration; and
+            // whether this person may prove them from the vault, or hand
+            // their openings to the holder (owners and admins: the file
+            // holds the values).
+            {"provable", provable_view(body->provable)},
+            {"may_prove",
+             vault.has_value() && !body->provable.empty() && client::range_proofs_built()},
+            {"may_hand_out", vault.has_value() && !body->provable.empty() &&
+                                 (signer.role == Role::owner || signer.role == Role::admin)},
             // Where it came from (v0.18): its sources and its script.
             {"made_from", made_from(state, *r, *body)}};
         page = std::move(view);

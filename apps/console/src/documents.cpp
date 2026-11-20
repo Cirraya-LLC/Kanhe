@@ -5,10 +5,12 @@
 // the console's folder, then a registration prepared from a kind, its
 // fields, and those files. The fields get fresh salts and are committed as
 // the command line commits them; private ones stay in the vault, public
-// ones go into the metadata. A registration may also name what it was made
-// from: records of this ledger or of others (with their proofs) and the
-// approved script that made it (provenance.cpp). Nothing is sealed or sent
-// until the person's passkey approves the statement (approve.cpp).
+// ones go into the metadata; a value the kind marks provable is committed
+// apart too, its opening kept in the vault. A registration may also name
+// what it was made from: records of this ledger or of others (with their
+// proofs) and the approved script that made it (provenance.cpp). Nothing is
+// sealed or sent until the person's passkey approves the statement
+// (approve.cpp).
 
 #include <algorithm>
 #include <filesystem>
@@ -186,6 +188,21 @@ Console::register_draft(const nlohmann::json& intent, const std::string& user) c
     if (!metadata.empty()) {
         body.metadata = cbor::Value::map(std::move(metadata));
     }
+    // Its provable values (spec v0.22): the kind's provable fields given,
+    // each committed apart with a salt of its own; the openings go into the
+    // vault with the fields.
+    auto provable =
+        provable_draft(*kind, commitment->fields, *services_.provider, *services_.entropy);
+    if (auto* problem = std::get_if<std::string>(&provable)) {
+        return std::move(*problem);
+    }
+    ProvableDraft& proven = std::get<ProvableDraft>(provable);
+    if (!proven.values.empty()) {
+        body.provable = std::move(proven.values);
+        if (const auto shape = protocol::check_provable(body.provable, body.field_count); !shape) {
+            return std::string(shape.error().detail);
+        }
+    }
     // A new version of a document: the ledger checks the rest (its kind
     // need not be this one's, and the delegation must cover both).
     if (const auto old = intent.find("supersedes"); old != intent.end() && !old->is_null()) {
@@ -215,6 +232,7 @@ Console::register_draft(const nlohmann::json& intent, const std::string& user) c
     }
     Draft draft;
     draft.vault.fields = commitment->fields;
+    draft.vault.openings = std::move(proven.openings);
     draft.keep_files = kind->keep_files;
 
     std::vector<std::string> ids;

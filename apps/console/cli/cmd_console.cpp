@@ -25,6 +25,7 @@
 #include <vector>
 
 #include <kanhe/client/peers.hpp>
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/activity.hpp>
 #include <kanhe/console/backups.hpp>
@@ -2007,8 +2008,10 @@ void print_kind(const console::Kind& kind) {
         std::println("  {}", kind.description);
     }
     for (const console::KindField& f : kind.fields) {
-        std::println("  field {:<24} {:<8} {}{}", f.name, console::name_of(f.type),
-                     f.is_private ? "private" : "public", f.required ? ", required" : "");
+        std::println("  field {:<24} {:<8} {}{}{}", f.name, console::name_of(f.type),
+                     f.is_private ? "private" : "public", f.required ? ", required" : "",
+                     f.provable ? ", provable as " + client::provable_encoding_text(*f.provable)
+                                : std::string());
     }
     std::println(
         "  files: {}{}",

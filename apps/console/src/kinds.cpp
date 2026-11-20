@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -10,6 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/console.hpp>
 #include <kanhe/console/kinds.hpp>
@@ -162,6 +164,26 @@ Kind parse_kind(const nlohmann::json& sheet) {
             field_type(text_of(f, "type", false).empty() ? "text" : text_of(f, "type", false));
         field.is_private = flag_of(f, "private", true);
         field.required = flag_of(f, "required", false);
+        // Provable (spec v0.22): a private number or date, its encoding
+        // written as the command line writes it.
+        if (const std::string encoding = text_of(f, "provable", false); !encoding.empty()) {
+            try {
+                field.provable = client::parse_provable_encoding(encoding);
+            } catch (const client::UsageError& e) {
+                bad("the field " + field.name + ": " + e.message);
+            }
+            using Type = protocol::ProvableEncoding::Type;
+            const bool date = field.provable->type == Type::date;
+            if (field.type != (date ? FieldType::date : FieldType::number)) {
+                bad("the field " + field.name +
+                    (date ? " is provable as a date, but its type is not date"
+                          : " is provable as a number or money, but its type is not number"));
+            }
+            if (!field.is_private) {
+                bad("the field " + field.name +
+                    " is provable, so it is private: its value is not shown in public");
+            }
+        }
         kind.fields.push_back(std::move(field));
     }
     // A record commits to at least one field.
@@ -210,11 +232,15 @@ Kind parse_kind(const nlohmann::json& sheet) {
 nlohmann::json kind_json(const Kind& kind) {
     nlohmann::json fields = nlohmann::json::array();
     for (const KindField& f : kind.fields) {
-        fields.push_back({{"name", f.name},
-                          {"label", f.label},
-                          {"type", name_of(f.type)},
-                          {"private", f.is_private},
-                          {"required", f.required}});
+        nlohmann::json field = {{"name", f.name},
+                                {"label", f.label},
+                                {"type", name_of(f.type)},
+                                {"private", f.is_private},
+                                {"required", f.required}};
+        if (f.provable) {
+            field["provable"] = client::provable_encoding_text(*f.provable);
+        }
+        fields.push_back(std::move(field));
     }
     nlohmann::json sheet = {{"sheet", 1},
                             {"kind", "document"},
@@ -276,6 +302,53 @@ std::optional<std::string> check_value(const KindField& field, std::string_view 
         return std::nullopt;
     }
     return std::nullopt;
+}
+
+std::variant<ProvableDraft, std::string>
+provable_draft(const Kind& kind, std::span<const protocol::RecordField> fields,
+               const crypto::Provider& provider, ledger::Entropy& entropy) {
+    ProvableDraft draft;
+    for (const KindField& f : kind.fields) {
+        const auto given = std::ranges::find(fields, f.name, &protocol::RecordField::name);
+        if (!f.provable || given == fields.end() || given->value.as_text() == nullptr) {
+            continue;
+        }
+        std::int64_t x = 0;
+        try {
+            x = client::provable_value_x(*f.provable, *given->value.as_text());
+        } catch (const client::UsageError& e) {
+            return "the field " + (f.label.empty() ? f.name : f.label) +
+                   " cannot be proven later as it is written: " + e.message;
+        }
+        // A salt of its own, never the field's (spec section 6).
+        const auto salt = entropy.bytes<protocol::range_salt_size>();
+        Bytes s(salt.begin(), salt.end());
+        auto commitment = protocol::range_commitment(provider, s, x);
+        if (!commitment) {
+            return std::string(commitment.error().detail);
+        }
+        draft.values.push_back({f.name, *f.provable, std::move(*commitment)});
+        draft.openings.push_back({f.name, std::move(s), x});
+    }
+    std::ranges::sort(draft.values, {}, &protocol::ProvableValue::name);
+    std::ranges::sort(draft.openings, {}, &protocol::RangeOpening::name);
+    return draft;
+}
+
+nlohmann::json provable_view(std::span<const protocol::ProvableValue> values) {
+    using Type = protocol::ProvableEncoding::Type;
+    nlohmann::json out = nlohmann::json::array();
+    for (const protocol::ProvableValue& v : values) {
+        const protocol::ProvableEncoding& e = v.encoding;
+        out.push_back(
+            {{"field", v.name},
+             {"encoding",
+              {{"type", protocol::name(e.type)},
+               {"scale", e.type == Type::date ? nlohmann::json() : nlohmann::json(e.scale)},
+               {"currency",
+                e.type == Type::money ? nlohmann::json(e.currency) : nlohmann::json()}}}});
+    }
+    return out;
 }
 
 std::vector<Kind> load_kinds(const std::filesystem::path& directory) {
