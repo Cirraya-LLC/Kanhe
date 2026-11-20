@@ -15,7 +15,7 @@ by the reference interpreter (wasm_ref.py) only to check that each call
 gives the output it was forged with.
 
 Usage:
-    python3 tools/testvectors/evidence_suite.py [--openssl /path/to/openssl]
+    python3 tools/testvectors/evidence_suite.py [--openssl /path/to/openssl] [--range-helper PROGRAM]
 
 generate.py calls it last, so that one run regenerates every vector. ECDSA,
 SM2, and ML-DSA signatures and the tokens' times differ from run to run;
@@ -394,10 +394,11 @@ class Forge:
 
     def record(self, by: bytes, kind: str = "example.org.report/1", *, delegation=None, fields=None, attachments=(),
                metadata=None, supersedes=None, presence=None, provenance=None, issued_at=None,
-               encode=None, approvals=(), salt_size=16, attachment_salt_size=None) -> bytes:
+               encode=None, approvals=(), salt_size=16, attachment_salt_size=None, extra=None) -> bytes:
         """A registration; its fields' and attachments' salts are 16 bytes,
         or `salt_size` and `attachment_salt_size` (v0.21: 16 or 32, or
-        another size for a forgery)."""
+        another size for a forgery). `extra` adds keys to its body, such as
+        sources (key 7, v0.18) or provable values (key 8, v0.22)."""
         fields = {"note": "evidence suite"} if fields is None else fields
         ordered = sorted(fields.items(), key=lambda f: f[0].encode())
         tag = f"{self.name} {self.nonce}"
@@ -416,6 +417,7 @@ class Forge:
             body[5] = metadata
         if supersedes is not None:
             body[6] = supersedes
+        body.update(extra or {})
         rid = self.add(16, self.key_of(by), by, body, delegation, creates=3,
                        touches=[supersedes] if supersedes is not None else (), presence=presence,
                        provenance=provenance, issued_at=issued_at, encode=encode, approvals=approvals)
@@ -803,7 +805,8 @@ class Suite:
     def add(self, name: str, description: str, kind: str, evidence: bytes, verified: bool, *, rule: str | None = None,
             facts: dict | None = None, ledger_id: bytes | None = None, witnesses=(), min_witnesses: int = 0,
             tsa_roots=(), min_timestamps: int = 0, attachments: dict | None = None, require_presence=False,
-            require_answered=False, witness_vkeys=(), distrust=()):
+            require_answered=False, witness_vkeys=(), distrust=(), range_context: bytes | None = None,
+            range_systems=()):
         assert re.fullmatch(r"[a-z0-9]+(-[a-z0-9]+)*", name) and name not in {c["name"] for c in self.cases}, name
         assert verified == (rule is None), name
         assert verified or not facts, name
@@ -828,8 +831,14 @@ class Suite:
             options["witness_vkeys"] = list(witness_vkeys)
         if distrust:
             options["distrust"] = list(distrust)
+        if range_context is not None:
+            options["range_context"] = range_context.hex()  # v0.22
         case = {"name": name, "description": description, "kind": kind, "evidence": evidence.hex(),
                 "options": options, "verified": verified}
+        if range_systems:
+            # v0.22: the range proof systems whose arithmetic the verdict or
+            # the facts depend on; a verifier without one skips the case.
+            case["range_systems"] = list(range_systems)
         if rule is not None:
             case["rule"] = rule
         case["facts"] = facts or {}
@@ -1984,7 +1993,12 @@ DESCRIPTION = (
     "`min_timestamps`, `attachments` (contents by name, hex), `require_presence` and `require_answered` "
     "(contract evidence only), and, from v0.21, `witness_vkeys` (trusted open-network witnesses' verifier keys, "
     "c2sp.org/signed-note) and `distrust` (algorithms distrusted from a date, `ALG@YYYY-MM-DD`, spec section "
-    "11.1); an option left out is not used. A verifier must reach `verified`. When verified, "
+    "11.1), and, from v0.22, `range_context` (the context a verifier requires of every range proof, hex, spec "
+    "section 11.3); an option left out is not used. A case with `range_systems` (v0.22) needs those range proof "
+    "systems' arithmetic to reach its verdict and facts: a verifier that does not implement one of them reports "
+    "such a proof as not checked, and skips the case. Range proofs are made by the program that proves with the "
+    "Longfellow ZK library (the reference implementation's `kanhe-range`), from fixed seeds, for tests only. "
+    "A verifier must reach `verified`. When verified, "
     "its JSON report (the fields of `kanhe verify --json` or `kanhe contract verify --json`) must match "
     "`facts`, which hold only what was forged: a fact object matches a report object when every key of the fact "
     "is in the report and its value matches; a fact list matches a report list of the same length, element by "
@@ -1994,7 +2008,14 @@ DESCRIPTION = (
     "from one run of the generator to the next; verdicts and facts do not.")
 
 
-def generate(openssl: str = "openssl") -> None:
+def generate(openssl: str = "openssl", range_helper: str | None = None) -> None:
+    """Writes the suite. Its range proof cases (v0.22) need `range_helper`,
+    the program that proves with the library: without it, those of the
+    current file are kept as they are."""
+    import range_vectors  # v0.22: provable values and range proofs
+    kept = []
+    if range_helper is None and OUT.exists():
+        kept = [c for c in json.loads(OUT.read_text())["cases"] if c["name"] in range_vectors.SUITE_CASES]
     with tempfile.TemporaryDirectory() as tmp:
         Env.openssl, Env.work = openssl, pathlib.Path(tmp)
         one, two = Authority("One"), Authority("Two")
@@ -2005,6 +2026,11 @@ def generate(openssl: str = "openssl") -> None:
         approval_cases(suite)
         import renewal_vectors  # v0.21: renewals, the long-term status, distrust, and salts
         renewal_vectors.suite_cases(suite)
+        if range_helper is not None:
+            range_vectors.suite_cases(suite, range_helper)
+        else:
+            suite.cases += kept
+            print(f"no --range-helper: kept the {len(kept)} range proof cases of testvectors/{OUT.name}")
     document = {"format": 1, "description": DESCRIPTION, "cases": suite.cases}
     OUT.write_text(json.dumps(document, indent=1, ensure_ascii=False) + "\n")
     counts = {}
@@ -2018,7 +2044,11 @@ def generate(openssl: str = "openssl") -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--openssl", default="openssl", help="OpenSSL 3.5+ command-line tool")
-    generate(parser.parse_args().openssl)
+    parser.add_argument("--range-helper", metavar="PROGRAM",
+                        help="the program that makes range proofs with the library (kanhe-range), for the v0.22 "
+                             "cases; without it, the current file's range proof cases are kept")
+    args = parser.parse_args()
+    generate(args.openssl, args.range_helper)
 
 
 if __name__ == "__main__":

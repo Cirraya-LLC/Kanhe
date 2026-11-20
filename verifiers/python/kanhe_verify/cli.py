@@ -16,7 +16,7 @@ import argparse
 import json
 import sys
 
-from . import cbor, contract_report, credentials, crypto, longterm, network, report, timestamps
+from . import cbor, contract_report, credentials, crypto, longterm, network, ranges, report, timestamps
 from .contract_evidence import verify_contract_evidence
 from .errors import UsageError, VerifyError
 from .evidence import verify_bundle
@@ -69,6 +69,13 @@ def _bundle_parser() -> argparse.ArgumentParser:
     _common(p, "issuer")
     p.add_argument("--attachment", metavar="NAME=FILE", action="append", default=[],
                    help="check an attachment's content [repeatable]")
+    p.add_argument("--range-helper", metavar="PROGRAM",
+                   help="the program that does range proofs' arithmetic for system 1 (spec v0.22, section 11.3), "
+                        "such as kanhe-range: PROGRAM verify reads JSON on its standard input; without it, range "
+                        "proofs are reported as not checked and relied on for nothing")
+    p.add_argument("--range-context", metavar="HEX",
+                   help="require every range proof to carry this context, a challenge you gave the prover (1 to "
+                        "64 bytes in hex): a proof without it, or with another, fails (spec v0.22, section 11.3)")
     p.add_argument("--json", action="store_true", help="print machine-readable JSON")
     return p
 
@@ -223,13 +230,34 @@ def _finish(args, document: dict, text: str, failure: str | None) -> int:
     return EXIT_NOT_VERIFIED if failure is not None else EXIT_VERIFIED
 
 
-def _required(result, args) -> str | None:
-    """--min-witnesses and --min-timestamps, on a bundle's report."""
+def _required(result, args, range_context: bytes | None = None) -> str | None:
+    """--min-witnesses and --min-timestamps, on a bundle's report; and, with
+    --range-context (v0.22), every range proof's context."""
     if result.witnesses_trusted < args.min_witnesses:
         return f"{result.witnesses_trusted} trusted witness cosignatures, {args.min_witnesses} required"
     if result.trusted_authorities < args.min_timestamps:
         return f"{result.trusted_authorities} trusted time-stamp authorities, {args.min_timestamps} required"
+    if range_context is not None:
+        for r in result.range_proofs:
+            if r.context is None:
+                return (f"the range proof of {r.field!r} carries no context, and the context {range_context.hex()} "
+                        "is required")
+            if r.context != range_context:
+                return (f"the range proof of {r.field!r} carries the context {r.context.hex()}, not the required "
+                        f"{range_context.hex()}")
     return None
+
+
+def _range_context(text: str | None) -> bytes | None:
+    if text is None:
+        return None
+    try:
+        value = bytes.fromhex(text)
+    except ValueError:
+        value = b""
+    if not 1 <= len(value) <= ranges.MAX_CONTEXT or len(text) != 2 * len(value):
+        raise UsageError("--range-context takes 1 to 64 bytes in hex")
+    return value
 
 
 def _bundle_main(argv: list[str]) -> int:
@@ -246,9 +274,11 @@ def _bundle_main(argv: list[str]) -> int:
         vkeys = _witness_vkeys(args.witness_vkey)
         nodes = _trust_nodes(args.trust_node)
         distrust = longterm.parse_distrust(args.distrust)
+        range_context = _range_context(args.range_context)
     except UsageError as e:
         print(f"usage error: {e}", file=sys.stderr)
         return EXIT_USAGE
+    helper = ranges.Helper(args.range_helper) if args.range_helper else None
     try:
         data = _read(args.bundle)
         witnesses = [_witness_key(path) for path in args.witness]
@@ -259,10 +289,15 @@ def _bundle_main(argv: list[str]) -> int:
         return EXIT_INPUT
     try:
         result = verify_bundle(data, ledger_id=ledger_id, witnesses=witnesses, tsa_roots_pem=roots,
-                               attachments=files, network_witnesses=vkeys, trust_nodes=nodes, distrust=distrust)
+                               attachments=files, network_witnesses=vkeys, trust_nodes=nodes, distrust=distrust,
+                               range_helper=helper)
     except VerifyError as e:
         return _not_verified(args, e)
-    failure = _required(result, args)
+    except ranges.HelperError as e:
+        # The helper failed, which says nothing of the evidence.
+        print(f"error: {e}", file=sys.stderr)
+        return EXIT_INPUT
+    failure = _required(result, args, range_context)
     if any(status == "mismatch" for _, _, _, status in result.attachments):
         failure = "an attachment does not match its commitment"
     return _finish(args, report.to_json(result), report.to_text(result), failure)

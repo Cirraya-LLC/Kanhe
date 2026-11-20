@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from . import cbor, cose, crypto, network
+from . import cbor, cose, crypto, network, ranges
 from .errors import ApprovalError, VerifyError
 
 # Statement types (section 4). 20 is reserved and unknown, like every type
@@ -448,7 +448,7 @@ def _parse_body(kind: int, body) -> dict:
     if kind == LEDGER_SET_GUARDIANS:
         return {"guardians": parse_guardians_body(body)}
     if kind == RECORD_REGISTER:
-        m = _map(body, "a record registration", {1, 2, 3}, {4, 5, 6, 7})
+        m = _map(body, "a record registration", {1, 2, 3}, {4, 5, 6, 7, 8})
         attachments = []
         if 4 in m:
             _check(isinstance(m[4], list) and m[4], "a record's attachments are not a non-empty list")
@@ -458,13 +458,16 @@ def _parse_body(kind: int, body) -> dict:
             _check(isinstance(m[5], dict) and m[5] and all(isinstance(k, str) for k in m[5]),
                    "a record's metadata is not a non-empty map with text keys")
             metadata = m[5]
+        field_count = _uint(m[3], "a field count")
         return {"record_type": _tstr(m[1], "a record type"),
                 # The root of an RFC 9162 tree under the ledger's hash: 32 bytes.
                 "field_root": _bstr(m[2], "a field root", 32, 32),
-                "field_count": _uint(m[3], "a field count"),
+                "field_count": field_count,
                 "attachments": attachments, "metadata": metadata,
                 "supersedes": _id(m[6], "the superseded record") if 6 in m else None,
-                "sources": _parse_sources(m[7]) if 7 in m else []}
+                "sources": _parse_sources(m[7]) if 7 in m else [],
+                # v0.22: provable values, their shape (section 6).
+                "provable": ranges.parse_provable(m[8], field_count) if 8 in m else []}
     if kind == RECORD_ENDORSE:
         m = _map(body, "an endorsement", {1, 2})
         return {"record": _id(m[1], "the record"), "role": _tstr(m[2], "a role")}
@@ -685,6 +688,7 @@ class Bundle:
     memberships: list = field(default_factory=list)  # v0.16: membership proofs, each an encoded bundle
     sources: list = field(default_factory=list)  # v0.18: source proofs, each an encoded bundle
     renewals: list = field(default_factory=list)  # v0.21: [Renewal], in order
+    ranges: list = field(default_factory=list)  # v0.22: [ranges.RangeProof], in order
 
 
 @dataclass
@@ -727,7 +731,7 @@ def parse_bundle(data: bytes) -> Bundle:
     value = cbor.decode(data)
     _check(not is_contract_evidence(value), "this is an instance's contract evidence, not an evidence bundle: "
            "verify it as contract evidence")
-    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9, 10, 11})
+    m = _map(value, "an evidence bundle", {0, 1, 2, 3}, {4, 5, 6, 7, 8, 9, 10, 11, 12})
     _check(m[0] == 1 and _is_int(m[0]), "the bundle is not of format version 1")
     entries = []
     for item in _nonempty_list(m[2], "the bundle's entries"):
@@ -781,10 +785,14 @@ def parse_bundle(data: bytes) -> Bundle:
         items = _nonempty_list(m[11], "the list of renewals (key 11)")
         _check(len(items) <= MAX_RENEWALS, "the bundle carries more than 64 renewals")
         renewals = [parse_renewal(r) for r in items]
+    # v0.22: 1 to 16 range proofs, their shape; checked in ranges.py (section
+    # 11, step 13).
+    range_proofs = ranges.parse_proofs(m[12]) if 12 in m else []
     return Bundle(subject=_id(m[1], "the bundle's subject"), entries=entries,
                   checkpoint=_bstr(m[3], "the checkpoint"), cosignatures=cosignatures,
                   disclosures=disclosures, openings=openings, proofs=proofs, anchors=anchors,
-                  memberships=list(memberships), sources=list(source_proofs), renewals=renewals)
+                  memberships=list(memberships), sources=list(source_proofs), renewals=renewals,
+                  ranges=range_proofs)
 
 
 def _network_cosignatures(value, what: str) -> list:

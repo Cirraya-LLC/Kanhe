@@ -50,7 +50,14 @@ It verifies an evidence bundle (spec section 11), a record's or an instance's, e
   claims with only iat, protected header label 15); algorithms distrusted from a date
   (`--distrust`), whose attestations are set aside and whose every signature must be covered by
   a dated attestation (a token, a network cosignature, or a dated witness cosignature) before
-  that date; and field and attachment salts of 16 or 32 bytes (`kanhe_verify/longterm.py`).
+  that date; and field and attachment salts of 16 or 32 bytes (`kanhe_verify/longterm.py`);
+- range proofs (spec v0.22): a registration's provable values (key 8), each a field's name, its
+  encoding (a number with a scale, money in a currency with a scale, or a date), and a SHA-256
+  commitment of its own; and the range proofs a record's bundle carries (key 12), each that one
+  provable value is at least, at most, or between bounds: their shapes, the bounds read in the
+  provable's encoding, the public values and the transcript, a context the verifier may require,
+  and the statement in words (`kanhe_verify/ranges.py`). The proof's arithmetic, system 1's
+  (Longfellow ZK), is the one thing done elsewhere: a helper program does it (below).
 
 And it verifies an instance's contract evidence (sections 14 and 15):
 
@@ -94,11 +101,11 @@ JSON fields:
 
 | This verifier | Mirrors | Options besides `--json` |
 |---|---|---|
-| `python3 -m kanhe_verify BUNDLE` | `kanhe verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--distrust ALG@YYYY-MM-DD`, `--attachment NAME=FILE` |
+| `python3 -m kanhe_verify BUNDLE` | `kanhe verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--distrust ALG@YYYY-MM-DD`, `--attachment NAME=FILE`, `--range-context HEX`, `--range-helper PROGRAM` |
 | `python3 -m kanhe_verify contract FILE` | `kanhe contract verify` | `--ledger-id`, `--witness`, `--witness-vkey`, `--min-witnesses`, `--tsa-root`, `--min-timestamps`, `--trust-node LEDGER=NAME`, `--distrust ALG@YYYY-MM-DD`, `--require-presence`, `--require-answered`, `--deploy-out FILE` |
 
 Exit codes: 0 verified, 1 a usage error, 2 an input file that cannot be read (or a
-`--deploy-out` file that cannot be written), 3 not verified.
+`--deploy-out` file that cannot be written, or a range helper that fails), 3 not verified.
 
 The first command verifies any evidence bundle, an instance's included (it reports it as a
 record without a type, its calls as its events); contract evidence, which wraps an instance's
@@ -145,6 +152,26 @@ Long-term evidence (spec v0.21) appears in the JSON report as `renewals`, `long_
 shares. `--distrust ALG@YYYY-MM-DD` (repeatable) names `ed25519`, `ecdsa`, `sm2`, `rsa`,
 `ml-dsa-44`, `ml-dsa-65`, `ml-dsa-87`, or `classical`; an unknown name, a date that is none, and an
 algorithm named twice are usage errors.
+
+Range proofs (spec v0.22) appear in the JSON report as `provable` and `range_proofs`, with the
+fields section 11.3 of the specification defines, which `kanhe verify --json` shares. Nothing
+cryptographic is implemented here, and a range proof's arithmetic is no exception: with
+`--range-helper PROGRAM`, each proof of system 1 is handed to PROGRAM, and without it each one is
+reported as `not-checked` and relied on for nothing, while every other check of step 13 is made.
+PROGRAM is the reference implementation's `kanhe-range`, built with the Longfellow ZK library; its
+protocol is fixed, so that another may stand in for it:
+
+- `PROGRAM verify` reads one JSON object on its standard input, `{"commitment": hex, "low": lo'
+  in decimal, "high": hi' in decimal, "transcript": hex, "proof": hex}`, writes `{"valid": true}`
+  or `{"valid": false}`, and exits 0 when the proof is valid, 1 when it is not, and 2 when its
+  input is wrong;
+- `PROGRAM prove` reads `{"salt": hex, "value": v in decimal, "low", "high", "transcript"}` and,
+  for test vectors only, `"seed": hex`, and writes `{"commitment": hex, "proof": hex}`.
+
+A helper that cannot be run, exits otherwise, or answers outside this protocol is an error (exit
+2), never a verdict on the evidence. `--range-context HEX` (1 to 64 bytes) requires every range
+proof to carry that context, a challenge the verifier gave the prover: a proof without it, or with
+another, fails, and the report is printed with the reason, as for `--min-witnesses`.
 
 `--witness-vkey` takes an open network's witness by its verifier key,
 `<name>+<key ID>+<base64(type || key)>` (c2sp.org/signed-note), of signature type 0x04 (Ed25519)
@@ -203,7 +230,9 @@ every verifier must pass: evidence bundles and contract evidence forged from the
 [`tools/testvectors/evidence_suite.py`](../../tools/testvectors/evidence_suite.py), independently of
 both verifiers, each with the options to verify it with, the verdict the specification decides (a
 failure names the section and step that decide it), and facts its JSON report must show.
-`tests/test_conformance.py` runs this verifier's command line on every case.
+`tests/test_conformance.py` runs this verifier's command line on every case; a case that needs a
+range proof system's arithmetic (`range_systems`) runs with `KANHE_RANGE_HELPER` (a `kanhe-range`)
+as `--range-helper`, and is skipped without it.
 
 The verifier's own unit tests run against `testvectors/`: `tests/test_vectors.py` for records
 and claims (`protocol-v0.14.json`: claim metadata with its words, and refused, and a log with
@@ -220,7 +249,11 @@ for its rule; a log for each hash, every statement's rules and approvals as the 
 them, every refused statement for its rule, and the logs that do not parse),
 `tests/test_renewals.py` for long-term evidence (`protocol-v0.21.json`: salts, renewals, and the
 distrust option read and refused; the archive ledger's renewal parts; and every bundle verified
-with its options, to its verdict and facts),
+with its options, to its verdict and facts), `tests/test_ranges.py` for range proofs (the
+encodings, bounds, commitments, public values, transcript bytes, words, and shapes, by hand; the
+plumbing to a helper, with a fake one the test writes, which accepts a proof exactly when it is a
+fixed hash of what it is given; and `protocol-v0.22.json`, its bundles that need system 1 with
+`KANHE_RANGE_HELPER` only),
 `tests/test_network.py` for open witness networks (`protocol-v0.13.json`: the origin, the note,
 the note key's signed note, verifier keys, every cosignature's verdict and time, the anchor, in
 bundles too, and signed-note's own example), and `tests/test_contracts.py` for the profile (`vm-v1.json`), contracts, parts, requests and

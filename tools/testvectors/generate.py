@@ -7,7 +7,12 @@ Requirements: Python 3.11+, the packages in requirements.txt, and an OpenSSL 3.5
 command-line tool (used for SM2, which the Python cryptography package lacks).
 
 Usage:
-    python3 tools/testvectors/generate.py [--openssl /path/to/openssl]
+    python3 tools/testvectors/generate.py [--openssl /path/to/openssl] [--range-helper PROGRAM]
+
+The range proofs of protocol-v0.22.json (and of its conformance cases) are made
+by PROGRAM, which proves with the Longfellow ZK library (the reference
+implementation's kanhe-range), from fixed seeds. Without --range-helper, they
+are left as they are.
 
 Writes JSON files into testvectors/. Deterministic algorithms reproduce the same
 vectors on every run. Randomized ones (ECDSA, SM2, ML-DSA) produce different but
@@ -6001,6 +6006,9 @@ def generate_vm_v1() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--openssl", default="openssl", help="OpenSSL 3.5+ command-line tool")
+    parser.add_argument("--range-helper", metavar="PROGRAM",
+                        help="the program that makes range proofs with the library (kanhe-range), for the v0.22 "
+                             "vectors only; without it, protocol-v0.22.json and its conformance cases stay as they are")
     args = parser.parse_args()
     generate_hashes()
     generate_signatures(args.openssl)
@@ -6028,9 +6036,14 @@ def main() -> None:
     approval_vectors.generate()
     import renewal_vectors
     renewal_vectors.generate(args.openssl)
+    import range_vectors
+    if args.range_helper is not None:
+        range_vectors.generate(args.openssl, args.range_helper)
+    else:
+        print("no --range-helper: left testvectors/protocol-v0.22.json as it is")
     generate_vm_v1()
     import evidence_suite
-    evidence_suite.generate(args.openssl)
+    evidence_suite.generate(args.openssl, args.range_helper)
 
 
 if __name__ == "__main__":

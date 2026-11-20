@@ -22,7 +22,9 @@ verify_bundle follows the verifier's steps of section 11 in order:
 10. source proofs (v0.18);
 11. renewals (v0.21): newer attestations of the tree (longterm.py);
 12. signatures by algorithms the verifier distrusts (v0.21), each covered by
-    a dated attestation before its date; and the long-term status.
+    a dated attestation before its date; and the long-term status;
+13. range proofs (v0.22): each against the provable values of the record's
+    own registration, its arithmetic by a helper program (ranges.py).
 """
 
 from __future__ import annotations
@@ -31,8 +33,8 @@ from dataclasses import dataclass, field
 
 import dataclasses
 
-from . import (contracts, cose, crypto, longterm, memberships, merkle, network, protocol, rules, scripts, statetree,
-               timestamps)
+from . import (contracts, cose, crypto, longterm, memberships, merkle, network, protocol, ranges, rules, scripts,
+               statetree, timestamps)
 from .errors import VerifyError
 from .protocol import AGENT
 
@@ -133,6 +135,8 @@ class Report:
     distrust: dict = field(default_factory=dict)  # v0.21: {algorithm: its date in ms}
     set_aside: list = field(default_factory=list)  # v0.21: [longterm.Attestation], in the bundle's order
     distrusted: list = field(default_factory=list)  # v0.21: [longterm.Distrusted], in section 11.1's order
+    provable: list = field(default_factory=list)  # v0.22: [ranges.Provable], the record's, in key 8's order
+    range_proofs: list = field(default_factory=list)  # v0.22: [ranges.RangeReport], in the bundle's order
 
 
 def fail(message: str):
@@ -141,7 +145,8 @@ def fail(message: str):
 
 def verify_bundle(data: bytes, *, ledger_id: bytes | None = None, witnesses: list | None = None,
                   tsa_roots_pem: bytes = b"", attachments: dict | None = None,
-                  network_witnesses: list | None = None, trust_nodes=None, distrust: dict | None = None) -> Report:
+                  network_witnesses: list | None = None, trust_nodes=None, distrust: dict | None = None,
+                  range_helper: ranges.Helper | None = None) -> Report:
     """Verifies an evidence bundle. Raises VerifyError if it does not
     verify; returns the report otherwise.
 
@@ -154,25 +159,31 @@ def verify_bundle(data: bytes, *, ledger_id: bytes | None = None, witnesses: lis
     or [(ledger id, name)]: the name is the verifier's, and the only one a
     report gives a trust node;
     distrust: the algorithms it distrusts (v0.21), {name: date in ms}, as
-    longterm.parse_distrust gives them.
+    longterm.parse_distrust gives them;
+    range_helper: the program that does system 1's arithmetic (v0.22,
+    ranges.Helper); without one, range proofs are not checked.
     """
     names = dict(trust_nodes or {})
     return _verify(data, ledger_id=ledger_id, witnesses=witnesses or [], tsa_roots_pem=tsa_roots_pem,
                    attachments=attachments or {}, network_witnesses=network_witnesses or [], trust_nodes=names,
-                   as_proof=False, distrust=dict(distrust or {}))
+                   as_proof=False, distrust=dict(distrust or {}), range_helper=range_helper)
 
 
 def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, attachments: dict,
             network_witnesses: list, trust_nodes: dict, as_proof: bool, as_source: bool = False,
-            distrust: dict | None = None) -> Report:
-    """Steps 1 to 10; for a membership proof (as_proof), steps 1 to 8 only,
-    and a proof that carries membership proofs of its own is refused before
-    anything else; for a source proof (as_source, v0.18), steps 1 to 9, and
-    one that carries source proofs of its own is refused before anything
-    else."""
+            distrust: dict | None = None, range_helper: ranges.Helper | None = None) -> Report:
+    """Steps 1 to 13; for a membership proof (as_proof), steps 1 to 8 (and
+    11 and 12) only, and a proof that carries membership proofs or range
+    proofs is refused before anything else; for a source proof (as_source,
+    v0.18), steps 1 to 9 (and 11 and 12), and one that carries source proofs
+    or range proofs is refused before anything else."""
     bundle = protocol.parse_bundle(data)
     if as_source and bundle.sources:
         fail("a source proof carries source proofs of its own (key 10)")
+    if as_source and bundle.ranges:
+        fail("a source proof carries range proofs (key 12)")
+    if as_proof and bundle.ranges:
+        fail("a membership proof carries range proofs (key 12)")
     if as_proof and bundle.sources:
         fail("a membership proof carries source proofs")
     if as_proof and bundle.memberships:
@@ -287,6 +298,11 @@ def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, at
     distrusted = longterm.covered(ledger, entries, checkpoint, anchor_heads, renewals, tally.items, distrust)
     status = longterm.long_term(ledger, checkpoint, log_key, renewals, tally.items, distrust)
 
+    # Step 13: range proofs (v0.22), against the record's own provable values.
+    if instance is not None and bundle.ranges:
+        fail("an instance's bundle carries no range proofs (key 12)")
+    range_reports = ranges.check(ledger.id, record, bundle.ranges, range_helper) if record is not None else []
+
     events = [ledger.applied[i] for i in event_indices(ledger, subject)]
     return Report(
         ledger=ledger, id_checked=ledger_id is not None, checkpoint=checkpoint, log_key=log_key,
@@ -297,7 +313,8 @@ def _verify(data: bytes, *, ledger_id, witnesses: list, tsa_roots_pem: bytes, at
         entries=len(entries), network=[n for _, n in cosigned], memberships=proofs,
         scripts=script_reports, sources=source_reports, renewals=renewals, long_term=status,
         distrust=distrust, set_aside=longterm.in_bundle_order([a for a in tally.items if a.set_aside]),
-        distrusted=distrusted)
+        distrusted=distrusted, provable=list(record.provable) if record is not None else [],
+        range_proofs=range_reports)
 
 
 def related_records(ledger: rules.Ledger, subject, events: list) -> list:

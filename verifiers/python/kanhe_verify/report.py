@@ -11,7 +11,7 @@ verifiers' reports can be compared field by field.
 
 from __future__ import annotations
 
-from . import approvals, cbor, claims, crypto, longterm, rules
+from . import approvals, cbor, claims, crypto, longterm, ranges, rules
 from .evidence import Report
 from .protocol import (AGENT, CONTRACT_CALL, ORGANIZATION, PERSON, RECORD_ENDORSE, RECORD_REGISTER, RECORD_REVOKE,
                        RECORD_TRANSITION, STATEMENT_TYPE_NAMES)
@@ -119,6 +119,53 @@ def distrust_json(report: Report) -> dict | None:
                             "covered_by": {**_attestation_json(d.covered_by),
                                            "time": iso_time(d.covered_by.dated_by)}}
                            for d in report.distrusted]}
+
+
+def encoding_json(e: ranges.Encoding) -> dict:
+    return {"type": e.type, "scale": e.scale, "currency": e.currency}
+
+
+def provable_json(report: Report) -> list:
+    """The record's provable values (v0.22, section 11.3), in key 8's order:
+    each one's name and encoding."""
+    return [{"field": p.name, "encoding": encoding_json(p.encoding)} for p in report.provable]
+
+
+def range_proofs_json(report: Report) -> list:
+    """Each range proof (v0.22, section 11.3), in the bundle's order: its
+    field, bounds as a claim's JSON gives values (null when absent), the
+    statement in words, its context in hex, its system, and whether it was
+    verified or not checked."""
+    return [{"field": r.field, "low": json_value(r.low) if r.low is not None else None,
+             "high": json_value(r.high) if r.high is not None else None, "text": r.text,
+             "context": r.context.hex() if r.context is not None else None, "system": r.system,
+             "status": r.status} for r in report.range_proofs]
+
+
+def _encoding_words(e: ranges.Encoding) -> str:
+    if e.type == ranges.MONEY:
+        return f"money, {e.currency}, scale {e.scale}"
+    if e.type == ranges.NUMBER:
+        return f"number, scale {e.scale}"
+    return "date"
+
+
+def ranges_text(report: Report) -> list:
+    """Provable values and range proofs, for people (v0.22)."""
+    lines = []
+    if report.provable:
+        named = ", ".join(f"{p.name} ({_encoding_words(p.encoding)})" for p in report.provable)
+        lines.append(f"  Provable     {named}")
+        lines.append("               (the issuer's word that each commitment is its field's value)")
+    for r in report.range_proofs:
+        context = f", context {r.context.hex()}" if r.context is not None else ", no context"
+        if r.status == ranges.VERIFIED:
+            outcome = f"verified (system {r.system}{context})"
+        else:
+            outcome = (f"NOT CHECKED (system {r.system}{context}): no program for its arithmetic was given "
+                       "(--range-helper), so it is relied on for nothing")
+        lines.append(f"  Range proof  {r.text}: {outcome}")
+    return lines
 
 
 def long_term_text(report: Report) -> list:
@@ -578,6 +625,8 @@ def to_json(report: Report) -> dict:
         "renewals": renewals_json(report),
         "long_term": long_term_json(report),
         "distrust": distrust_json(report),
+        "provable": provable_json(report),
+        "range_proofs": range_proofs_json(report),
         "complete": report.complete,
         "state_commitment": None if report.commitment is None else {
             "index": report.commitment_index, "state_root": report.commitment.root.hex(),
@@ -651,6 +700,7 @@ def to_text(report: Report) -> str:
     for m in report.memberships:
         lines += membership_text(m, "record" if record is not None else "instance")
     lines += provenance_text(report)
+    lines += ranges_text(report)
     lines += ["", "  History"]
     for applied in report.events:
         summary, _, _ = _event_text(ledger, record, applied)
@@ -692,5 +742,6 @@ def to_text(report: Report) -> str:
 __all__ = ["actor_json", "approval_json", "approvals_of", "approvals_text", "authority_json", "by_whom", "claim_json",
            "guardians_json", "guardians_text", "human_time", "iso_time", "membership_json", "rule_json",
            "membership_text", "presence_json", "provenance_json", "source_status", "to_json", "to_text",
-           "distrust_json", "long_term_json", "long_term_text", "renewals_json",
+           "distrust_json", "long_term_json", "long_term_text", "renewals_json", "provable_json",
+           "range_proofs_json", "ranges_text",
            "witnesses_json", "witnesses_text"]

@@ -1,7 +1,7 @@
 ; SPDX-License-Identifier: Apache-2.0
 ; Copyright 2026 Cirraya
 ;
-; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.21 (draft); the
+; The Kanhe protocol (RFC 8610 CDDL). Specification revision v0.22 (draft); the
 ; wire protocol version (statement key 0) is 1.
 ;
 ; Revision history:
@@ -89,6 +89,10 @@
 ;         dated witness cosignatures (CWT claims with iat, header 15); field
 ;         and attachment salts of 16 or 32 bytes. Earlier objects remain
 ;         valid.
+;   v0.22 range proofs: provable values in a registration (key 8), each an
+;         encoding and a SHA-256 commitment of its own; range openings
+;         files; range proofs in a record's evidence bundle (key 12), of
+;         system 1 (Longfellow ZK). Earlier objects remain valid.
 ;
 ; Every structure is encoded as deterministic CBOR (RFC 8949 section 4.2.1) in
 ; the Kanhe profile: no floats, no indefinite lengths, no duplicate keys.
@@ -417,7 +421,7 @@ delegation-revoke-body = {
 ; kanhe.access-receipt/1, kanhe.contract-consent/1, and, v0.14,
 ; kanhe.claim/1, v0.16, kanhe.membership/1, v0.18, kanhe.script/1) is
 ; refused. The mechanism types have lifecycles of their own and take no
-; endorsements, versions, or sources.
+; endorsements, versions, sources, or (v0.22) provable values.
 record-register-body = {
   1 => tstr,                   ; record type, e.g. "example.org.inspection/1"
   2 => bstr .size 32,          ; field commitment root (see record-field)
@@ -426,6 +430,7 @@ record-register-body = {
   ? 5 => { + tstr => any },    ; public metadata, disclosed in the clear
   ? 6 => id,                   ; the record this one supersedes (v0.10)
   ? 7 => [1*64 source],        ; v0.18: the records it was made from
+  ? 8 => [1*64 provable],      ; v0.22: values whose bounds can be proven
 }
 ; A source (v0.18): a ledger id (this ledger's for a local source) and a
 ; record id; no source twice. A local source is a record of this ledger, of
@@ -444,6 +449,28 @@ source = [ledger: id, record: id]
 ; guessed value.
 record-field = [name: tstr, salt: salt, value: any]
 salt = bstr .size 16 / bstr .size 32
+; A provable value (v0.22; spec sections 6 and 11.3): a field's value read
+; as an integer x by its encoding, and committed to apart from the field's
+; leaf. Names strictly ascend (bytewise), and there are no more entries than
+; the record's field count (key 3). Mechanism types take none. With
+;   v = x + 2^63 (an unsigned 64-bit integer),
+;   commitment = SHA-256("Kanhe range v1" || s || BE64(v)),
+; where s is a fresh 32-byte salt of its own (never the field's), and the
+; hash is SHA-256 on every ledger (SM3 ledgers too). The ledger checks the
+; shape only: that the commitment is the field's value is the issuer's word.
+; A registration that supersedes a record carries its own, if any.
+provable = [
+  name: tstr .size (1..64),    ; the field's name
+  encoding: provable-encoding,
+  commitment: bstr .size 32,
+]
+provable-encoding =
+    ["number", scale: 0..18]   ; x = the number times 10^scale
+  / ["money", currency: tstr .regexp "[A-Z]{3}", scale: 0..4]
+                               ; x = the amount in units of 10^-scale
+  / ["date"]                   ; x = days since 1970-01-01 (proleptic
+                               ; Gregorian), for 0001-01-01 to 9999-12-31
+int64 = -9223372036854775808..9223372036854775807
 attachment = [
   name: tstr,
   media-type: tstr,
@@ -751,7 +778,11 @@ inclusion-proof = [
 ;      attestation by it, and requires every signature by it that it
 ;      relied on to be in a tree that a trusted time-stamp token, network
 ;      witness's cosignature, or dated witness cosignature, dated before that
-;      date, attested.
+;      date, attested;
+;  13. checks each range proof (key 12, v0.22) against the provable values
+;      of the record's own registration: its shape and bounds, its system
+;      (only 1), and the proof; a verifier without system 1 reports such a
+;      proof as not checked and relies on it for nothing.
 
 ; The state commitment: a compact sparse Merkle tree over every actor,
 ; delegation, record, contract, and instance, keyed by object id (its 256 bits, most significant
@@ -803,7 +834,45 @@ evidence-bundle = {
                                ; the record's sources on another ledger
   ? 11 => [1*64 renewal],      ; v0.21: newer attestations of the tree, in
                                ; order (spec section 11.1)
+  ? 12 => [1*16 range-proof],  ; v0.22: proofs that provable values of the
+                               ; record lie within bounds, each field once
+                               ; (spec section 11.3); only in a record's
+                               ; bundle, never in an instance's, a membership
+                               ; proof, or a source proof
 }
+; A range proof (v0.22, spec section 11.3): that the provable value `field`
+; of the record's own registration (key 8) lies within its bounds, a missing
+; bound excluding nothing. It has key 2, key 3, or both. A system other than
+; 1 is refused; a verifier that does not implement system 1 reports the proof
+; as not checked and relies on it for nothing. A verifier may require a
+; context of its own: every proof must then carry exactly it.
+range-proof = {
+  1 => tstr .size (1..64),     ; field: the provable value's name
+  ? 2 => range-bound,          ; low
+  ? 3 => range-bound,          ; high
+  4 => uint,                   ; system: 1, Longfellow ZK with the circuit
+                               ; kanhe-range-64/1 (spec section 11.3)
+  5 => bstr .size (1..262144), ; the proof
+  ? 6 => bstr .size (1..64),   ; context: a relying party's challenge
+}
+; A bound, in the provable's encoding, read as x as the encoding reads its
+; value: a number with at most `scale` digits after the point; money in the
+; provable's currency and scale (no other); a date from 0001-01-01 to
+; 9999-12-31. Its x is an int64, and low's x is at most high's.
+range-bound = claim-number / claim-money / claim-date
+; The Fiat-Shamir transcript of a proof starts from the deterministic
+; encoding of this, so a proof belongs to one ledger, record, field, and
+; statement, and, with a context, to one request.
+range-transcript = [
+  "kanhe.range/1",
+  ledger: id,
+  record: id,
+  field: tstr,
+  commitment: bstr .size 32,
+  low: uint,                   ; x(low) + 2^63, or 0 without a low
+  high: uint,                  ; x(high) + 2^63, or 2^64 - 1 without a high
+  context: bstr,               ; the proof's, or empty without one
+]
 ; A renewal (v0.21, spec section 11.1): a newer attestation of the same
 ; ledger's tree, at a size M no smaller than the previous checkpoint's (the
 ; bundle's for the first renewal, the renewal before it for the others).
@@ -1216,3 +1285,24 @@ approval-file = {
                                ; order of their leaves: shown to approvers
   ? 7 => tstr,                 ; a note for people, 1-1000 bytes
 }
+
+; ---------------------------------------------------------------------------
+; Range openings (v0.22)
+; ---------------------------------------------------------------------------
+
+; A range openings file (.kanheopenings, v0.22; spec section 6), at most
+; 65,536 bytes: the openings of a record's provable values, which the issuer
+; keeps with the record's private data and may hand a holder, so that the
+; holder can prove bounds of them (spec section 11.3). It holds values in
+; clear and is never part of a bundle. A tool checks each opening it uses
+; against the commitment of that name in the record's registration.
+range-openings = {
+  1 => id,                     ; the ledger
+  2 => id,                     ; the record
+  3 => [1*64 range-opening],   ; names strictly ascending (bytewise)
+}
+range-opening = [
+  name: tstr .size (1..64),    ; the provable value's name
+  salt: bstr .size 32,         ; its s
+  x: int64,                    ; its value, read by its encoding
+]

@@ -10,8 +10,9 @@ call's contract runs again, section 14), proof of presence, disclosures and
 attachments, state proofs (completeness), witness cosignatures, RFC 3161
 time-stamp tokens, open witness networks' cosignatures of checkpoint
 notes (section 10.2), membership proofs from trust nodes (v0.16, bundle
-key 9), and renewals, the long-term status, and distrusted algorithms
-(v0.21, bundle key 11, section 11.1). And it verifies an instance's contract evidence (section
+key 9), renewals, the long-term status, and distrusted algorithms (v0.21,
+bundle key 11, section 11.1), and range proofs of provable values (v0.22,
+bundle key 12, section 11.3), whose arithmetic a helper program does. And it verifies an instance's contract evidence (section
 15): its bundle, every consent its calls cite, and the requests and answers
 the calls derive.
 

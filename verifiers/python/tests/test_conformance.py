@@ -10,6 +10,12 @@ report and its value matches; a fact list matches a report list of the same
 length, element by element; any other value matches only an equal value
 (true, false, null, numbers, and strings exactly).
 
+A case with `range_systems` (v0.22) needs those range proof systems'
+arithmetic, which this verifier hands to a helper program: the cases run
+with KANHE_RANGE_HELPER (the reference implementation's kanhe-range) as
+--range-helper, and are skipped without it, since a proof is then reported
+as not checked.
+
 Run from verifiers/python: python3 -m unittest discover -s tests -v
 """
 
@@ -18,6 +24,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -30,7 +37,17 @@ from kanhe_verify import cli  # noqa: E402
 
 SUITE = HERE.parents[2] / "testvectors" / "evidence-v1.json"
 OPTIONS = {"ledger_id", "witnesses", "min_witnesses", "tsa_roots", "min_timestamps", "attachments",
-           "require_presence", "require_answered", "witness_vkeys", "distrust"}
+           "require_presence", "require_answered", "witness_vkeys", "distrust", "range_context"}
+# The range proof systems whose arithmetic this verifier can do: system 1
+# through the helper program KANHE_RANGE_HELPER names (v0.22).
+RANGE_HELPER = os.environ.get("KANHE_RANGE_HELPER") or None
+RANGE_SYSTEMS = (1,) if RANGE_HELPER else ()
+
+
+def runnable(case: dict) -> bool:
+    """Whether this verifier can reach the case's verdict and facts: it does
+    every range proof system the case needs."""
+    return all(n in RANGE_SYSTEMS for n in case.get("range_systems", []))
 
 
 def mismatches(fact, value, path: str = "") -> list[str]:
@@ -55,9 +72,9 @@ def mismatches(fact, value, path: str = "") -> list[str]:
     return [] if same else [f"{path}: {json.dumps(fact)} in the facts, {json.dumps(value)} in the report"]
 
 
-def run(case: dict, work: pathlib.Path) -> tuple[int, dict]:
-    """Verifies the case's evidence with the command line, as its options say:
-    (exit code, JSON report)."""
+def run(case: dict, work: pathlib.Path, range_helper: str | None = None) -> tuple[int, dict]:
+    """Verifies the case's evidence with the command line, as its options say,
+    with a range helper if one is given: (exit code, JSON report)."""
     evidence = work / "evidence.cbor"
     evidence.write_bytes(bytes.fromhex(case["evidence"]))
     argv = (["contract"] if case["kind"] == "contract" else []) + [str(evidence), "--json"]
@@ -84,6 +101,10 @@ def run(case: dict, work: pathlib.Path) -> tuple[int, dict]:
         argv += ["--witness-vkey", vkey]
     for item in options.get("distrust", []):
         argv += ["--distrust", item]
+    if "range_context" in options:
+        argv += ["--range-context", options["range_context"]]
+    if range_helper is not None and case["kind"] == "record":
+        argv += ["--range-helper", range_helper]
     if options.get("require_presence"):
         argv.append("--require-presence")
     if options.get("require_answered"):
@@ -107,6 +128,7 @@ class Conformance(unittest.TestCase):
             with self.subTest(case["name"]):
                 self.assertIn(case["kind"], ("record", "contract"))
                 self.assertLessEqual(set(case["options"]), OPTIONS)
+                self.assertTrue(set(case.get("range_systems", [])) <= {1})
                 if case["verified"]:
                     self.assertNotIn("rule", case)
                 else:
@@ -117,8 +139,10 @@ class Conformance(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             work = pathlib.Path(tmp)
             for case in self.suite["cases"]:
+                if not runnable(case):
+                    continue
                 with self.subTest(case["name"]):
-                    code, report = run(case, work)
+                    code, report = run(case, work, RANGE_HELPER)
                     self.assertIn(code, (cli.EXIT_VERIFIED, cli.EXIT_NOT_VERIFIED), report)
                     self.assertEqual(report.get("verified"), code == cli.EXIT_VERIFIED)
                     self.assertEqual(code == cli.EXIT_VERIFIED, case["verified"],

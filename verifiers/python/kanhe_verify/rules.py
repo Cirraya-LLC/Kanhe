@@ -89,6 +89,7 @@ class Record:
     membership: memberships.Membership | None = None  # a kanhe.membership/1 record's metadata (v0.16)
     script: scripts.Script | None = None  # a kanhe.script/1 record's metadata (v0.18)
     sources: list = field(default_factory=list)  # v0.18: [(ledger, record)] it was made from
+    provable: list = field(default_factory=list)  # v0.22: [ranges.Provable], in key 8's order
 
 
 @dataclass
@@ -622,6 +623,10 @@ class Ledger(contracts.ContractRules):
                 if old.superseded_by is not None:
                     fail("the record was superseded already")
         self._check_sources(kind, f["sources"])
+        # Provable values (v0.22): the shape was checked when parsed; none on
+        # a mechanism type (section 5).
+        if f["provable"] and kind in MECHANISM_TYPES:
+            fail("a record of a mechanism type has no provable values (key 8)")
         claim = self._check_claim(applied, f) if kind == claims.CLAIM_TYPE else None
         membership = self._check_membership(f) if kind == memberships.MEMBERSHIP_TYPE else None
         script = scripts.parse(f["metadata"]) if kind == scripts.SCRIPT_TYPE else None
@@ -630,7 +635,7 @@ class Ledger(contracts.ContractRules):
             id=applied.id, type=kind, field_root=f["field_root"], field_count=f["field_count"],
             attachments=f["attachments"], metadata=f["metadata"], supersedes=f["supersedes"],
             registrant=signer.id, state=initial, history=[applied.index], claim=claim, membership=membership,
-            script=script, sources=list(f["sources"]))
+            script=script, sources=list(f["sources"]), provable=list(f["provable"]))
         if old is not None:
             # The registration is a statement about both records (section 9).
             old.superseded_by = applied.id
