@@ -312,14 +312,14 @@ The `kanhe` tool controls every part of a ledger:
 | Actors | `actor add`, `actor list`, `actor show`, `actor revoke`, `actor rotate-key`, `actor set-presence`, `presence enroll` |
 | Delegations | `delegation grant`, `delegation list`, `delegation show`, `delegation revoke` |
 | Approvals | `approval list`, `approval show`, `approval give`, `approval submit`, `approval withdraw`; `--for-approval` on every command that signs; `delegation grant --approvals`; `ledger guardians set\|show\|remove` |
-| Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record source list\|prove\|forget`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
+| Records | `record issue`, `record list`, `record show`, `record history`, `record versions`, `record fields`, `record file list\|get\|add\|remove`, `record source list\|prove\|forget`, `record openings export\|show`, `record endorse`, `record transition`, `record revoke`, `record types`, `record publish`, `record published`, `record unpublish` |
 | Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke`, `record recompute` |
 | Claims | `claim issue`, `claim list`, `claim show`, `claim revoke` |
 | Credentials | `credential key add\|list\|revoke`, `credential issue`, `credential list`, `credential show`, `credential revoke`, `credential status`, `credential did-document`, `credential verify` |
 | Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch` (a member's) |
 | Proofs | `checkpoint create`, `checkpoint list`, `checkpoint show`, `checkpoint cosign-request`, `checkpoint add-cosignature`, `checkpoint timestamp`, `checkpoint add-timestamp`, `checkpoint timestamps`, `checkpoint note`, `checkpoint network-cosign`, `checkpoint network-cosignatures`, `proof inclusion`, `proof consistency`, `proof state`, `receipt` |
 | Witnesses | `witness add-log`, `witness cosign`, `witness status`, `witness remove-log`; `witness register`, `witness registered`, `witness unregister` (public witnesses, and open networks' with `--vkey`); `witness network-entry` |
-| Evidence | `export`, `verify`, `evidence renew`, `inspect`, `qr` |
+| Evidence | `export`, `verify`, `evidence renew`, `evidence prove`, `evidence proof list\|remove`, `inspect`, `qr` |
 | Vault | `vault status`, `vault keygen`, `vault rekey` |
 | AI agents | `mcp` |
 | Server | `serve`, `token create`, `token list`, `token show`, `token revoke` |
@@ -695,6 +695,41 @@ kanhe record publish <claim-id> --url https://ledger.example.com   # a QR code's
 Conditions compare numbers, money (`HKD 30000.00`), dates, and text with `>`, `>=`, `<`, `<=`,
 `=`, `!=`, `between`, `in`, and `exists`; several `--if` must all hold. A condition that does not
 hold gets no claim unless `--allow-no`, so that asking reveals nothing more than silence.
+
+## Range proofs
+
+A claim answers one question the issuer was asked. A **provable value** lets whoever holds
+it answer such questions without the issuer: the issuer marks a field's value provable when
+it issues the record, and hands the value's **opening** to the person it belongs to in a
+range openings file. With the record's evidence, they then prove that the value is at least,
+at most, or between bounds of their choosing, "born on or before 2008-11-21", "a monthly salary
+of at least HKD 30,000.00", and the verifier learns the statement and nothing else of the
+value. The proofs are zero-knowledge proofs (Longfellow ZK: hash-based, with no trusted
+setup), checked offline like the rest of the evidence
+([spec section 11.3](spec/README.md#113-range-proofs-v022)).
+
+```sh
+# The issuer marks values provable (number, number:SCALE, money:CCY:SCALE, or date), and
+# hands their openings to the person they belong to, privately:
+kanhe record issue --as hr.key --type example.org.staff/1 --field born=2001-04-02 \
+    --field monthly_salary="HKD 32,000.50" --provable born:date --provable monthly_salary:money:HKD:2
+kanhe record openings export <record-id> --out chan.kanheopenings
+kanhe record openings show chan.kanheopenings          # its record and names; --values shows more
+# The holder proves a statement in the record's evidence, bound to the relying party's
+# challenge if it gave one; the proof replaces any earlier one of that value:
+kanhe evidence prove staff.cbor --field born --at-most 2008-11-21 \
+    --openings chan.kanheopenings --context 5f1e0c9a --out for-the-shop.cbor
+# proved: born is at most 2008-11-21 (context 5f1e0c9a)
+kanhe verify for-the-shop.cbor --ledger-id <ledger-id> --range-context 5f1e0c9a
+kanhe evidence proof list for-the-shop.cbor            # the proofs, in words
+kanhe evidence proof remove for-the-shop.cbor born --in-place
+```
+
+The issuer proves from its own vault in the same way, with `--ledger` instead of `--openings`.
+Each opening is checked against the commitment in the record's registration before proving, a
+value outside the bounds makes no proof, and the new bundle is verified before it is written.
+That a commitment is the field's value is the issuer's word, as a claim's answer is, and the
+report says so.
 
 ## Where a record came from
 
@@ -1125,7 +1160,11 @@ acted on, and the digest of the tool it used. Verification reports show all of t
 start the server without a terminal, so give it the agent key's passphrase with
 `--passphrase-file` or `KANHE_PASSPHRASE`. The files the agent names (attachments, evidence to
 verify, a consent to keep) are taken from one directory, `--files` (by default the one the
-server starts in): a path outside it, or a link that leads out of it, is refused.
+server starts in): a path outside it, or a link that leads out of it, is refused. An agent may
+mark the values of the records it issues provable (`provable` on `kanhe_issue_record`), require
+its own challenge of the range proofs in evidence it verifies (`range_context` on
+`kanhe_verify_evidence`), and prove a value's bounds from a range openings file put in that
+directory (`kanhe_prove_range`).
 
 Agents take part in contracts too. On their own organization's ledger they create and call
 instances (`kanhe_call_contract`): the contract runs first, and the result says what it decided,

@@ -303,7 +303,7 @@ void Console::answer_questions() const {
                 {{cbor::Value::integer(1), cbor::Value::bytes(made->encoded)},
                  {cbor::Value::integer(2),
                   cbor::Value::bytes(client::seal_vault(state.ledger_id(), made->id,
-                                                        client::Vault{commitment->fields, {}},
+                                                        client::Vault{commitment->fields, {}, {}},
                                                         *vault_public))}}));
             if (encoded) {
                 submission = std::move(*encoded);

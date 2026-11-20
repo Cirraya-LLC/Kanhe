@@ -23,6 +23,7 @@ if(KANHE_CORE_ONLY)
 endif()
 
 add_executable(kanhe_tests
+    client/ranges_test.cpp
     core/cbor_test.cpp
     core/contract_bytes_test.cpp
     core/cose_test.cpp
@@ -319,6 +320,11 @@ add_test(NAME generic_words
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/generic_words.sh $<TARGET_FILE:kanhe>)
 add_test(NAME rotation_end_to_end
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/rotation.sh $<TARGET_FILE:kanhe>)
+# Range proofs (spec v0.22): provable values issued, their openings handed
+# out, proofs added to evidence and verified; without range proofs in the
+# build, the commands that make them refuse.
+add_test(NAME ranges_end_to_end
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/ranges.sh $<TARGET_FILE:kanhe>)
 # The independent verifier (verifiers/python, written from the specification
 # alone) against `kanhe verify`, bundle by bundle. It needs a Python with
 # verifiers/python/requirements.txt, KANHE_PYTHON or python3; without one

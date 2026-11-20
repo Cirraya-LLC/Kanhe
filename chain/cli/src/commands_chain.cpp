@@ -619,6 +619,10 @@ std::vector<CommandSpec> chain_commands() {
               {"source-proof", "FILE",
                "The evidence of a source on another ledger, as its ledger exported it: kept "
                "here and added to this record's evidence (repeat)",
+               false, true},
+              {"provable", "NAME:ENCODING",
+               "Make a field's value provable within bounds without disclosing it: ENCODING is "
+               "number, number:SCALE, money:CCY:SCALE, or date (repeat, up to 64)",
                false, true}}),
          cmd_record_issue,
          "--source names what the record was made from; --script (an approved script) what\n"
@@ -626,7 +630,23 @@ std::vector<CommandSpec> chain_commands() {
          "Its evidence then shows each source, where it stood when the record was made and\n"
          "at the checkpoint, and warns if one was revoked or replaced since. A source on\n"
          "another ledger is shown by its proof (--source-proof, or record source prove later),\n"
-         "or as not provided."},
+         "or as not provided.\n\n"
+         "--provable NAME:ENCODING marks the value of the field NAME provable (spec v0.22):\n"
+         "whoever holds its opening can later prove, in the record's evidence, that it is at\n"
+         "least, at most, or between bounds of their choosing, without disclosing it (kanhe\n"
+         "evidence prove). ENCODING says how the value is read as a whole number:\n"
+         "  number            a whole number: 18, 1,250, -3\n"
+         "  number:SCALE      with up to SCALE decimals (0 to 18): number:1 reads 18.5\n"
+         "  money:CCY:SCALE   an amount in the currency CCY with up to SCALE decimals (0 to\n"
+         "                    4): money:HKD:2 reads \"HKD 30,000.00\" or 30,000.00\n"
+         "  date              YYYY-MM-DD, from 0001-01-01 to 9999-12-31\n"
+         "A value that cannot be read so is refused. Each gets a commitment of its own in the\n"
+         "registration; its opening (a salt and the value) stays in the vault, and record\n"
+         "openings export hands it to a holder. That a commitment is the field's value is\n"
+         "your word, as an issuer's, and reports say so.\n\n"
+         "  kanhe record issue --as hr.key --type example.org.staff/1 --field born=2001-04-02 \\\n"
+         "      --field monthly_salary=\"HKD 32,000.50\" --provable born:date \\\n"
+         "      --provable monthly_salary:money:HKD:2"},
         {{"record", "source", "list"},
          "List the records a record was made from, and the proofs kept of them",
          "Records",
@@ -658,6 +678,36 @@ std::vector<CommandSpec> chain_commands() {
          with({ledger_option}),
          cmd_record_source_forget,
          "SOURCE is LEDGER:RECORD, as record source list shows it."},
+        {{"record", "openings", "export"},
+         "Write a record's range openings file, for a holder to prove its values' bounds",
+         "Records",
+         "RECORD",
+         1,
+         1,
+         with({ledger_option,
+               {"out", "FILE", "Where to write it (.kanheopenings, owner-only permissions)", true},
+               {"field", "NAME", "Only this provable value's opening (repeat; default: every one)",
+                false, true},
+               vault_key_option,
+               passphrase_file_option}),
+         cmd_record_openings_export,
+         "A record issued with --provable keeps, in the vault, each provable value's opening:\n"
+         "a salt of its own and the value as a whole number. The file holds the openings in\n"
+         "clear, with the record's ledger and id, each checked against the record's\n"
+         "commitments first. Whoever has it and the record's evidence can prove that a value\n"
+         "lies within bounds (kanhe evidence prove --openings FILE), and learns the value: give\n"
+         "it only to whom the values belong, privately. It is never part of evidence. A file\n"
+         "given out cannot be taken back: to withdraw the values, revoke or replace the record.\n\n"
+         "  kanhe record openings export 1a2b3c4d --field born --out chan.kanheopenings"},
+        {{"record", "openings", "show"},
+         "Show a range openings file: its ledger, record, and values' names",
+         "Records",
+         "FILE",
+         1,
+         1,
+         with({{"values", "", "Also show each value (as a whole number) and salt"}}),
+         cmd_record_openings_show,
+         "The file is private: --values prints what it holds in clear."},
         {{"script", "approve"},
          "Approve one version of a script, by its files, in person",
          "Scripts",
@@ -1517,6 +1567,80 @@ std::vector<CommandSpec> chain_commands() {
          "output never overwrites a file; --out FILE does, and --in-place replaces FILE.\n"
          "--witness, --witness-vkey, and --tsa-root say whom the long-term status it reports\n"
          "relies on, as for verify."},
+        {{"evidence", "prove"},
+         "Add a zero-knowledge proof that a value of the record lies within bounds",
+         "Evidence",
+         "BUNDLE",
+         1,
+         1,
+         with({{"field", "NAME", "The provable value to prove a statement about", true},
+               {"at-least", "VALUE", "The least value the statement allows"},
+               {"at-most", "VALUE", "The greatest value the statement allows"},
+               {"between", "LOW and HIGH",
+                "Both bounds, such as \"18 and 65\" (instead of --at-least and --at-most)"},
+               {"context", "HEX",
+                "A relying party's challenge (1 to 64 bytes, in hex) to bind the proof to"},
+               {"openings", "FILE",
+                "The value's opening from this range openings file (record openings export)"},
+               {"ledger", "DIR",
+                "Instead, the opening from the record's ledger and its vault (default: "
+                "$KANHE_LEDGER)"},
+               vault_key_option,
+               passphrase_file_option,
+               {"out", "FILE",
+                "Write the new bundle here (default: BUNDLE's name with -proved before its "
+                "extension)"},
+               {"in-place", "", "Replace BUNDLE with the new bundle instead"},
+               {"ledger-id", "ID", "The issuer's ledger id, learned out of band"},
+               {"witness", "PUBKEY", "Trust this witness's public key file", false, true},
+               {"witness-vkey", "VKEY", "Trust this open network's witness, by its verifier key",
+                false, true},
+               {"tsa-root", "FILE",
+                "Trust time-stamp authorities under this root certificate (PEM or DER)", false,
+                true}}),
+         cmd_evidence_prove,
+         "A range proof (spec v0.22) shows that the record's provable value FIELD is at least,\n"
+         "at most, or between the bounds given, and discloses nothing else of it: whoever\n"
+         "verifies the bundle (kanhe verify) learns the statement, never the value. Bounds are\n"
+         "written as the value's encoding reads them: a number (18.5), money (HKD 30,000.00, or\n"
+         "a bare amount in the value's currency), or a date (YYYY-MM-DD). A relying party that\n"
+         "wants a proof made for it, not a copy of an older one, gives a fresh challenge: prove\n"
+         "with --context HEX, and it verifies with kanhe verify --range-context HEX.\n\n"
+         "The opening comes from --openings FILE (a holder's, from the issuer), or from the\n"
+         "record's ledger with its vault key (the issuer's). It is checked against the\n"
+         "commitment in the record's registration first, and a value outside the bounds makes\n"
+         "no proof (exit 2). A proof replaces an earlier one of the same field; a bundle holds\n"
+         "16, each of another field (evidence proof remove takes one out). The bundle is\n"
+         "verified before and after: if either fails (exit 3), nothing is written. The default\n"
+         "output never overwrites a file; --out FILE does, and --in-place replaces BUNDLE. A\n"
+         "proof is about 84 KB, and each is made with fresh randomness.\n\n"
+         "  kanhe evidence prove staff.cbor --field born --at-most 2008-11-21 \\\n"
+         "      --openings chan.kanheopenings --context 5f1e0c9a --out for-the-shop.cbor"},
+        {{"evidence", "proof", "list"},
+         "List an evidence bundle's range proofs, and the values its record can prove",
+         "Evidence",
+         "BUNDLE",
+         1,
+         1,
+         with({{"ledger-id", "ID", "The issuer's ledger id, learned out of band"}}),
+         cmd_evidence_proof_list,
+         "Each proof in words, with its context, and whether it verified or was not checked\n"
+         "(by a build without range proofs). The bundle is verified first: exit status 3 if it\n"
+         "does not verify."},
+        {{"evidence", "proof", "remove"},
+         "Remove range proofs from an evidence bundle",
+         "Evidence",
+         "BUNDLE FIELD...",
+         2,
+         17,
+         with({{"out", "FILE", "Write the bundle here"},
+               {"in-place", "", "Replace BUNDLE instead"},
+               {"ledger-id", "ID", "The issuer's ledger id, learned out of band"}}),
+         cmd_evidence_proof_remove,
+         "Takes out the proof of each FIELD, so that the bundle no longer shows its statement\n"
+         "(to pass it on without it, or to make room). The rest is unchanged, and verified\n"
+         "before it is written (exit 3 if it does not verify). --out FILE or --in-place says\n"
+         "where it goes."},
         {{"qr"},
          "Make a QR code that opens a record's or an instance's evidence in the browser verifier",
          "Evidence",
@@ -3204,7 +3328,9 @@ std::vector<CommandSpec> chain_commands() {
          "  kanhe_answer_request          answer a request as its executor (done, failed,\n"
          "                                   or expired), under the agent's delegation\n"
          "  kanhe_list_approvals, kanhe_show_approval\n"
-         "                                   statements held for people's approval\n\n"
+         "                                   statements held for people's approval\n"
+         "  kanhe_prove_range             prove a value's bounds in a record's evidence, from\n"
+         "                                   a range openings file\n\n"
          "A write whose approval rules need people's approvals is held for approval (at the\n"
          "server, or in the ledger directory), not recorded, and the tool says so: the agent\n"
          "prepares, people approve (kanhe approval give). No tool gives an approval.\n\n"

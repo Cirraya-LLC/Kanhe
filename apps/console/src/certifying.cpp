@@ -726,7 +726,7 @@ void Console::issue(Run& run, const std::stop_token& stop) const {
                         {{cbor::Value::integer(1), cbor::Value::bytes(made->encoded)},
                          {cbor::Value::integer(2),
                           cbor::Value::bytes(client::seal_vault(state.ledger_id(), record,
-                                                                client::Vault{fields, {}},
+                                                                client::Vault{fields, {}, {}},
                                                                 *vault_public))}}));
                     if (encoded) {
                         submission = std::move(*encoded);

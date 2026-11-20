@@ -90,6 +90,8 @@ int cmd_record_file_remove(const Args& args);
 int cmd_record_source_list(const Args& args);
 int cmd_record_source_prove(const Args& args);
 int cmd_record_source_forget(const Args& args);
+int cmd_record_openings_export(const Args& args);
+int cmd_record_openings_show(const Args& args);
 int cmd_script_approve(const Args& args);
 int cmd_script_list(const Args& args);
 int cmd_script_show(const Args& args);
@@ -149,6 +151,9 @@ int cmd_receipt(const Args& args);
 int cmd_export(const Args& args);
 int cmd_verify(const Args& args);
 int cmd_evidence_renew(const Args& args);
+int cmd_evidence_prove(const Args& args);
+int cmd_evidence_proof_list(const Args& args);
+int cmd_evidence_proof_remove(const Args& args);
 int cmd_inspect(const Args& args);
 int cmd_qr(const Args& args);
 

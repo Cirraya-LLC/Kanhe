@@ -16,6 +16,7 @@
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/log.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/state.hpp>
 #include <kanhe/core/protocol/statement.hpp>
 
@@ -45,6 +46,11 @@ using verifier::report_json;
 [[nodiscard]] Json delegation_json(const Session& session,
                                    const protocol::DelegationState& delegation);
 [[nodiscard]] Json record_json(const Session& session, const protocol::RecordState& record);
+/// A registration's provable values (spec v0.22), in key 8's order: each
+/// {field, encoding: {type, scale, currency}, commitment}, the encoding as a
+/// verification report gives it (scale null for a date, currency null but
+/// for money).
+[[nodiscard]] Json provable_values_json(const std::vector<protocol::ProvableValue>& provable);
 /// A contract: its interface, language, code, and instances.
 [[nodiscard]] Json contract_json(const Session& session, const protocol::ContractState& contract);
 /// A contract instance: its status, parties, state, head, and calls.

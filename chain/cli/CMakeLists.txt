@@ -40,12 +40,6 @@ if(TARGET kanhe_crypto_pkcs11)
     target_link_libraries(kanhe_cli_chain PUBLIC kanhe::crypto_pkcs11)
     target_compile_definitions(kanhe_cli_chain PUBLIC KANHE_HAVE_PKCS11=1)
 endif()
-# Zero-knowledge range proofs (Longfellow ZK), when the build has them: their
-# arithmetic, which verify checks.
-if(TARGET kanhe_crypto_longfellow)
-    target_link_libraries(kanhe_cli_chain PUBLIC kanhe::crypto_longfellow)
-    target_compile_definitions(kanhe_cli_chain PUBLIC KANHE_HAVE_RANGE_PROOFS=1)
-endif()
 
 # A program: the shared main, and its own table and commands.
 function(kanhe_program name)
@@ -73,6 +67,7 @@ kanhe_program(kanhe
     src/cmd_node.cpp
     src/cmd_presence.cpp
     src/cmd_qr.cpp
+    src/cmd_ranges.cpp
     src/cmd_records.cpp
     src/cmd_recompute.cpp
     src/cmd_scripts.cpp

@@ -9,10 +9,6 @@
 #include <system_error>
 #include <vector>
 
-#if defined(KANHE_HAVE_RANGE_PROOFS)
-#include <kanhe/crypto/longfellow.hpp>
-#endif
-
 namespace kanhe::cli {
 
 crypto::openssl::HpkeKey load_hpke_key(const std::filesystem::path& path, const Args& args) {
@@ -101,17 +97,6 @@ protocol::VerifyOptions verify_options(const Args& args) {
     options.range_verifier = range_verifier();
     options.range_context = range_context_option(args);
     return options;
-}
-
-protocol::RangeVerifier range_verifier() {
-#if defined(KANHE_HAVE_RANGE_PROOFS)
-    return [](ByteView commitment, std::uint64_t lo, std::uint64_t hi, ByteView transcript,
-              ByteView proof) {
-        return crypto::longfellow::verify_range(commitment, lo, hi, transcript, proof);
-    };
-#else
-    return {};
-#endif
 }
 
 std::optional<Bytes> range_context_option(const Args& args) {

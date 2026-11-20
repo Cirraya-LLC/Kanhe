@@ -3,13 +3,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <format>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/core/protocol/record_types.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/node/record_files.hpp>
 
@@ -39,6 +43,10 @@ namespace {
 
 constexpr std::uint64_t vault_format_version = 1;
 
+/// A provable value's salt (spec section 6): 32 bytes of its own, never the
+/// field's.
+constexpr std::size_t opening_salt_size = protocol::range_salt_size;
+
 Bytes encode_vault_content(const Vault& vault) {
     cbor::Array fields;
     for (const protocol::RecordField& f : vault.fields) {
@@ -50,10 +58,20 @@ Bytes encode_vault_content(const Vault& vault) {
         attachments.push_back(
             cbor::Value::array({cbor::Value::text(a.name), cbor::Value::bytes(a.salt)}));
     }
-    return unwrap(cbor::encode(cbor::Value::map(
-                      {{cbor::Value::integer(1), cbor::Value::array(std::move(fields))},
-                       {cbor::Value::integer(2), cbor::Value::array(std::move(attachments))}})),
-                  "encoding the vault");
+    cbor::Map content{{cbor::Value::integer(1), cbor::Value::array(std::move(fields))},
+                      {cbor::Value::integer(2), cbor::Value::array(std::move(attachments))}};
+    // The openings of provable values (spec v0.22), for a record that has
+    // some: any other vault is written as before.
+    if (!vault.openings.empty()) {
+        cbor::Array openings;
+        for (const protocol::RangeOpening& o : vault.openings) {
+            openings.push_back(
+                cbor::Value::array({cbor::Value::text(o.name), cbor::Value::bytes(o.salt),
+                                    cbor::Value::integer(o.x)}));
+        }
+        content.push_back({cbor::Value::integer(3), cbor::Value::array(std::move(openings))});
+    }
+    return unwrap(cbor::encode(cbor::Value::map(std::move(content))), "encoding the vault");
 }
 
 Vault decode_vault_content(const cbor::Value& value) {
@@ -92,6 +110,23 @@ Vault decode_vault_content(const cbor::Value& value) {
             throw corrupted();
         }
         vault.attachments.push_back({*(*parts)[0].as_text(), salt_of((*parts)[1])});
+    }
+    // Key 3 (spec v0.22), absent from vaults of records without provable
+    // values and from every vault written before.
+    if (const cbor::Value* openings = value.find(3)) {
+        if (openings->as_array() == nullptr) {
+            throw corrupted();
+        }
+        for (const cbor::Value& item : *openings->as_array()) {
+            const cbor::Array* parts = item.as_array();
+            if (parts == nullptr || parts->size() != 3 || (*parts)[0].as_text() == nullptr ||
+                (*parts)[1].as_bytes() == nullptr ||
+                (*parts)[1].as_bytes()->size() != opening_salt_size || !(*parts)[2].as_int64()) {
+                throw corrupted();
+            }
+            vault.openings.push_back(
+                {*(*parts)[0].as_text(), *(*parts)[1].as_bytes(), *(*parts)[2].as_int64()});
+        }
     }
     return vault;
 }
@@ -332,6 +367,53 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
         vault.attachments.push_back(attachment);
         if (request.keep_files) {
             kept.push_back(content);
+        }
+    }
+    // Provable values (spec v0.22): each field's value read as an integer and
+    // committed with a salt of its own; the openings stay in the vault.
+    if (!request.provable.empty()) {
+        if (protocol::find_record_type(request.record_type) != nullptr) {
+            throw UsageError{"a " + request.record_type +
+                             " record has no provable values: the protocol's own types take none"};
+        }
+        if (request.provable.size() > protocol::max_provable_values) {
+            throw UsageError{"a record has at most 64 provable values"};
+        }
+        using Provable = std::pair<std::string, protocol::ProvableEncoding>;
+        for (const auto& [name, encoding] : request.provable) {
+            if (std::ranges::count(request.provable, name, &Provable::first) > 1) {
+                throw UsageError{"the field " + name + " is marked provable twice"};
+            }
+            const auto field = std::ranges::find(request.fields, name,
+                                                 &std::pair<std::string, std::string>::first);
+            if (field == request.fields.end()) {
+                throw UsageError{"a provable value is one of the record's fields: it has no "
+                                 "field " +
+                                 name};
+            }
+            if (name.empty() || name.size() > protocol::max_provable_name) {
+                throw UsageError{"a provable value's name is 1 to 64 bytes: " + name};
+            }
+            std::int64_t x = 0;
+            try {
+                x = provable_value_x(encoding, field->second);
+            } catch (const UsageError& e) {
+                throw UsageError{"the field " + name + " cannot be read as " +
+                                 provable_encoding_text(encoding) + ": " + e.message};
+            }
+            const auto salt = entropy.bytes<opening_salt_size>();
+            const Bytes s(salt.begin(), salt.end());
+            body.provable.push_back({name, encoding,
+                                     unwrap(protocol::range_commitment(session.provider(), s, x),
+                                            "committing to the provable value " + name)});
+            vault.openings.push_back({name, s, x});
+        }
+        std::ranges::sort(body.provable, {}, &protocol::ProvableValue::name);
+        std::ranges::sort(vault.openings, {}, &protocol::RangeOpening::name);
+        // Key 8's shape, as the ledger checks it.
+        if (const auto shape = protocol::check_provable(body.provable, body.field_count); !shape) {
+            throw UsageError{"the provable values are refused: " +
+                             std::string(shape.error().detail)};
         }
     }
     if (request.metadata_value) {

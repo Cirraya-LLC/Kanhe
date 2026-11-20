@@ -20,6 +20,7 @@ add_library(kanhe_client
     src/public_witness.cpp
     src/public_witnesses.cpp
     src/network_witnesses.cpp
+    src/ranges.cpp
     src/records.cpp
     src/relay.cpp
     src/relay_client.cpp
@@ -41,3 +42,11 @@ target_compile_definitions(kanhe_client PRIVATE KANHE_VERSION="${PROJECT_VERSION
                                                KANHE_PUBLIC_WITNESSES="${KANHE_PUBLIC_WITNESSES}")
 target_compile_features(kanhe_client PUBLIC cxx_std_26)
 kanhe_target_defaults(kanhe_client)
+# Range proofs (spec v0.22), made and checked with Longfellow ZK where the
+# build has it (KANHE_RANGE_PROOFS), for every program on this library (the
+# command line's verify, prove, and MCP server; the console); without it,
+# proofs are read and reported as not checked, and none is made.
+if(TARGET kanhe_crypto_longfellow)
+    target_link_libraries(kanhe_client PUBLIC kanhe::crypto_longfellow)
+    target_compile_definitions(kanhe_client PUBLIC KANHE_HAVE_RANGE_PROOFS=1)
+endif()

@@ -12,6 +12,7 @@
 #include <kanhe/client/session.hpp>
 #include <kanhe/client/views.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/record.hpp>
 
 /// Record operations: issuing records, and their private data in the vault.
@@ -38,6 +39,10 @@ struct IssueRequest {
     std::optional<protocol::Id> supersedes;
     /// The records it was made from (spec v0.18): on this ledger or another.
     std::vector<protocol::Source> sources;
+    /// The fields whose values are provable (spec v0.22), each by its name
+    /// and how its value is read as an integer: each gets a commitment of
+    /// its own in the registration, and its opening is kept in the vault.
+    std::vector<std::pair<std::string, protocol::ProvableEncoding>> provable;
 };
 
 /// The media type an attachment named `path` is given (by its extension).
@@ -53,6 +58,9 @@ struct VaultAttachment {
 struct Vault {
     std::vector<protocol::RecordField> fields;
     std::vector<VaultAttachment> attachments;
+    /// The openings of its provable values (spec v0.22), names ascending:
+    /// what proves them, and what a range openings file hands a holder.
+    std::vector<protocol::RangeOpening> openings = {};
 };
 
 /// Commits to the fields and attachments, registers the record, and keeps
@@ -69,6 +77,11 @@ protocol::Id issue_record(Session& session, const crypto::Signer& signer,
 //
 //   sealed file   = {1: 1, 2: [kem, kdf, aead], 3: encapsulated key, 4: ciphertext}
 //   vault.pub     = {1: kem, 2: public key}
+//   content       = {1: [[name, salt, value]...], 2: [[name, salt]...],
+//                    ? 3: [[name, salt, x]...]}
+//
+// Key 3 holds the openings of a record's provable values (spec v0.22), and
+// only a record with some has it: content without it reads as before.
 //
 // Vaults written before sealing existed hold the plaintext content directly
 // ({1: fields, 2: attachments}); `kanhe vault rekey` seals them.

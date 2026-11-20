@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Cirraya
 
+#include <format>
 #include <print>
+#include <string>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/core/protocol/record_types.hpp>
 #include <kanhe/crypto/openssl.hpp>
 #include <kanhe/node/sources.hpp>
@@ -94,6 +97,9 @@ int cmd_record_issue(const Args& args) {
     for (const std::string& source : args.all("source")) {
         request.sources.push_back(parse_source(session, source));
     }
+    for (const std::string& provable : args.all("provable")) {
+        request.provable.push_back(parse_provable(provable));
+    }
     const std::vector<std::string> proof_files = args.all("source-proof");
     if (!proof_files.empty() && session.remote()) {
         throw UsageError{"source proofs are kept in the ledger's directory: run record source "
@@ -109,16 +115,22 @@ int cmd_record_issue(const Args& args) {
         }
     }
     const protocol::RecordState& record = *session.state().record(id);
+    std::string provable;
+    for (const auto& [name, encoding] : request.provable) {
+        provable += (provable.empty() ? "\nprovable: " : ", ") + name + " (" +
+                    provable_encoding_text(encoding) + ")";
+    }
     return report_submitted(
         args, session, id, {{"record", record_json(session, record)}},
-        std::format("issued {} {}\nstate: {}{}{}", record.record_type, hex_id(id), record.state,
+        std::format("issued {} {}\nstate: {}{}{}{}", record.record_type, hex_id(id), record.state,
                     request.supersedes
                         ? "\nsupersedes: " + hex_id(*request.supersedes) + " (now an old version)"
                         : "",
                     request.sources.empty()
                         ? std::string()
                         : std::format("\nsources: {} ({} proof{} kept)", request.sources.size(),
-                                      proofs.size(), proofs.size() == 1 ? "" : "s")));
+                                      proofs.size(), proofs.size() == 1 ? "" : "s"),
+                    provable));
 }
 
 int cmd_record_list(const Args& args) {
@@ -206,6 +218,16 @@ int cmd_record_show(const Args& args) {
     }
     for (const auto& s : r["sources"]) {
         std::println("source:     {}", source_line(s));
+    }
+    for (const auto& p : r["provable"]) {
+        const Json& e = p["encoding"];
+        const std::string type = e["type"].get<std::string>();
+        std::println("provable:   {} ({}{})", p["field"].get<std::string>(), type,
+                     type == "money"
+                         ? std::format(" {}, scale {}", e["currency"].get<std::string>(),
+                                       e["scale"].get<unsigned>())
+                     : type == "number" ? std::format(", scale {}", e["scale"].get<unsigned>())
+                                        : std::string());
     }
     std::println("history:    {} statements (kanhe record history {})", record.history.size(),
                  short_id(record.id));

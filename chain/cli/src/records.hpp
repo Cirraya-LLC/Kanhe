@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/client/records.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
@@ -37,13 +38,9 @@ namespace kanhe::cli {
 /// A verifier's trust, from verify's options: --ledger-id, --witness,
 /// --witness-vkey, --tsa-root, --attachment, --trust-node, --distrust, and
 /// --range-context (those a command takes); and this build's range proof
-/// verifier.
+/// verifier (client::range_verifier: empty without Longfellow ZK, so that
+/// proofs are reported as not checked).
 [[nodiscard]] protocol::VerifyOptions verify_options(const Args& args);
-
-/// System 1's arithmetic for range proofs (spec v0.22), from this build's
-/// Longfellow ZK when it has it (KANHE_HAVE_RANGE_PROOFS); empty otherwise,
-/// so that proofs are reported as not checked.
-[[nodiscard]] protocol::RangeVerifier range_verifier();
 
 /// The context --range-context HEX requires of every range proof (spec
 /// v0.22): 1 to 64 bytes; nullopt without the option. A UsageError for

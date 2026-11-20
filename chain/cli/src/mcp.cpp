@@ -28,6 +28,7 @@
 
 #include <kanhe/client/approvals.hpp>
 #include <kanhe/client/peers.hpp>
+#include <kanhe/client/ranges.hpp>
 #include <kanhe/core/protocol/contract_evidence.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/record_types.hpp>
@@ -795,6 +796,14 @@ private:
               {{"type", "string"},
                {"description",
                 "Optional: the approved script (kanhe_list_scripts) that produced it."}}},
+             {"provable",
+              {{"type", "object"},
+               {"additionalProperties", {{"type", "string"}}},
+               {"description",
+                "Optional: fields whose values can later be proven within bounds without "
+                "disclosing them, field name to encoding: number, number:SCALE (decimals, 0 to "
+                "18), money:CCY:SCALE (such as money:HKD:2), or date (YYYY-MM-DD). Each value "
+                "must be readable so."}}},
              {"inputs", inputs_property}},
             json::array({"record_type", "fields"}), writes,
             [this](const Tool& tool, const json& arguments) {
@@ -826,6 +835,9 @@ private:
                         }
                         request.sources.push_back(parse_source(session, source.get<std::string>()));
                     }
+                }
+                for (const auto& [field, encoding] : string_map(arguments, "provable")) {
+                    request.provable.emplace_back(field, parse_provable_encoding(encoding));
                 }
                 const protocol::Id id = issue_record(session, *key_, request);
                 return json{{"record_id", hex_id(id)},
@@ -1429,10 +1441,24 @@ private:
                {"additionalProperties", {{"type", "string"}}},
                {"description",
                 "Trust nodes to believe (spec v0.16): ledger id to the name to give it. The "
-                "evidence's memberships from others are reported and relied on for nothing."}}}},
+                "evidence's memberships from others are reported and relied on for nothing."}}},
+             {"range_context",
+              {{"type", "string"},
+               {"description",
+                "Optional: the challenge you gave whoever proves a value's bounds (1 to 64 "
+                "bytes, in hex): every range proof must then carry it, so that none is a copy "
+                "of an older one."}}}},
             json::array({"bundle_path"}), read_only, [this](const Tool&, const json& arguments) {
                 const crypto::openssl::Provider provider;
                 protocol::VerifyOptions options;
+                // A context the agent requires of every range proof (spec v0.22).
+                if (const auto context = optional_text(arguments, "range_context")) {
+                    const auto bytes = from_hex(*context);
+                    if (!bytes || bytes->empty() || bytes->size() > protocol::max_range_context) {
+                        throw ToolError{"range_context is 1 to 64 bytes, in hex"};
+                    }
+                    options.range_context = *bytes;
+                }
                 if (const auto ledger_id = optional_text(arguments, "expected_ledger_id")) {
                     options.expected_ledger = unwrap(
                         protocol::to_id(unwrap(from_hex(*ledger_id), "ledger id")), "ledger id");
@@ -1456,15 +1482,98 @@ private:
                 }
                 const bool checked = options.expected_ledger.has_value();
                 auto full = verifier::report_json(*report, checked);
-                return json{{"verified", true},
-                            {"record_type", report->record_type},
-                            {"state", report->state},
-                            {"revoked", report->revoked},
-                            {"memberships", json::parse(full["memberships"].dump())},
-                            {"long_term", full.contains("long_term")
-                                              ? json::parse(full["long_term"].dump())
-                                              : json(nullptr)},
-                            {"report", verifier::report_text(*report, checked)}};
+                return json{
+                    {"verified", true},
+                    {"record_type", report->record_type},
+                    {"state", report->state},
+                    {"revoked", report->revoked},
+                    {"memberships", json::parse(full["memberships"].dump())},
+                    {"long_term", full.contains("long_term") ? json::parse(full["long_term"].dump())
+                                                             : json(nullptr)},
+                    {"provable", full.contains("provable") ? json::parse(full["provable"].dump())
+                                                           : json::array()},
+                    {"range_proofs", full.contains("range_proofs")
+                                         ? json::parse(full["range_proofs"].dump())
+                                         : json::array()},
+                    {"report", verifier::report_text(*report, checked)}};
+            });
+
+        add("kanhe_prove_range",
+            "Prove that a value of a record lies within bounds without disclosing it: from the "
+            "range openings file its issuer gave, a zero-knowledge proof is added to the "
+            "record's evidence, which is verified and written to a new file. Whoever verifies "
+            "it learns the statement (such as \"born is at most 2008-11-21\"), never the "
+            "value. Give the relying party's challenge as context when it gave one.",
+            {{"bundle_path", {{"type", "string"}, {"description", "The record's evidence."}}},
+             {"openings_path",
+              {{"type", "string"},
+               {"description", "The range openings file (.kanheopenings) for the record."}}},
+             {"field", {{"type", "string"}, {"description", "The provable value to prove."}}},
+             {"at_least",
+              {{"type", "string"},
+               {"description",
+                "Optional: the least value allowed, as the value is written: a number (18.5), "
+                "money (HKD 30,000.00), or a date (YYYY-MM-DD)."}}},
+             {"at_most",
+              {{"type", "string"},
+               {"description", "Optional: the greatest value allowed, written the same way."}}},
+             {"context",
+              {{"type", "string"},
+               {"description",
+                "Optional: the relying party's challenge (1 to 64 bytes, in hex)."}}},
+             {"out_path",
+              {{"type", "string"},
+               {"description", "Where to write the new evidence (not an existing file)."}}}},
+            json::array({"bundle_path", "openings_path", "field", "out_path"}), writes,
+            [this](const Tool&, const json& arguments) {
+                if (!client::range_proofs_built()) {
+                    throw ToolError{"this server was built without range proofs: it cannot "
+                                    "make them"};
+                }
+                client::RangeRequest request;
+                request.field = text_arg(arguments, "field");
+                request.at_least = optional_text(arguments, "at_least");
+                request.at_most = optional_text(arguments, "at_most");
+                if (const auto context = optional_text(arguments, "context")) {
+                    auto bytes = from_hex(*context);
+                    if (!bytes) {
+                        throw ToolError{"context is 1 to 64 bytes, in hex"};
+                    }
+                    request.context = std::move(*bytes);
+                }
+                const std::filesystem::path out = in_files(text_arg(arguments, "out_path"));
+                if (std::filesystem::exists(out)) {
+                    throw ToolError{"'" + text_arg(arguments, "out_path") +
+                                    "' exists already: name a new file"};
+                }
+                const Bytes encoded = read_file(in_files(text_arg(arguments, "bundle_path")));
+                const protocol::VerifyOptions options;
+                const auto record = client::provable_record(encoded, options);
+                if (!record) {
+                    throw ToolError{"VERIFICATION FAILED: " + std::string(record.error().detail)};
+                }
+                const protocol::ProvableValue& provable =
+                    client::provable_value(*record, request.field);
+                const Bytes file = read_file(in_files(text_arg(arguments, "openings_path")));
+                const auto openings = protocol::decode_range_openings(file);
+                if (file.size() > protocol::max_range_openings_file || !openings) {
+                    throw ToolError{"openings_path is not a range openings file"};
+                }
+                client::Proved proved = client::add_range_proof(
+                    encoded, *record, client::range_statement(provable, request),
+                    client::opening_of(*openings, *record, request.field), options);
+                if (!proved.report) {
+                    throw ToolError{"the new evidence does not verify: " +
+                                    std::string(proved.report.error().detail)};
+                }
+                write_file(out, proved.bundle, false);
+                return json{{"proved", true},
+                            {"out_path", out.string()},
+                            {"text", protocol::range_words(provable.encoding, proved.proof)},
+                            {"context", proved.proof.context ? json(to_hex(*proved.proof.context))
+                                                             : json(nullptr)},
+                            {"replaced", proved.replaced},
+                            {"range_proofs", proved.report->range_proofs.size()}};
             });
     }
 

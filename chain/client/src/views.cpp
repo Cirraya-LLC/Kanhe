@@ -69,6 +69,22 @@ Json id_json(const protocol::Id& id) {
     return hex_id(id);
 }
 
+Json provable_values_json(const std::vector<protocol::ProvableValue>& provable) {
+    using Type = protocol::ProvableEncoding::Type;
+    Json out = Json::array();
+    for (const protocol::ProvableValue& p : provable) {
+        const Type type = p.encoding.type;
+        out.push_back(
+            {{"field", p.name},
+             {"encoding",
+              {{"type", protocol::name(type)},
+               {"scale", type == Type::date ? Json(nullptr) : Json(p.encoding.scale)},
+               {"currency", type == Type::money ? Json(p.encoding.currency) : Json(nullptr)}}},
+             {"commitment", to_hex(p.commitment)}});
+    }
+    return out;
+}
+
 Json public_key_json(const crypto::PublicKey& key) {
     return {{"algorithm", crypto::name(key.algorithm)}, {"key", to_hex(key.bytes)}};
 }
@@ -293,6 +309,8 @@ Json record_json(const Session& session, const protocol::RecordState& record) {
         attachments.push_back({{"name", a.name}, {"media_type", a.media_type}, {"size", a.size}});
     }
     out["attachments"] = std::move(attachments);
+    // Its values whose bounds can be proven (v0.22).
+    out["provable"] = provable_values_json(body.provable);
     // Where it came from (v0.18): the records it was made from, each local
     // one as it stands now and each other ledger's with whether its proof
     // is kept here; and the script its registration names.
@@ -409,7 +427,8 @@ Json body_json(const protocol::Body& body) {
                         {"attachments", std::move(attachments)},
                         {"metadata", b.metadata ? cbor_json(*b.metadata) : Json(nullptr)},
                         {"supersedes", b.supersedes ? id_json(*b.supersedes) : Json(nullptr)},
-                        {"sources", sources_json(b.sources)}};
+                        {"sources", sources_json(b.sources)},
+                        {"provable", provable_values_json(b.provable)}};
             },
             [](const protocol::RecordEndorseBody& b) -> Json {
                 return {{"record", id_json(b.record)}, {"role", b.role}};
@@ -583,7 +602,11 @@ std::string body_summary(const Session& session, const protocol::Body& body,
                        (b.sources.empty() ? ""
                         : b.sources.size() == 1
                             ? ", from 1 source"
-                            : ", from " + std::to_string(b.sources.size()) + " sources");
+                            : ", from " + std::to_string(b.sources.size()) + " sources") +
+                       (b.provable.empty() ? ""
+                        : b.provable.size() == 1
+                            ? ", 1 provable value"
+                            : ", " + std::to_string(b.provable.size()) + " provable values");
             },
             [&](const protocol::RecordEndorseBody& b) {
                 return "endorse " + short_id(b.record) + " as " + b.role;
