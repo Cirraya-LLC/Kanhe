@@ -717,6 +717,7 @@ int cmd_verify(const Args& args) {
         protocol::VerifyOptions followed = options;
         followed.expected_ledger.reset();
         followed.attachment_contents.clear();
+        followed.range_context.reset();
         const FollowIndex index = evidence_in(provider, *directory, followed);
         std::set<FollowKey> seen{{hex_id(report->ledger_id), hex_id(report->record)}};
         chain = follow(*report, index, seen, 1, warnings, chain_text);

@@ -24,6 +24,7 @@
 #include <kanhe/core/protocol/memberships.hpp>
 #include <kanhe/core/protocol/network.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/state_tree.hpp>
@@ -140,6 +141,10 @@ struct EvidenceBundle {
     /// Renewals (v0.21), in order: newer attestations of the tree, at or
     /// after `checkpoint`; at most 64.
     std::vector<Renewal> renewals;
+    /// Range proofs (key 12, v0.22), in order: each that a provable value of
+    /// the record lies within bounds, each field once; at most 16. Only a
+    /// record's bundle carries them.
+    std::vector<RangeProof> range_proofs = {};
 
     friend bool operator==(const EvidenceBundle&, const EvidenceBundle&) = default;
 };
@@ -268,6 +273,14 @@ struct VerifyOptions {
     /// `parse_distrust` gives them; on every bundle verified with these
     /// options, nested ones included (memberships, sources, consents).
     std::vector<Distrust> distrust = {};
+    /// System 1's arithmetic (v0.22, spec section 11.3): range proofs are
+    /// checked with it. Empty by default: they are then reported as not
+    /// checked, and relied on for nothing.
+    RangeVerifier range_verifier = {};
+    /// A context the verifier requires (v0.22, `--range-context`): a fresh
+    /// challenge it gave the prover, 1 to 64 bytes. Every range proof of the
+    /// bundle must then carry exactly it. Not applied to nested bundles.
+    std::optional<Bytes> range_context = {};
 };
 
 struct ActorSummary {
@@ -708,6 +721,21 @@ struct SourceReport {
     friend bool operator==(const SourceReport&, const SourceReport&) = default;
 };
 
+/// A range proof as checked (v0.22, spec section 11.3), in the bundle's
+/// order: its field, its bounds as written (nullopt when absent), its
+/// statement in words, its context, its system, and whether its arithmetic
+/// was checked (false: not checked, relied on for nothing).
+struct RangeProofReport {
+    std::string field;
+    std::optional<cbor::Value> low, high;
+    std::string text;
+    std::optional<Bytes> context;
+    std::uint64_t system = range_system_longfellow;
+    bool verified = false;
+
+    friend bool operator==(const RangeProofReport&, const RangeProofReport&) = default;
+};
+
 struct EvidenceReport {
     Id ledger_id;
     std::string organization;
@@ -814,6 +842,12 @@ struct EvidenceReport {
     std::vector<Distrust> distrust;
     std::vector<SetAsideAttestation> set_aside;
     std::vector<DistrustedSignature> distrusted;
+    /// The record's provable values (v0.22), in its registration's key 8
+    /// order (empty for an instance), and the bundle's range proofs as
+    /// checked, in its order. That each commitment is its field's value is
+    /// the issuer's word.
+    std::vector<ProvableValue> provable = {};
+    std::vector<RangeProofReport> range_proofs = {};
 
     friend bool operator==(const EvidenceReport&, const EvidenceReport&) = default;
 };

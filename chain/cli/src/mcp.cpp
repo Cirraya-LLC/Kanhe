@@ -1446,6 +1446,8 @@ private:
                                 "trust node"),
                          name});
                 }
+                // Range proofs (spec v0.22): their arithmetic, where the build has it.
+                options.range_verifier = range_verifier();
                 const auto report = ledger::verify_bundle(
                     provider, read_file(in_files(text_arg(arguments, "bundle_path"))), options,
                     on_all_cores());

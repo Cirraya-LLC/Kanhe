@@ -1204,6 +1204,12 @@ Status LedgerState::check_rules(const crypto::Provider& provider, const Statemen
                         }
                     }
                 }
+                // Provable values (v0.22): their shape was checked when the
+                // statement was read; none on a mechanism type.
+                if (!b.provable.empty() && find_record_type(b.record_type) != nullptr) {
+                    return fail(Errc::rejected,
+                                "a record of a mechanism type has no provable values");
+                }
                 // Scripts (v0.18): the metadata's shape.
                 if (b.record_type == script_type) {
                     if (!b.metadata) {

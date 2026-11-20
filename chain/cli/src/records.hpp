@@ -4,6 +4,7 @@
 #pragma once
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -34,9 +35,20 @@ namespace kanhe::cli {
                                             const std::string& text);
 
 /// A verifier's trust, from verify's options: --ledger-id, --witness,
-/// --witness-vkey, --tsa-root, --attachment, --trust-node, and --distrust
-/// (those a command takes).
+/// --witness-vkey, --tsa-root, --attachment, --trust-node, --distrust, and
+/// --range-context (those a command takes); and this build's range proof
+/// verifier.
 [[nodiscard]] protocol::VerifyOptions verify_options(const Args& args);
+
+/// System 1's arithmetic for range proofs (spec v0.22), from this build's
+/// Longfellow ZK when it has it (KANHE_HAVE_RANGE_PROOFS); empty otherwise,
+/// so that proofs are reported as not checked.
+[[nodiscard]] protocol::RangeVerifier range_verifier();
+
+/// The context --range-context HEX requires of every range proof (spec
+/// v0.22): 1 to 64 bytes; nullopt without the option. A UsageError for
+/// anything else.
+[[nodiscard]] std::optional<Bytes> range_context_option(const Args& args);
 
 /// The algorithms --distrust ALG@YYYY-MM-DD names (spec v0.21), each once;
 /// a UsageError names the entry that is not one.

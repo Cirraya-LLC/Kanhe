@@ -20,6 +20,11 @@
 #   PYTHON: a Python 3.11+ with the packages of
 #   verifiers/python/requirements.txt; default $KANHE_PYTHON, or python3.
 #   `openssl` (3.5+) must be on PATH.
+# Range proofs' arithmetic (spec v0.22): the Python verifier hands it to
+# kanhe-range beside KANHE, when the build made it (--range-helper, and
+# KANHE_RANGE_HELPER for its unit tests); without it, both verifiers report
+# range proofs as not checked, and the cases that need the arithmetic are
+# skipped.
 # Without such a Python the test is skipped (exit 77), unless PYTHON or
 # KANHE_PYTHON names one: then it fails.
 set -Eeuo pipefail
@@ -51,6 +56,13 @@ export KANHE_LEDGER="$WORK/a"
 
 run() { "$KANHE" "$@"; }
 pyverify() { PYTHONPATH="$VERIFIER" "$PYTHON" -m kanhe_verify "$@"; }
+RANGE_HELPER=()
+if [ -x "$(dirname "$KANHE")/kanhe-range" ]; then
+    export KANHE_RANGE_HELPER="$(dirname "$KANHE")/kanhe-range"
+    RANGE_HELPER=(--range-helper "$KANHE_RANGE_HELPER")
+else
+    unset KANHE_RANGE_HELPER
+fi
 mutate() { "$PYTHON" "$VERIFIER/tests/mutate.py" "$@"; }
 json() { "$PYTHON" -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
 fail() { echo "FAIL: $*"; exit 1; }
@@ -68,7 +80,7 @@ compare() {
     local name="$1" bundle="$2" expect="$3"
     shift 3
     local pe=0 be=0
-    pyverify "$bundle" --json "$@" > py.json 2> py.err || pe=$?
+    pyverify "$bundle" --json ${RANGE_HELPER[@]+"${RANGE_HELPER[@]}"} "$@" > py.json 2> py.err || pe=$?
     run verify "$bundle" --json "$@" > bb.json 2> bb.err || be=$?
     local args=(py.json "$pe" bb.json "$be")
     [ "$expect" = any ] || args+=(--expect "$expect")
@@ -522,6 +534,42 @@ while read -r file ledger ed ml; do
         --witness-vkey "$ed" --witness-vkey "$ml" --min-witnesses 2
     compare "vectors: $file, neither trusted" "vectors/$file" verified --ledger-id "$ledger"
 done < <(json '"\n".join(" ".join([x["file"], x["ledger_id"]] + x["vkeys"]) for x in d)' < vectors/network.json)
+
+# --- Range proofs (spec v0.22) ---------------------------------------------------
+echo "Range proofs: protocol-v0.22.json's record bundles$([ ${#RANGE_HELPER[@]} -gt 0 ] || echo ', not checked (no kanhe-range)')"
+mkdir -p ranges
+"$PYTHON" - "$REPO/testvectors/protocol-v0.22.json" > ranges/index.txt << 'PY'
+import json, sys
+for c in json.load(open(sys.argv[1]))["bundles"]:
+    if c["kind"] != "record":
+        continue
+    open(f"ranges/{c['name']}.cbor", "wb").write(bytes.fromhex(c["evidence"]))
+    o = c["options"]
+    print(c["name"], "verified" if c["verified"] else "failed", o["ledger_id"], o.get("range_context", "-"),
+          "needs" if c.get("range_systems") else "-")
+PY
+while read -r name expect ledger context needs; do
+    if [ "$needs" = needs ] && [ ${#RANGE_HELPER[@]} -eq 0 ]; then
+        expect=any
+    fi
+    if [ "$context" = - ]; then
+        compare "range proofs: $name" "ranges/$name.cbor" "$expect" --ledger-id "$ledger"
+    else
+        compare "range proofs: $name" "ranges/$name.cbor" "$expect" --ledger-id "$ledger" --range-context "$context"
+    fi
+done < ranges/index.txt
+# The same context required of a bundle without range proofs: met, proving nothing.
+compare "range proofs: a context required, none carried" ranges/range-provable-no-proofs.cbor verified \
+    --ledger-id "$(awk '$1 == "range-provable-no-proofs" {print $3}' ranges/index.txt)" --range-context 00ff
+# The text report: each proof in words.
+run verify ranges/range-proofs-three.cbor > ranges.txt || fail "the range proofs verify"
+grep -q "Range proof  score is between 60 and 99.5: " ranges.txt || fail "a range proof in words"
+grep -q "Provable     birth_date (date), monthly_salary (money, HKD, scale 2), score (number, scale 1)" \
+    ranges.txt || fail "the provable values in the text report"
+pyverify ranges/range-proofs-three.cbor ${RANGE_HELPER[@]+"${RANGE_HELPER[@]}"} > ranges.txt
+grep -q "Range proof  score is between 60 and 99.5: " ranges.txt || fail "a range proof in words (python)"
+code=0; run verify ranges/range-proofs-three.cbor --range-context 0g > /dev/null 2>&1 || code=$?
+[ "$code" = 1 ] || fail "--range-context that is not hex is a usage error"
 
 # --- Damaged bundles ------------------------------------------------------------
 echo "Damaged bundles"

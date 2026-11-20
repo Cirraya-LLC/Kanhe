@@ -47,6 +47,7 @@ add_executable(kanhe_tests
     core/protocol_v018_test.cpp
     core/protocol_v020_test.cpp
     core/protocol_v021_test.cpp
+    core/protocol_v022_test.cpp
     core/exchange_test.cpp
     core/vm_test.cpp
     crypto/openssl_test.cpp
@@ -331,6 +332,10 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME verifier_conformance
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/verifiers/conformance.py
             $<TARGET_FILE:kanhe> ${PROJECT_SOURCE_DIR}/testvectors/evidence-v1.json)
+    # Range proofs' arithmetic (spec v0.22), where the build has system 1.
+    if(TARGET kanhe_crypto_longfellow)
+        set_tests_properties(verifier_conformance PROPERTIES ENVIRONMENT KANHE_RANGE_SYSTEMS=1)
+    endif()
 endif()
 # The applications' end-to-end tests (generic_words reads every program).
 set_tests_properties(console_end_to_end certificates_end_to_end search_end_to_end generic_words
@@ -373,6 +378,8 @@ endif()
 if(TARGET kanhe_crypto_longfellow)
     target_sources(kanhe_tests PRIVATE crypto/longfellow_range_test.cpp)
     target_link_libraries(kanhe_tests PRIVATE kanhe::crypto_longfellow)
+    # The v0.22 vectors' proofs of system 1, checked (core/protocol_v022_test.cpp).
+    target_compile_definitions(kanhe_tests PRIVATE KANHE_TEST_RANGE_PROOFS=1)
     add_test(NAME range_helper_end_to_end
         COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/range.sh $<TARGET_FILE:kanhe-range>)
 endif()

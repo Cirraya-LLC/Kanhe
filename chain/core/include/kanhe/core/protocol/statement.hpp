@@ -17,6 +17,7 @@
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/error.hpp>
 #include <kanhe/core/protocol/common.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 
 /// Statements: the signed objects that actors submit to a ledger.
 /// See `statement-payload` in spec/kanhe.cddl.
@@ -269,6 +270,9 @@ struct RecordRegisterBody {
     std::optional<Id> supersedes;
     /// The records it was made from (v0.18): none, or 1 to 64, no one twice.
     std::vector<Source> sources;
+    /// Its provable values (key 8, v0.22): none, or 1 to 64, strictly
+    /// ascending by name, no more than `field_count` (see ranges.hpp).
+    std::vector<ProvableValue> provable = {};
 
     friend bool operator==(const RecordRegisterBody&, const RecordRegisterBody&) = default;
 };

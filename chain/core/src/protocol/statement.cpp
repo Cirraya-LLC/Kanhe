@@ -340,6 +340,10 @@ Status check_body(const Body& body) {
                         return fail(Errc::malformed, "a registration names a source twice");
                     }
                 }
+                // Provable values (v0.22): their shape, as decoding takes it.
+                if (!b.provable.empty()) {
+                    KANHE_CHECK(check_provable(b.provable, b.field_count));
+                }
                 if (b.metadata) {
                     return check_metadata(*b.metadata);
                 }
@@ -699,6 +703,10 @@ Result<cbor::Value> encode_body(const Body& body) {
                             cbor::Value::array({id_value(s.ledger), id_value(s.record)}));
                     }
                     map.push_back(entry(7, cbor::Value::array(std::move(sources))));
+                }
+                if (!b.provable.empty()) {
+                    KANHE_TRY(cbor::Value provable, provable_list_value(b.provable, b.field_count));
+                    map.push_back(entry(8, std::move(provable)));
                 }
                 return cbor::Value::map(std::move(map));
             },
@@ -1095,6 +1103,10 @@ Result<Body> decode_body(StatementType type, const cbor::Value& value) {
                 }
                 b.sources.push_back(source);
             }
+        }
+        if (const cbor::Value* provable = reader.get(8)) {
+            // Provable values (v0.22): 1 to 64, their shape (section 6).
+            KANHE_TRY(b.provable, provable_list_from(*provable, b.field_count));
         }
         body = std::move(b);
         break;

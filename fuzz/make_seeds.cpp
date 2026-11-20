@@ -13,7 +13,9 @@
 // (node/contracts.hpp) and invitation codes (client/peers.hpp) are built here
 // as CBOR, without the node or the client library. The Bo pack reader starts
 // from the official packs. The range proof verifier starts from proofs of its
-// statement (range_proof_statement.hpp).
+// statement (range_proof_statement.hpp); range openings files, range proofs,
+// provable values, and bounds from testvectors/protocol-v0.22.json, whose
+// bundles and registrations the protocol parsers start from too.
 //
 //   make_seeds DIR    writes DIR/<target>/<name> for each target
 
@@ -56,9 +58,11 @@
 #include <kanhe/core/protocol/contracts.hpp>
 #include <kanhe/core/protocol/evidence.hpp>
 #include <kanhe/core/protocol/exchange.hpp>
+#include <kanhe/core/protocol/log.hpp>
 #include <kanhe/core/protocol/memberships.hpp>
 #include <kanhe/core/protocol/network.hpp>
 #include <kanhe/core/protocol/presence.hpp>
+#include <kanhe/core/protocol/ranges.hpp>
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/core/protocol/scripts.hpp>
 #include <kanhe/core/protocol/statement.hpp>
@@ -1928,6 +1932,102 @@ void renewal_seeds(const Seeds& seeds) {
     }
 }
 
+/// Range proofs (spec v0.22), from testvectors/protocol-v0.22.json: openings
+/// files that read and that do not, key 12's proofs, key 8's lists, values
+/// and bounds, for range_openings_fuzz; the bundles that carry them, and the
+/// registrations that make values provable, for protocol_parse_fuzz.
+void range_seeds(const Seeds& seeds) {
+    std::ifstream in(KANHE_TESTVECTORS_DIR "/protocol-v0.22.json");
+    if (!in) {
+        throw std::runtime_error("cannot read protocol-v0.22.json");
+    }
+    const auto doc = nlohmann::json::parse(in);
+    auto hex = [](const nlohmann::json& value) {
+        return must(from_hex(value.get<std::string>()), "hex");
+    };
+    std::size_t n = 0;
+    for (const char* list : {"valid", "refused"}) {
+        for (const auto& c : doc.at("openings").at(list)) {
+            seeds.write("range_openings_fuzz", std::format("openings-{:03}", n++),
+                        hex(c.at("file")));
+        }
+    }
+    n = 0;
+    for (const char* list : {"valid", "refused"}) {
+        for (const auto& c : doc.at("provable").at(list)) {
+            seeds.write("range_openings_fuzz", std::format("provable-{:03}", n++),
+                        hex(c.at("provable")));
+        }
+    }
+    // A JSON value of the vectors as CBOR (integers within 64 bits).
+    auto cbor_of = [](const auto& self, const nlohmann::json& j) -> cbor::Value {
+        if (j.is_number_unsigned()) {
+            return cbor::Value::unsigned_integer(j.get<std::uint64_t>());
+        }
+        if (j.is_number_integer()) {
+            return cbor::Value::integer(j.get<std::int64_t>());
+        }
+        if (j.is_string()) {
+            return cbor::Value::text(j.get<std::string>());
+        }
+        if (j.is_boolean()) {
+            return cbor::Value::boolean(j.get<bool>());
+        }
+        cbor::Array items;
+        if (j.is_array()) {
+            for (const auto& item : j) {
+                items.push_back(self(self, item));
+            }
+        }
+        return j.is_array() ? cbor::Value::array(std::move(items)) : cbor::Value::null();
+    };
+    n = 0;
+    for (const auto& c : doc.at("values")) {
+        seeds.write("range_openings_fuzz", std::format("value-{:03}", n++),
+                    must(cbor::encode(cbor_of(cbor_of, c.at("value"))), "encode"));
+        seeds.write("range_openings_fuzz", std::format("encoding-{:03}", n++),
+                    must(cbor::encode(cbor_of(cbor_of, c.at("encoding"))), "encode"));
+    }
+    for (const auto& c : doc.at("bounds").at("refused")) {
+        if (!c.at("bound").is_number_float()) {
+            seeds.write("range_openings_fuzz", std::format("bound-{:03}", n++),
+                        must(cbor::encode(cbor_of(cbor_of, c.at("bound"))), "encode"));
+        }
+    }
+    n = 0;
+    std::size_t proofs = 0;
+    for (const auto& c : doc.at("bundles")) {
+        const Bytes evidence = hex(c.at("evidence"));
+        seeds.write("protocol_parse_fuzz", std::format("bundle-range-{:03}", n++), evidence);
+        const auto bundle = protocol::decode_bundle(evidence);
+        if (!bundle) {
+            continue;
+        }
+        for (const protocol::RangeProof& p : bundle->range_proofs) {
+            // The proof's own bytes cut short: the shape is what is read.
+            protocol::RangeProof shape = p;
+            shape.proof.resize(std::min<std::size_t>(shape.proof.size(), 64));
+            seeds.write(
+                "range_openings_fuzz", std::format("proof-{:03}", proofs++),
+                must(cbor::encode(must(protocol::range_proof_value(shape), "proof")), "encode"));
+        }
+    }
+    n = 0;
+    for (const auto& e : doc.at("ledger").at("log_entries")) {
+        const auto entry = must(protocol::decode_log_entry(hex(e)), "log entry");
+        if (entry.is_state_commitment()) {
+            continue;
+        }
+        seeds.write("protocol_parse_fuzz", std::format("statement-range-{:03}", n++),
+                    entry.statement);
+        const auto envelope = must(cose::parse(entry.statement), "statement");
+        if (envelope.payload) {
+            seeds.write("protocol_parse_fuzz", std::format("payload-range-{:03}", n++),
+                        *envelope.payload);
+        }
+    }
+}
+
 #if defined(KANHE_HAVE_RANGE_PROOFS)
 /// Proofs of range_proof_fuzz's statement: two, as proofs differ in the
 /// lengths of their runs and Merkle paths.
@@ -2018,6 +2118,7 @@ int main(int argc, char** argv) {
 #if defined(KANHE_HAVE_RANGE_PROOFS)
         range_proof_seeds(seeds);
 #endif
+        range_seeds(seeds);
         claim_seeds(seeds);
         membership_seeds(seeds);
         script_seeds(seeds);

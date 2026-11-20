@@ -538,6 +538,17 @@ Result<Bytes> encode_bundle(const EvidenceBundle& bundle) {
         }
         map.push_back(entry(11, cbor::Value::array(std::move(renewals))));
     }
+    if (!bundle.range_proofs.empty()) {
+        if (bundle.range_proofs.size() > max_range_proofs) {
+            return fail(Errc::invalid_argument, "a bundle carries at most 16 range proofs");
+        }
+        cbor::Array proofs;
+        for (const RangeProof& p : bundle.range_proofs) {
+            KANHE_TRY(cbor::Value value, range_proof_value(p));
+            proofs.push_back(std::move(value));
+        }
+        map.push_back(entry(12, cbor::Value::array(std::move(proofs))));
+    }
     return cbor::encode(cbor::Value::map(std::move(map)));
 }
 
@@ -741,6 +752,17 @@ Result<EvidenceBundle> decode_bundle(ByteView encoded) {
             bundle.renewals.push_back(std::move(renewal));
         }
     }
+    // Range proofs (v0.22): 1 to 16, their shape; checked in step 13.
+    if (const cbor::Value* list_value = reader.get(12)) {
+        KANHE_TRY(const cbor::Array* list, non_empty_list(*list_value));
+        if (list->size() > max_range_proofs) {
+            return fail(Errc::malformed, "a bundle carries at most 16 range proofs");
+        }
+        for (const cbor::Value& item : *list) {
+            KANHE_TRY(RangeProof proof, range_proof_from(item));
+            bundle.range_proofs.push_back(std::move(proof));
+        }
+    }
     KANHE_CHECK(reader.finish());
     return bundle;
 }
@@ -842,6 +864,9 @@ Result<EvidenceReport> check_sources(const crypto::Provider& provider, const Evi
         if (!decoded->source_proofs.empty()) {
             return verification_failure("a source proof carries source proofs");
         }
+        if (!decoded->range_proofs.empty()) {
+            return verification_failure("a source proof carries range proofs");
+        }
         auto checked = detail::verify_bundle_as_given(provider, proof, inner);
         if (!checked) {
             return verification_failure("a source proof does not verify");
@@ -928,6 +953,9 @@ Result<EvidenceReport> check_memberships(const crypto::Provider& provider,
         }
         if (!decoded->memberships.empty()) {
             return verification_failure("a membership proof carries membership proofs");
+        }
+        if (!decoded->range_proofs.empty()) {
+            return verification_failure("a membership proof carries range proofs");
         }
         auto checked = detail::verify_bundle_as_given(provider, proof, inner);
         if (!checked) {
@@ -1044,6 +1072,66 @@ Result<EvidenceReport> finish_report(const crypto::Provider& provider, const Led
               detail::long_term_status(provider, state, checkpoint, state.log_key_for(size),
                                        renewals, tally.items(), options.distrust));
     return report;
+}
+
+/// Step 13 (v0.22, spec section 11.3): each range proof, in the bundle's
+/// order, against the provable values of the record's own registration: its
+/// field once and provable, its bounds in its encoding and in order, its
+/// system 1, the verifier's required context, and then, with a verifier of
+/// system 1's arithmetic, the proof. Without one, a proof is not checked.
+Result<std::vector<RangeProofReport>> check_range_proofs(const Id& ledger, const Id& record,
+                                                         const RecordRegisterBody& registration,
+                                                         std::span<const RangeProof> proofs,
+                                                         const VerifyOptions& options) {
+    std::vector<RangeProofReport> out;
+    for (const RangeProof& p : proofs) {
+        if (std::ranges::contains(out, p.field, &RangeProofReport::field)) {
+            return verification_failure("a field is proven twice in one bundle");
+        }
+        const auto value = std::ranges::find(registration.provable, p.field, &ProvableValue::name);
+        if (value == registration.provable.end()) {
+            return verification_failure(
+                "a range proof is of a field the record's registration does not make provable");
+        }
+        const auto bounds = range_public_values(value->encoding, p);
+        if (!bounds) {
+            // Its detail says why: another currency or scale, too many
+            // decimals, out of range, or the low above the high.
+            return verification_failure(bounds.error().detail);
+        }
+        if (p.system != range_system_longfellow) {
+            return verification_failure(
+                "a range proof is of an undefined proof system (only system 1 is defined)");
+        }
+        if (options.range_context && !p.context) {
+            return verification_failure(
+                "a range proof carries no context, and the verifier requires one");
+        }
+        if (options.range_context && *p.context != *options.range_context) {
+            return verification_failure(
+                "a range proof carries another context than the one the verifier requires");
+        }
+        RangeProofReport r{p.field,   p.low,    p.high, range_words(value->encoding, p),
+                           p.context, p.system, false};
+        if (options.range_verifier) {
+            const Bytes transcript =
+                range_transcript(ledger, record, p.field, value->commitment, bounds->first,
+                                 bounds->second, p.context ? ByteView(*p.context) : ByteView());
+            const Status verified = options.range_verifier(value->commitment, bounds->first,
+                                                           bounds->second, transcript, p.proof);
+            if (!verified) {
+                // A verifier that cannot run says so; anything else is the
+                // proof's failure.
+                if (verified.error().code == Errc::crypto_failure) {
+                    return std::unexpected(verified.error());
+                }
+                return verification_failure("a range proof does not verify");
+            }
+            r.verified = true;
+        }
+        out.push_back(std::move(r));
+    }
+    return out;
 }
 
 } // namespace
@@ -1723,9 +1811,12 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
 
     if (instance != nullptr) {
         // An instance has no fields or attachments: its state is public to
-        // whoever holds its evidence.
+        // whoever holds its evidence. Nor provable values (v0.22, step 13).
         if (!bundle.disclosures.empty() || !bundle.attachments.empty()) {
             return verification_failure("an instance has no fields or attachments to disclose");
+        }
+        if (!bundle.range_proofs.empty()) {
+            return verification_failure("an instance's bundle carries no range proofs");
         }
         return finish_report(provider, *state, checkpoint, bundle, included, std::move(relied),
                              options, std::move(report));
@@ -1780,8 +1871,13 @@ Result<EvidenceReport> detail::verify_bundle_as_given(const crypto::Provider& pr
         report.attachments.push_back(std::move(check));
     }
 
-    return finish_report(provider, *state, checkpoint, bundle, included, std::move(relied), options,
-                         std::move(report));
+    KANHE_TRY(report, finish_report(provider, *state, checkpoint, bundle, included,
+                                    std::move(relied), options, std::move(report)));
+    // Step 13 (v0.22): range proofs, against the record's own provable values.
+    report.provable = registration->provable;
+    KANHE_TRY(report.range_proofs, check_range_proofs(state->ledger_id(), bundle.record,
+                                                      *registration, bundle.range_proofs, options));
+    return report;
 }
 
 } // namespace kanhe::protocol

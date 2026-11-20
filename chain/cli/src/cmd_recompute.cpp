@@ -312,6 +312,7 @@ int cmd_record_recompute(const Args& args) {
     protocol::VerifyOptions source_options = options;
     source_options.expected_ledger.reset();
     source_options.attachment_contents.clear();
+    source_options.range_context.reset();
     std::vector<std::optional<GivenSource>> sources(report->sources.size());
     for (const std::string& file : args.all("source")) {
         auto verified =

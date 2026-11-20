@@ -9,10 +9,10 @@ is WebAssembly code with the source its deploy carries, as given, and the
 
 | Library | What it holds |
 |---|---|
-| `core` | Deterministic CBOR, COSE, Merkle proofs, the protocol's objects, the ledger's rules, the contract interpreter, and the offline evidence verifier. Portable C++23, with no dependencies, that builds to WebAssembly |
+| `core` | Deterministic CBOR, COSE, Merkle proofs, the protocol's objects, the ledger's rules, the contract interpreter, and the offline evidence verifier, range proofs' shapes, bounds, and transcripts among them (their arithmetic is given to it). Portable C++23, with no dependencies, that builds to WebAssembly |
 | `crypto/openssl` | The cryptographic backend: SHA-2, SM3, Ed25519, ESP256, SM2, ML-DSA |
 | `crypto/pkcs11` | Keys on PKCS #11 tokens: USB keys (UKey), smart cards, and HSMs, loaded at run time |
-| `crypto/longfellow` | Zero-knowledge range proofs on Google's Longfellow ZK: that a value committed to with a salted SHA-256 lies in a range, without disclosing it; and `kanhe-range`, which makes and checks them as JSON for programs that do not link C++. Not in the browser yet (`KANHE_RANGE_PROOFS`) |
+| `crypto/longfellow` | Zero-knowledge range proofs on Google's Longfellow ZK: that a value committed to with a salted SHA-256 lies in a range, without disclosing it; `kanhe verify` checks a bundle's range proofs with it, and `kanhe-range` makes and checks them as JSON for programs that do not link C++. Not in the browser yet (`KANHE_RANGE_PROOFS`): there, range proofs are reported as not checked |
 | `verifier` | Verification reports (text and JSON) shared by the command line and the browser; `verifier/wasm` is the browser verifier's page |
 | `ledger` | The ledger: crash-safe storage, the rule engine, checkpoints, receipts, evidence, backups (C++26) |
 | `node` | The HTTP API server and client (Asio), API tokens, replicas, clusters (Raft), the registrar, the keeper, and executors; applications attach to it as extensions (C++26) |

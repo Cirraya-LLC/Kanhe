@@ -9,6 +9,11 @@ each of its keys is in the report with a matching value, a fact list matches
 a list of the same length element by element, and anything else only an
 equal value.
 
+A case with `range_systems` (spec v0.22) needs those range proof systems'
+arithmetic for its verdict and facts: it runs only when KANHE_RANGE_SYSTEMS
+(their numbers, comma-separated) names every one, as the build of KANHE
+implements them, and is skipped otherwise.
+
 Usage: python3 conformance.py KANHE SUITE
 """
 
@@ -57,7 +62,15 @@ def flags(options: dict, work: str) -> list[str]:
         out.append("--require-presence")
     if options.get("require_answered"):
         out.append("--require-answered")
+    if "range_context" in options:
+        out += ["--range-context", options["range_context"]]
     return out
+
+
+def range_systems() -> set[int]:
+    """The range proof systems KANHE implements, as KANHE_RANGE_SYSTEMS says."""
+    text = os.environ.get("KANHE_RANGE_SYSTEMS", "")
+    return {int(n) for n in text.split(",") if n.strip()}
 
 
 def run_case(kanhe: str, case: dict) -> str | None:
@@ -96,12 +109,19 @@ def main() -> int:
         print(f"{path}: not a suite of format 1", file=sys.stderr)
         return 1
     failures = 0
+    skipped = 0
+    systems = range_systems()
     for case in suite["cases"]:
+        if not set(case.get("range_systems", [])) <= systems:
+            skipped += 1
+            continue
         problem = run_case(kanhe, case)
         if problem is not None:
             failures += 1
             print(f"FAIL {case['name']}: {problem}")
-    print(f"conformance: {len(suite['cases']) - failures} of {len(suite['cases'])} cases as the suite says")
+    ran = len(suite["cases"]) - skipped
+    print(f"conformance: {ran - failures} of {ran} cases as the suite says"
+          + (f" ({skipped} skipped: range proof systems this build does not implement)" if skipped else ""))
     return 1 if failures else 0
 
 

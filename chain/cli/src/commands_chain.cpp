@@ -1447,6 +1447,9 @@ std::vector<CommandSpec> chain_commands() {
                {"trust-node", "LEDGER=NAME",
                 "Believe this trust node's memberships, naming it NAME (spec v0.16)", false, true},
                distrust_option,
+               {"range-context", "HEX",
+                "Require every range proof to carry this context, a fresh challenge you gave the "
+                "prover (1 to 64 bytes in hex; spec v0.22)"},
                {"follow", "DIR",
                 "Follow the record's sources through their own evidence, found in DIR, level by "
                 "level"}}),
@@ -1464,7 +1467,15 @@ std::vector<CommandSpec> chain_commands() {
          "dated witness cosignature, by an algorithm not distrusted, dated before that day\n"
          "(00:00 UTC), attested: else the evidence fails. Each algorithm once; classical\n"
          "names ed25519, ecdsa, sm2, rsa, and any other but ML-DSA.\n\n"
-         "  kanhe verify cert.cbor --ledger-id 98ae652f --distrust classical@2035-01-01"},
+         "Range proofs (spec v0.22) show that a provable value of the record lies within\n"
+         "bounds without disclosing it. Each is checked against the record's provable values\n"
+         "and stated in words (\"score is at least 60\"): verified, or NOT CHECKED by a build\n"
+         "without range proofs, and then relied on for nothing. With --range-context HEX every\n"
+         "proof must carry that context, else the evidence fails: give the prover a fresh\n"
+         "challenge, and a proof copied from an older bundle fails. A bundle without range\n"
+         "proofs meets it, and proves nothing.\n\n"
+         "  kanhe verify cert.cbor --ledger-id 98ae652f --distrust classical@2035-01-01\n"
+         "  kanhe verify proof.cbor --ledger-id 98ae652f --range-context 6c0f2a9b81d3e4f5"},
         {{"evidence", "renew"},
          "Add a newer attestation of the ledger's tree to an evidence bundle",
          "Evidence",

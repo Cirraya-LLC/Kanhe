@@ -32,6 +32,7 @@ add_library(kanhe_core
     src/protocol/scripts.cpp
     src/protocol/network.cpp
     src/protocol/presence.cpp
+    src/protocol/ranges.cpp
     src/protocol/reader.cpp
     src/protocol/record.cpp
     src/protocol/record_types.cpp

@@ -713,7 +713,7 @@ A **range proof** shows that a provable value of a record (section 6) lies withi
 A proof has a low, a high, or both. A bundle carries 1 to 16 proofs, each of a different field (key 12). Only a record's bundle carries them, about provable values of the record's own registration: an instance's bundle with key 12 fails the evidence, and so does a membership proof or a source proof with one (section 11, steps 9 and 10).
 
 **Bounds** are written as a claim writes values (section 6, `claim-number`, `claim-money`, `claim-date`), in the provable's encoding, and read as integers x as the encoding reads its value:
-- **number**: an integer, or a decimal text `-?[0-9]+(\.[0-9]+)?` of at most 40 characters, with at most `scale` digits after the point, so that x, the bound times 10^scale, is an integer. At scale 2, `18`, `"18.5"`, and `"18.50"` are all 1850, and `"18.505"` and `"18.500"` are refused.
+- **number**: an integer, or a decimal text `-?[0-9]+(\.[0-9]+)?` of at most 40 characters, with at most `scale` digits after the point, so that x, the bound times 10^scale, is an integer. At scale 2, `"18.5"` and `"18.50"` are both 1850, the integer `18` is 1800, and `"18.505"` and `"18.500"` are refused.
 - **money**: `[amount, currency, scale]` with the provable's currency and scale, and x the amount. Another currency is refused, and so is another scale, even for an equal amount: `[18, "HKD", 0]` is refused for a provable of scale 2, where `[1800, "HKD", 2]` is taken.
 - **date**: `YYYY-MM-DD`, a valid date from 0001-01-01 to 9999-12-31, and x its number of days from 1970-01-01.
 

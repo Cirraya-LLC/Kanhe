@@ -504,6 +504,80 @@ std::string timestamps_text(const protocol::EvidenceReport& r) {
 namespace {
 
 /// A standing for JSON (v0.16): one word.
+/// An encoding (v0.22) as the JSON report gives it: {type, scale,
+/// currency}, the scale null for a date, the currency null but for money.
+Json encoding_json(const protocol::ProvableEncoding& e) {
+    using Type = protocol::ProvableEncoding::Type;
+    return {{"type", protocol::name(e.type)},
+            {"scale", e.type == Type::date ? Json(nullptr) : Json(e.scale)},
+            {"currency", e.type == Type::money ? Json(e.currency) : Json(nullptr)}};
+}
+
+/// The record's provable values (v0.22, spec section 11.3), in key 8's
+/// order: each one's name and encoding.
+Json provable_json(const protocol::EvidenceReport& r) {
+    Json out = Json::array();
+    for (const protocol::ProvableValue& v : r.provable) {
+        out.push_back({{"field", v.name}, {"encoding", encoding_json(v.encoding)}});
+    }
+    return out;
+}
+
+/// Each range proof (v0.22, spec section 11.3), in the bundle's order: its
+/// field, its bounds as a claim's JSON gives values (null when absent), the
+/// statement in words, its context in hex, its system, and whether it was
+/// verified or not checked.
+Json range_proofs_json(const protocol::EvidenceReport& r) {
+    Json out = Json::array();
+    for (const protocol::RangeProofReport& p : r.range_proofs) {
+        out.push_back({{"field", p.field},
+                       {"low", p.low ? cbor_json(*p.low) : Json(nullptr)},
+                       {"high", p.high ? cbor_json(*p.high) : Json(nullptr)},
+                       {"text", p.text},
+                       {"context", p.context ? Json(to_hex(*p.context)) : Json(nullptr)},
+                       {"system", p.system},
+                       {"status", p.verified ? "verified" : "not-checked"}});
+    }
+    return out;
+}
+
+std::string encoding_words(const protocol::ProvableEncoding& e) {
+    switch (e.type) {
+    case protocol::ProvableEncoding::Type::money:
+        return std::format("money, {}, scale {}", e.currency, e.scale);
+    case protocol::ProvableEncoding::Type::number:
+        return std::format("number, scale {}", e.scale);
+    case protocol::ProvableEncoding::Type::date:
+        break;
+    }
+    return "date";
+}
+
+/// Provable values and range proofs, for people (v0.22).
+std::string ranges_text(const protocol::EvidenceReport& r) {
+    std::string out;
+    if (!r.provable.empty()) {
+        std::string named;
+        for (const protocol::ProvableValue& v : r.provable) {
+            named += std::format("{}{} ({})", named.empty() ? "" : ", ", v.name,
+                                 encoding_words(v.encoding));
+        }
+        out += "  Provable     " + named + "\n";
+        out += "               (the issuer's word that each commitment is its field's value)\n";
+    }
+    for (const protocol::RangeProofReport& p : r.range_proofs) {
+        const std::string context =
+            p.context ? ", context " + to_hex(*p.context) : std::string(", no context");
+        out += std::format(
+            "  Range proof  {}: {}\n", p.text,
+            p.verified ? std::format("verified (system {}{})", p.system, context)
+                       : std::format("NOT CHECKED (system {}{}): this verifier does not implement "
+                                     "the system's arithmetic, so it is relied on for nothing",
+                                     p.system, context));
+    }
+    return out;
+}
+
 std::string_view standing_key(protocol::Standing s) {
     return s == protocol::Standing::not_yet ? "not_yet" : protocol::standing_name(s);
 }
@@ -974,6 +1048,8 @@ Json report_json(const protocol::EvidenceReport& r, bool ledger_checked) {
         {"renewals", renewals_json(r)},
         {"long_term", long_term_json(r)},
         {"distrust", distrust_json(r)},
+        {"provable", provable_json(r)},
+        {"range_proofs", range_proofs_json(r)},
         {"complete", r.complete},
         {"state_commitment",
          r.state_commitment ? Json{{"index", r.state_commitment->tree_size},
@@ -1047,6 +1123,7 @@ std::string report_text(const protocol::EvidenceReport& r, bool ledger_checked) 
         }
     }
     out += provenance_text(r);
+    out += ranges_text(r);
     line("\n  History");
     for (const protocol::RecordEvent& event : r.events) {
         line(std::format("    #{:<4} {}  {}", event.index, format_time(event.registered_at),

@@ -41,6 +41,9 @@ kanhe_add_fuzzer(credential_fuzz kanhe::verifier)
 # document and status list, as `kanhe credential verify` checks one.
 kanhe_add_fuzzer(credential_verify_fuzz kanhe::verifier kanhe::crypto_openssl)
 kanhe_add_fuzzer(gzip_fuzz kanhe::verifier)
+# Range openings files (spec v0.22), and range proofs' shapes, provable
+# values, and bounds, from anyone.
+kanhe_add_fuzzer(range_openings_fuzz)
 # Zero-knowledge range proofs (Longfellow ZK), from anyone, against one
 # statement.
 if(TARGET kanhe_crypto_longfellow)

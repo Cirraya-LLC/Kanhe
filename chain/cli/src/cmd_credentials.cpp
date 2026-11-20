@@ -24,6 +24,7 @@
 
 #include "commands.hpp"
 #include "output.hpp"
+#include "records.hpp"
 #include "requests.hpp"
 
 namespace kanhe::cli {
@@ -475,6 +476,7 @@ int cmd_credential_verify(const Args& args) {
         options.verify.trusted_witnesses.push_back(load_public_key(path));
     }
     options.verify.trusted_timestamp_roots = load_certificates(args.all("tsa-root"));
+    options.verify.range_verifier = range_verifier();
     const bool remote_ok = [&] {
         // An http:// address only when asked: tests and a local server.
         return !addresses.evidence.starts_with("http://") || args.has("allow-http");
