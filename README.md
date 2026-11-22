@@ -649,12 +649,17 @@ sync.
 
 Once a ledger's newest attestation is older than a year (`archive config --attest-interval`),
 the archive re-attests its latest checkpoint: each public witness it is configured with that has
-not cosigned it yet cosigns it, dated, and each time-stamp authority stamps it afresh, kept beside the checkpoint so that
-renewals carry them (`archive attest` does it now). A witness the issuer itself uses is never
-moved to a later checkpoint, so the issuer's own requests go on. Choose a witness whose key is ML-DSA; `kanhe status`
-warns when every witness configured is classical. The issuer lists the archives that keep it
-(`trust archive add https://HOST/a/LEDGER_ID`, at most four); `kanhe qr` and `record publish`
-then name them as fallbacks of each published record's address (`&a=`).
+not cosigned it yet cosigns it, dated, and each time-stamp authority stamps it afresh, kept
+beside the checkpoint so that renewals carry them (`archive attest` does it now). A witness the
+issuer itself uses is never moved to a later checkpoint, so the issuer's own requests go on.
+Choose a witness whose key is ML-DSA; `kanhe status` warns when every witness configured is
+classical. The issuer lists the archives that keep it (`trust archive add
+https://HOST/a/LEDGER_ID`, at most four); `kanhe qr` and `record publish` then name them as
+fallbacks of each published record's address (`&a=`), and so do the console's certificate
+links, where Settings lists, adds, and removes them. The browser verifier tries the fallbacks in
+order only when the issuer's address cannot be fetched, and checks what an archive answers
+exactly as it would the issuer's evidence. Links printed before an archive was listed do not
+name it.
 
 ```sh
 # The issuer: a token for the archive.
