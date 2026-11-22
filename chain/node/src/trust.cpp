@@ -161,9 +161,9 @@ Status save_archive_links(const std::filesystem::path& ledger_directory, const p
     json list = json::array();
     for (const ArchiveLink& a : archives) {
         if (!valid_archive_link(a.url, ledger)) {
-            return fail(Errc::invalid_argument, "an archive's address for this ledger ends in /a/" +
-                                                    to_hex(ledger.bytes()) +
-                                                    ", with no query or fragment");
+            return fail(Errc::invalid_argument,
+                        "an archive's address for a ledger is http(s)://HOST/a/ and the "
+                        "ledger's id in hex, with no query or fragment");
         }
         if (!seen.insert(a.url).second) {
             return fail(Errc::invalid_argument, "an archive is listed once");
