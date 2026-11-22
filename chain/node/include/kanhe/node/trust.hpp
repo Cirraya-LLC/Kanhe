@@ -86,6 +86,39 @@ void add_membership_proofs(const crypto::Provider& provider,
                            const protocol::Id& member, std::string_view record_type,
                            protocol::EvidenceBundle& bundle);
 
+/// The archives that keep this ledger (spec section 16, "Archives"): each
+/// an archive's address for it, `https://HOST/a/LEDGER` (no trailing slash),
+/// where it answers this ledger's published records (`/c/TOKEN`) and
+/// renewals once this ledger's own server cannot. Links to published records
+/// name them as fallbacks, so a printed certificate outlives its issuer.
+///
+///   <ledger>/trust/archives.json   {"version": 1, "archives": [{"url", "added"}]}
+struct ArchiveLink {
+    std::string url;
+    protocol::Timestamp added = 0;
+    friend bool operator==(const ArchiveLink&, const ArchiveLink&) = default;
+};
+
+/// At most this many archives a ledger lists, and a link names.
+inline constexpr std::size_t max_archive_links = 4;
+
+/// Whether `url` is an archive's address for `ledger`: http or https, no
+/// query or fragment, ending in /a/ and the ledger id in 64 lower-case hex
+/// digits.
+[[nodiscard]] bool valid_archive_link(std::string_view url, const protocol::Id& ledger);
+/// None if the file does not exist; Errc::malformed if it is damaged.
+[[nodiscard]] Result<std::vector<ArchiveLink>>
+load_archive_links(const std::filesystem::path& ledger_directory);
+/// At most 4, each valid for `ledger` and listed once.
+[[nodiscard]] Status save_archive_links(const std::filesystem::path& ledger_directory,
+                                        const protocol::Id& ledger,
+                                        const std::vector<ArchiveLink>& archives);
+/// The fallback addresses of the record published under `token`, one per
+/// archive in the list's order: URL/c/TOKEN. A verifier's link carries each
+/// as `&a=` (percent-encoded) after its `&b=`.
+[[nodiscard]] std::vector<std::string> archive_fallbacks(const std::vector<ArchiveLink>& archives,
+                                                         std::string_view token);
+
 /// Which ledger each membership on a trust node's ledger names, read from
 /// its registration once (a membership's metadata never changes).
 class MembershipIndex {

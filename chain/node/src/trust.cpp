@@ -108,6 +108,86 @@ Status save_trust_nodes(const std::filesystem::path& ledger_directory,
     return detail::write_file(nodes_file(ledger_directory), as_bytes(text), true);
 }
 
+namespace {
+
+std::filesystem::path archives_file(const std::filesystem::path& ledger) {
+    return trust_directory(ledger) / "archives.json";
+}
+
+} // namespace
+
+bool valid_archive_link(std::string_view url, const protocol::Id& ledger) {
+    const std::string suffix = "/a/" + to_hex(ledger.bytes());
+    const bool web = url.starts_with("https://") || url.starts_with("http://");
+    const std::size_t host = url.find("://") + 3;
+    return web && url.size() <= 2048 && url.ends_with(suffix) &&
+           url.size() > host + suffix.size() &&
+           url.find_first_of("?# \t\r\n") == std::string_view::npos;
+}
+
+Result<std::vector<ArchiveLink>> load_archive_links(const std::filesystem::path& ledger_directory) {
+    auto bytes = detail::read_file(archives_file(ledger_directory));
+    if (!bytes) {
+        if (bytes.error().code == Errc::not_found) {
+            return std::vector<ArchiveLink>{};
+        }
+        return std::unexpected(bytes.error());
+    }
+    const auto document = json::parse(bytes->begin(), bytes->end(), nullptr, false);
+    if (document.is_discarded() || !document.is_object() || document.value("version", 0) != 1 ||
+        !document.contains("archives") || !document["archives"].is_array() ||
+        document["archives"].size() > max_archive_links) {
+        return fail(Errc::malformed, "the archives file is malformed");
+    }
+    std::vector<ArchiveLink> archives;
+    std::set<std::string> seen;
+    for (const auto& a : document["archives"]) {
+        if (!a.is_object() || !a.value("url", json()).is_string() ||
+            !a.value("added", json()).is_number_unsigned() ||
+            !seen.insert(a["url"].get<std::string>()).second) {
+            return fail(Errc::malformed, "the archives file is malformed");
+        }
+        archives.push_back({a["url"].get<std::string>(), a["added"].get<protocol::Timestamp>()});
+    }
+    return archives;
+}
+
+Status save_archive_links(const std::filesystem::path& ledger_directory, const protocol::Id& ledger,
+                          const std::vector<ArchiveLink>& archives) {
+    if (archives.size() > max_archive_links) {
+        return fail(Errc::limit_exceeded, "a ledger lists at most 4 archives");
+    }
+    std::set<std::string> seen;
+    json list = json::array();
+    for (const ArchiveLink& a : archives) {
+        if (!valid_archive_link(a.url, ledger)) {
+            return fail(Errc::invalid_argument, "an archive's address for this ledger ends in /a/" +
+                                                    to_hex(ledger.bytes()) +
+                                                    ", with no query or fragment");
+        }
+        if (!seen.insert(a.url).second) {
+            return fail(Errc::invalid_argument, "an archive is listed once");
+        }
+        list.push_back({{"url", a.url}, {"added", a.added}});
+    }
+    std::error_code ec;
+    std::filesystem::create_directories(trust_directory(ledger_directory), ec);
+    const std::string text = json{{"version", 1}, {"archives", list}}.dump(2) + "\n";
+    return detail::write_file(archives_file(ledger_directory), as_bytes(text), true);
+}
+
+std::vector<std::string> archive_fallbacks(const std::vector<ArchiveLink>& archives,
+                                           std::string_view token) {
+    std::vector<std::string> out;
+    for (const ArchiveLink& a : archives) {
+        if (out.size() == max_archive_links) {
+            break;
+        }
+        out.push_back(a.url + "/c/" + std::string(token));
+    }
+    return out;
+}
+
 std::filesystem::path membership_proof_path(const std::filesystem::path& ledger_directory,
                                             const protocol::Id& node) {
     return trust_directory(ledger_directory) / "proofs" / (to_hex(node.bytes()) + ".cbor");
