@@ -13,6 +13,8 @@
 #include <string_view>
 #include <vector>
 
+#include <nlohmann/json_fwd.hpp>
+
 #include <kanhe/core/crypto.hpp>
 #include <kanhe/core/error.hpp>
 #include <kanhe/ledger/ledger.hpp>
@@ -124,6 +126,7 @@ struct ApiOptions {
     /// nullopt passes it on. `opened` is called
     /// once, with the ledger, before the server serves; `tick` about once a
     /// second; `stopping` once when the server stops (answer what waits).
+    /// `status` adds to GET /v1/status's answer (archive.hpp: `archives`).
     struct Extension {
         std::function<bool(const http::Request&, std::string_view address,
                            Application::Respond respond)>
@@ -133,6 +136,7 @@ struct ApiOptions {
         std::function<void(const ledger::Ledger&)> opened{};
         std::function<void()> tick{};
         std::function<void()> stopping{};
+        std::function<void(nlohmann::json& status)> status{};
     };
     std::vector<Extension> extensions;
     /// Credentials (spec/credentials.md): with a credential key and its base
