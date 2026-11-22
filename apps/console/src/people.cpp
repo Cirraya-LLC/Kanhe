@@ -692,7 +692,7 @@ http::Response Console::tokens_route(const http::Request& request) const {
         if (!node::valid_token_name(token_name) || !scopes) {
             return error(400, "invalid_argument",
                          "a token's name is 1-64 letters, digits, '.', '_', or '-'; its scopes "
-                         "are read, submit, admin, peer, executor");
+                         "are read, submit, admin, peer, executor, archive");
         }
         if (std::ranges::any_of(*tokens, [&](const auto& t) { return t.name == token_name; })) {
             return error(409, "conflict", "a token named " + token_name + " exists");

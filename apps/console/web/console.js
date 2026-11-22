@@ -2273,6 +2273,7 @@ function archivesView() {
     const area = el("section", { id: "archives", "aria-labelledby": "archives-title", "aria-live": "polite" });
     const head = [el("h2", { id: "archives-title", text: t("archives.title") }),
                   el("p", { class: "hint", text: t("archives.intro") }),
+                  el("p", { class: "hint", text: t("archives.token") }),
                   el("p", { class: "hint", id: "archives-hint", text: t("archives.hint") })];
     area.replaceChildren(...head, el("p", { class: "hint", text: t("archives.checking") }));
     const said = el("div", { role: "status" });
@@ -2670,7 +2671,7 @@ async function tokensView() {
         }],
     ], listed.tokens));
     const [nameField, name] = field("token-name", t("column.name"), t("tokens.name_hint"), { maxlength: 64 });
-    const boxes = ["read", "submit", "executor", "admin"].map((x) => {
+    const boxes = ["read", "submit", "executor", "archive", "admin"].map((x) => {
         const box = el("input", { type: "checkbox", value: x, checked: x === "read" });
         return [box, el("label", {}, box, " ", t(`tokens.scope.${x}`))];
     });
