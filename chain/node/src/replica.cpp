@@ -438,7 +438,8 @@ Result<SyncReport> sync_replica(const Client& primary, ledger::Ledger& replica,
             witnesses.push_back(c.witness);
         }
     }
-    for (std::uint64_t start = have->size();;) {
+    std::uint64_t start = options.from ? options.from->cosignatures : have->size();
+    for (;;) {
         auto cosignatures =
             fetch_array(primary, std::format("/v1/cosignatures?start={}&count={}", start, batch));
         if (!cosignatures) {
@@ -469,12 +470,14 @@ Result<SyncReport> sync_replica(const Client& primary, ledger::Ledger& replica,
             break;
         }
     }
+    report.next.cosignatures = start;
 
     // Time-stamp tokens (v0.11), each checked as the primary kept it: over a
     // checkpoint the replica holds, verifying with its signing certificate.
     // One over a checkpoint not copied yet waits for the next sync; a primary
     // from before tokens answers 404 and keeps none.
-    for (std::uint64_t start = replica.timestamp_count();;) {
+    start = options.from ? options.from->timestamps : replica.timestamp_count();
+    for (;;) {
         auto tokens =
             fetch_array(primary, std::format("/v1/timestamps?start={}&count={}", start, batch));
         if (!tokens) {
@@ -505,17 +508,19 @@ Result<SyncReport> sync_replica(const Client& primary, ledger::Ledger& replica,
                             "the primary sent a time-stamp token that fails");
             }
             ++report.timestamps;
+            ++start;
         }
         if (waiting || tokens->size() < batch) {
             break;
         }
-        start += tokens->size();
     }
+    report.next.timestamps = start;
 
     // Open-network cosignatures (v0.13), as tokens are: each one of a
     // checkpoint the replica holds, verified; a primary from before them
     // answers 404 and keeps none.
-    for (std::uint64_t start = replica.network_cosignature_count();;) {
+    start = options.from ? options.from->network_cosignatures : replica.network_cosignature_count();
+    for (;;) {
         auto page = fetch_array(
             primary, std::format("/v1/network-cosignatures?start={}&count={}", start, batch));
         if (!page) {
@@ -552,12 +557,13 @@ Result<SyncReport> sync_replica(const Client& primary, ledger::Ledger& replica,
                             "the primary sent a network cosignature that fails");
             }
             ++report.network_cosignatures;
+            ++start;
         }
         if (waiting || page->size() < batch) {
             break;
         }
-        start += page->size();
     }
+    report.next.network_cosignatures = start;
 
     // The entries past the last checkpoint, for a client's mirror.
     while (options.tail && replica.size() < report.primary_size) {

@@ -125,7 +125,9 @@ cbor::Value digests_value(const std::vector<crypto::Digest>& digests) {
 
 /// read_or_peer, submit_or_peer: a read (or submit) token, or a peer's (whom
 /// the route then checks). The ones with executor take an executor's token
-/// too, which the route then restricts.
+/// too, which the route then restricts. read_or_archive: what a replica
+/// copies, which an archive's token reaches too; admin_or_archive: the list
+/// of published records, which an archive sees without their fields.
 enum class Access {
     open,
     read,
@@ -137,6 +139,8 @@ enum class Access {
     read_or_executor,
     read_peer_or_executor,
     submit_or_executor,
+    read_or_archive,
+    admin_or_archive,
 };
 
 /// The token scopes that may use a route of `access` (not open).
@@ -165,6 +169,10 @@ constexpr Scopes allowed_scopes(Access access) noexcept {
         return s(Scope::read) | s(Scope::peer) | s(Scope::executor);
     case Access::submit_or_executor:
         return s(Scope::submit) | s(Scope::executor);
+    case Access::read_or_archive:
+        return s(Scope::read) | s(Scope::archive);
+    case Access::admin_or_archive:
+        return s(Scope::admin) | s(Scope::archive);
     }
     return 0;
 }
@@ -1385,7 +1393,8 @@ struct LedgerApi::State {
         const bool token_only = r.path == "/metrics" || r.path.starts_with("/v1/vault/") ||
                                 r.path == "/v1/contracts/due";
         if (access == Access::open ||
-            (access == Access::read && options.public_read && !token_only)) {
+            ((access == Access::read || access == Access::read_or_archive) && options.public_read &&
+             !token_only)) {
             principal = "public";
             return std::nullopt;
         }
@@ -1433,8 +1442,7 @@ struct LedgerApi::State {
         std::string organization;
         ledger->read_state(
             [&](const protocol::LedgerState& s) { organization = s.organization(); });
-        return json_response(
-            200, {{"ledger_id", hex(ledger->id())},
+        json body{{"ledger_id", hex(ledger->id())},
                   {"organization", organization},
                   {"hash", crypto::name(ledger->hash())},
                   {"size", ledger->size()},
@@ -1451,7 +1459,13 @@ struct LedgerApi::State {
                   // Whether its keys and attestations carry its evidence
                   // past the classical algorithms (spec v0.21).
                   {"long_term", long_term.status(*ledger, clock->now())},
-                  {"version", options.version}});
+                  {"version", options.version}};
+        for (const ApiOptions::Extension& extension : options.extensions) {
+            if (extension.status) {
+                extension.status(body);
+            }
+        }
+        return json_response(200, body);
     }
 
     json cluster_json() const {
@@ -1991,10 +2005,19 @@ struct LedgerApi::State {
                 {"published_at", p.published_at}};
     }
 
-    http::Response published_list() const {
+    /// GET /v1/published: for an admin, each with its fields; for an
+    /// archive, which fetches each one's evidence at its address, only the
+    /// token, the record, and when it was published.
+    http::Response published_list(bool admin) const {
         nlohmann::json list = nlohmann::json::array();
         for (const Published& p : list_published(options.directory)) {
-            list.push_back(published_json(p));
+            if (admin) {
+                list.push_back(published_json(p));
+            } else {
+                list.push_back({{"token", p.token},
+                                {"record", hex(p.record)},
+                                {"published_at", p.published_at}});
+            }
         }
         return json_response(200, list);
     }
@@ -4760,7 +4783,7 @@ struct LedgerApi::State {
                 return method_not_allowed("GET, POST");
             }
             found = post ? Routed{Endpoint::publish, Access::admin}
-                         : Routed{Endpoint::published_list, Access::admin};
+                         : Routed{Endpoint::published_list, Access::admin_or_archive};
         } else if (match("/v1/published/")) {
             if (r.method != "DELETE") {
                 return method_not_allowed("DELETE");
@@ -4768,13 +4791,13 @@ struct LedgerApi::State {
             found = Routed{Endpoint::unpublish, Access::admin, rest};
         } else if (path == "/v1/cosignatures") {
             found = post ? Routed{Endpoint::add_cosignature, Access::admin}
-                         : Routed{Endpoint::cosignatures, Access::read};
+                         : Routed{Endpoint::cosignatures, Access::read_or_archive};
         } else if (path == "/v1/timestamps") {
             found = post ? Routed{Endpoint::add_timestamp, Access::admin}
-                         : Routed{Endpoint::timestamps, Access::read};
+                         : Routed{Endpoint::timestamps, Access::read_or_archive};
         } else if (path == "/v1/network-cosignatures") {
             found = post ? Routed{Endpoint::add_network_cosignature, Access::admin}
-                         : Routed{Endpoint::network_cosignatures, Access::read};
+                         : Routed{Endpoint::network_cosignatures, Access::read_or_archive};
         } else {
             static constexpr std::array<std::pair<std::string_view, Endpoint>, 6> fixed{{
                 {"/metrics", Endpoint::metrics},
@@ -4793,7 +4816,11 @@ struct LedgerApi::State {
             }};
             for (const auto& [name, endpoint] : fixed) {
                 if (path == name) {
-                    found = Routed{endpoint, Access::read};
+                    // What a replica copies, an archive's token reaches too.
+                    const bool copied = endpoint == Endpoint::status ||
+                                        endpoint == Endpoint::entries ||
+                                        endpoint == Endpoint::checkpoints;
+                    found = Routed{endpoint, copied ? Access::read_or_archive : Access::read};
                 }
             }
             for (const auto& [prefix, endpoint] : prefixed) {
@@ -4879,7 +4906,7 @@ struct LedgerApi::State {
         case Endpoint::credential:
             return credential(r.path);
         case Endpoint::published_list:
-            return published_list();
+            return published_list(has_scope(scopes, Scope::admin));
         case Endpoint::publish:
             return publish(r);
         case Endpoint::unpublish:

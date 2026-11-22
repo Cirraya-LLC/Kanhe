@@ -10,6 +10,7 @@
 #include <kanhe/client/support.hpp>
 #include <kanhe/ledger/environment.hpp>
 #include <kanhe/ledger/storage.hpp>
+#include <kanhe/node/archive.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/peers.hpp>
 #include <kanhe/node/published.hpp>
@@ -56,7 +57,13 @@ bool id_in(std::string_view path, std::string_view prefix) {
 bool backup_path_allowed(std::string_view path) {
     if (path == node::tokens_file || path == "vault/vault.pub" || path == "vault/vault.key" ||
         path == node::peers_file || path == "witnesses.json" || path == "relay.json" ||
-        path == "trust/nodes.json" || id_in(path, "trust/proofs/")) {
+        path == "trust/nodes.json" || path == "trust/archives.json" ||
+        id_in(path, "trust/proofs/")) {
+        return true;
+    }
+    // The ledgers archived here (archive add): their copies, kept evidence,
+    // and tokens.
+    if (node::archive_backup_path_allowed(path)) {
         return true;
     }
     constexpr std::string_view pending = "contracts/pending/";
@@ -135,6 +142,15 @@ std::vector<ledger::BackupFile> backup_files(const std::filesystem::path& dir, b
     // The trust nodes this ledger belongs to, and their proofs (spec v0.16).
     add("trust/nodes.json");
     add_directory("trust/proofs/");
+    // The archives that keep this ledger, which its links name.
+    add("trust/archives.json");
+    // The ledgers archived here: each one's replica (as a backup of its own,
+    // in pieces), the evidence kept of its published records, its token.
+    ledger::SystemClock clock;
+    for (auto& [path, content] : unwrap(node::archive_backup_files(dir, clock, shared_provider()),
+                                        "reading the archives")) {
+        out.push_back({std::move(path), std::move(content)});
+    }
     if (vault) {
         add("vault/vault.pub");
         add("vault/vault.key");
@@ -210,7 +226,7 @@ Result<ledger::BackupSummary> restore_into(std::istream& in, const std::filesyst
             const std::filesystem::path target = dir / f.path;
             std::error_code ec;
             std::filesystem::create_directories(target.parent_path(), ec);
-            for (const char* top : {"vault", "console", "access"}) {
+            for (const char* top : {"vault", "console", "access", "archive"}) {
                 if (f.path.starts_with(top)) {
                     std::filesystem::permissions(dir / top, std::filesystem::perms::owner_all,
                                                  std::filesystem::perm_options::replace, ec);

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <kanhe/core/protocol/record.hpp>
+#include <kanhe/node/trust.hpp>
 
 #include "commands.hpp"
 #include "output.hpp"
@@ -29,6 +30,16 @@ std::string address_of(const Args& args, const client::Session& session, const s
     return base + "/c/" + token;
 }
 
+/// Where the archives that keep this ledger answer the address too (trust
+/// archive add), on the ledger's own directory; none through a server.
+std::vector<std::string> fallbacks_of(const client::Session& session, const std::string& token) {
+    if (!session.server_url().empty()) {
+        return {};
+    }
+    const auto archives = node::load_archive_links(session.directory());
+    return archives ? node::archive_fallbacks(*archives, token) : std::vector<std::string>{};
+}
+
 Json published_json(const Args& args, const client::Session& session,
                     const client::Session::PublishedRecord& p) {
     Json fields = Json::array();
@@ -37,6 +48,7 @@ Json published_json(const Args& args, const client::Session& session,
     }
     return {{"token", p.token},
             {"address", address_of(args, session, p.token)},
+            {"fallbacks", fallbacks_of(session, p.token)},
             {"record", id_json(p.record)},
             {"fields", fields},
             {"published", format_time(p.published_at)}};
@@ -75,6 +87,9 @@ int cmd_record_publish(const Args& args) {
     } else {
         std::println("published {} at {} ({})", short_id(record),
                      address_of(args, session, published.token), field_list(published.fields));
+        for (const std::string& f : fallbacks_of(session, published.token)) {
+            std::println("  also at {} (an archive that keeps this ledger)", f);
+        }
         std::println("whoever holds the address gets the record's evidence as it is then; "
                      "keep it as private as the fields it shows");
     }

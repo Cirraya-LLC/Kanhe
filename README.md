@@ -316,7 +316,7 @@ The `kanhe` tool controls every part of a ledger:
 | Scripts | `script approve`, `script list`, `script show`, `script check`, `script revoke`, `record recompute` |
 | Claims | `claim issue`, `claim list`, `claim show`, `claim revoke` |
 | Credentials | `credential key add\|list\|revoke`, `credential issue`, `credential list`, `credential show`, `credential revoke`, `credential status`, `credential did-document`, `credential verify` |
-| Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch` (a member's) |
+| Trust nodes | `trust member add\|list\|show\|suspend\|resume\|end\|revoke` (a trust node's), `trust node add\|list\|remove\|fetch`, `trust archive add\|list\|remove\|check` (a member's) |
 | Proofs | `checkpoint create`, `checkpoint list`, `checkpoint show`, `checkpoint cosign-request`, `checkpoint add-cosignature`, `checkpoint timestamp`, `checkpoint add-timestamp`, `checkpoint timestamps`, `checkpoint note`, `checkpoint network-cosign`, `checkpoint network-cosignatures`, `proof inclusion`, `proof consistency`, `proof state`, `receipt` |
 | Witnesses | `witness add-log`, `witness cosign`, `witness status`, `witness remove-log`; `witness register`, `witness registered`, `witness unregister` (public witnesses, and open networks' with `--vkey`); `witness network-entry` |
 | Evidence | `export`, `verify`, `evidence renew`, `evidence prove`, `evidence proof list\|remove`, `inspect`, `qr` |
@@ -325,6 +325,7 @@ The `kanhe` tool controls every part of a ledger:
 | Server | `serve`, `token create`, `token list`, `token show`, `token revoke` |
 | Clusters | `cluster init`, `cluster join`, `cluster add`, `cluster status`, `cluster remove`, `cluster step-down` |
 | Replicas | `replica init`, `replica sync`, `replica status`, `replica promote` |
+| Archives | `archive config`, `archive add`, `archive list`, `archive show`, `archive sync`, `archive attest`, `archive remove` |
 | Backups | `backup create`, `backup verify`, `backup restore` |
 | Relays | `relay key init`, `relay use`, `relay show`, `relay stop`; `serve --relay-dir`, `serve --relay-key` |
 | Other organizations | `peer invite`, `peer accept`, `peer add`, `peer list`, `peer show`, `peer remove`, `access request`, `access send`, `access inbox`, `access dismiss`, `access grant`, `access answer`, `access fetch`, `access accept`, `access receipt`, `access list` |
@@ -629,6 +630,43 @@ Renew evidence meant to last before 2030, and again as attestations improve. A v
 also check a bundle as it would after a break, distrusting an algorithm from a date
 (`verify --distrust`): a signature by it then counts only where a dated attestation from before
 that date covers it.
+
+### Archives
+
+A certificate is printed once and read for decades, longer than its issuer may run a server.
+Another server, a trust node typically, can archive the issuer's ledger and answer for it once
+the issuer's own server is gone. The issuer gives it a token that reaches only what a replica
+copies and the list of its published records (`token create NAME --scope archive`); the archive
+(`archive add LEDGER_ID --source URL --token-file FILE`) keeps a verified replica (commitments
+and public metadata, never sealed data) and the newest verified evidence of each published
+record, fetched again when the record changes and dropped when the issuer takes it down.
+`kanhe serve` then answers, with no token, `/a/LEDGER_ID/c/TOKEN` (the kept evidence, with a
+renewal from the archive's copy appended) and `/a/LEDGER_ID/v1/checkpoint`, `/v1/consistency`,
+and `/v1/renewal`, so that `evidence renew --server https://HOST/a/LEDGER_ID` works as with the
+issuer's server; it syncs each archived ledger every hour. An archive holds no key of the
+issuer's: it cannot make or change evidence, only keep what the issuer served, as of its last
+sync.
+
+Once a ledger's newest attestation is older than a year (`archive config --attest-interval`),
+the archive re-attests its latest checkpoint: each public witness it is configured with that has
+not cosigned it yet cosigns it, dated, and each time-stamp authority stamps it afresh, kept beside the checkpoint so that
+renewals carry them (`archive attest` does it now). A witness the issuer itself uses is never
+moved to a later checkpoint, so the issuer's own requests go on. Choose a witness whose key is ML-DSA; `kanhe status`
+warns when every witness configured is classical. The issuer lists the archives that keep it
+(`trust archive add https://HOST/a/LEDGER_ID`, at most four); `kanhe qr` and `record publish`
+then name them as fallbacks of each published record's address (`&a=`).
+
+```sh
+# The issuer: a token for the archive.
+kanhe token create trust-node --scope archive --out archive.token
+# The trust node: what re-attests, then the issuer archived and served.
+kanhe archive config --witness https://witness.example.org --tsa https://tsa.example.org/tsa
+kanhe archive add <ledger-id> --source https://ledger.example.com --token-file archive.token
+kanhe serve --log-key log.key
+# The issuer lists the archive; its links name it.
+kanhe trust archive add https://trust.example.org/a/<ledger-id>
+kanhe trust archive check
+```
 
 ## Browser verifier
 

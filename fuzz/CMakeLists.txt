@@ -128,6 +128,10 @@ if(TARGET kanhe_node)
     kanhe_add_fuzzer(record_files_fuzz kanhe::node)
     # Published records' files and requests to publish one.
     kanhe_add_fuzzer(published_fuzz kanhe::node)
+    # What an archive reads: a member's list of published records, and its
+    # own state, config, and kept list; the paths its backups restore.
+    kanhe_add_fuzzer(archive_fuzz kanhe::node)
+    target_compile_features(archive_fuzz PRIVATE cxx_std_26)
     # Proposal and consent files (.kanhe) between ledgers.
     kanhe_add_fuzzer(exchange_file_fuzz kanhe::core)
     # Invitation codes between organizations (khp_...).

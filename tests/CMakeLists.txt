@@ -82,6 +82,7 @@ add_executable(kanhe_tests
     node/record_files_test.cpp
     node/credentials_test.cpp
     node/published_test.cpp
+    node/archive_test.cpp
     node/contracts_api_test.cpp
     node/requests_api_test.cpp
     node/cluster_test.cpp
@@ -288,6 +289,10 @@ add_test(NAME trust_end_to_end
 # Records published at a private address (a certificate's QR code).
 add_test(NAME published_end_to_end
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/published.sh $<TARGET_FILE:kanhe>)
+# Archives: another server keeps a ledger and its published records' evidence,
+# serves and renews it after the ledger's own server is gone, and re-attests it.
+add_test(NAME archive_end_to_end
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/archive.sh $<TARGET_FILE:kanhe>)
 # Records as W3C Verifiable Credentials: issued, served, verified, revoked.
 add_test(NAME credentials_end_to_end
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/cli/credentials.sh $<TARGET_FILE:kanhe>)

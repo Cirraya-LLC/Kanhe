@@ -6,6 +6,7 @@ find_package(OpenSSL 3.5 REQUIRED COMPONENTS SSL)
 
 add_library(kanhe_node
     src/api.cpp
+    src/archive.cpp
     src/approvals.cpp
     src/client.cpp
     src/contracts.cpp

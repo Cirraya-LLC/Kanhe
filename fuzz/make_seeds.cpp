@@ -1663,6 +1663,31 @@ void published_seeds(const Seeds& seeds) {
              "encode"));
 }
 
+/// What an archive reads: a member's list of published records, an
+/// archived ledger's state and kept list, the archives' config, and a path
+/// a backup restores.
+void archive_seeds(const Seeds& seeds) {
+    const std::string record(64, 'b');
+    seeds.write("archive_fuzz", "list",
+                R"([{"token": "AAAAAAAAAAAAAAAAAAAAAA", "record": ")" + record +
+                    R"(", "published_at": 1791244800000}])");
+    seeds.write("archive_fuzz", "state",
+                R"({"version": 1, "source": "https://member.example.org", "created": 1,)"
+                R"( "organization": "Member", "size": 12, "checkpoint_time": 2,)"
+                R"( "last_sync": 3, "last_try": 3, "last_error": "", "unreachable_since": null,)"
+                R"( "attested_at": 4, "last_attest": null, "attest_problems": [],)"
+                R"( "cursors": {"cosignatures": 1, "timestamps": 0, "network_cosignatures": 0},)"
+                R"( "own": [], "published_problems": []})");
+    seeds.write("archive_fuzz", "kept",
+                R"({"version": 1, "bundles": [{"token": "AAAAAAAAAAAAAAAAAAAAAA", "record": ")" +
+                    record + R"(", "size": 5, "time": 1791244800000}]})");
+    seeds.write("archive_fuzz", "config",
+                R"({"version": 1, "witnesses": [], "authorities": ["http://tsa.example.org/"],)"
+                R"( "sync_interval": 3600, "attest_interval": 31536000})");
+    seeds.write("archive_fuzz", "path",
+                "archive/" + std::string(64, 'a') + "/published/AAAAAAAAAAAAAAAAAAAAAA.cbor");
+}
+
 /// A credential, signed; a status list; a base URL; a role; GZIP of ours and
 /// of another encoder (Python's, one dynamic block).
 void credential_seeds(const Seeds& seeds) {
@@ -2110,6 +2135,7 @@ int main(int argc, char** argv) {
         pending_call_seeds(seeds);
         record_file_seeds(seeds);
         published_seeds(seeds);
+        archive_seeds(seeds);
         credential_seeds(seeds);
         credential_evidence_seeds(seeds);
         invitation_seeds(seeds);

@@ -35,6 +35,17 @@ read_replica_info(const std::filesystem::path& directory);
 [[nodiscard]] Status write_replica_info(const std::filesystem::path& directory,
                                         const ReplicaInfo& info);
 
+/// Where a sync reads the primary's lists of attestations from: an index in
+/// each list of the primary's (GET /v1/cosignatures, /v1/timestamps,
+/// /v1/network-cosignatures).
+struct AttestationCursors {
+    std::uint64_t cosignatures = 0;
+    std::uint64_t timestamps = 0;
+    std::uint64_t network_cosignatures = 0;
+
+    friend bool operator==(const AttestationCursors&, const AttestationCursors&) = default;
+};
+
 struct SyncReport {
     std::uint64_t entries = 0;
     std::uint64_t checkpoints = 0;
@@ -45,6 +56,8 @@ struct SyncReport {
     /// The replica's size afterwards, and the primary's when asked.
     std::uint64_t size = 0;
     std::uint64_t primary_size = 0;
+    /// Where the next sync reads the primary's attestations from.
+    AttestationCursors next = {};
 };
 
 /// What a sync takes beyond the checkpoints and their entries.
@@ -57,6 +70,12 @@ struct SyncOptions {
     /// The sealed vault data of new records (a client fetches it when it
     /// needs it instead).
     bool vault = true;
+    /// Where to read the primary's attestations from, instead of the
+    /// replica's own counts: for a replica that keeps attestations of its
+    /// own beside the primary's (an archive, archive.hpp), whose counts then
+    /// run ahead of the primary's lists. The report's `next` says where the
+    /// next sync goes on. Reading one again keeps nothing twice.
+    std::optional<AttestationCursors> from = std::nullopt;
 };
 
 /// Creates a replica in `fs`, which must hold no ledger, from the

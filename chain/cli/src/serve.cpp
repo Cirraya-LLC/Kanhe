@@ -32,6 +32,7 @@
 #include <kanhe/client/witness.hpp>
 #include <kanhe/ledger/backup.hpp>
 #include <kanhe/node/api.hpp>
+#include <kanhe/node/archive.hpp>
 #include <kanhe/node/client.hpp>
 #include <kanhe/node/contracts.hpp>
 #include <kanhe/node/record_files.hpp>
@@ -328,6 +329,36 @@ int serve(const Args& args, const ServeDefaults& defaults) {
     } else if (args.has("credential-url")) {
         throw UsageError{"--credential-url goes with --credential-key"};
     }
+    // The ledgers archived beside this one (archive add): answered at
+    // /a/LEDGER/..., synced and re-attested on a thread of their own. A
+    // cluster's members share no such files: none serves them.
+    std::shared_ptr<node::ArchiveService> archives;
+    if (options.cluster) {
+        if (!node::archived_ledgers(dir).empty()) {
+            std::println(stderr, "archives: not served by a cluster member (they are kept beside "
+                                 "one server's ledger)");
+        }
+    } else {
+        const bool quiet = args.has("quiet");
+        archives = std::make_shared<node::ArchiveService>(dir, shared_provider(),
+                                                          [quiet](const std::string& line) {
+                                                              if (!quiet) {
+                                                                  std::println(stderr, "{}", line);
+                                                              }
+                                                          });
+        options.extensions.push_back(
+            {.handle =
+                 [archives](const node::http::Request& r, std::string_view,
+                            node::Application::Respond respond) {
+                     auto answer = archives->handle(r);
+                     if (!answer) {
+                         return false;
+                     }
+                     respond(std::move(*answer));
+                     return true;
+                 },
+             .status = [archives](nlohmann::json& status) { archives->status(status); }});
+    }
     // An application served beside the API (the console, the index) adds
     // its parts to the options.
     if (defaults.before_open) {
@@ -429,6 +460,7 @@ int serve(const Args& args, const ServeDefaults& defaults) {
                       options.credentials ? Json(options.credentials->base()->did) : Json(nullptr)},
                      {"network_witnesses",
                       options.note_key ? Json(options.network_witnesses.size()) : Json(nullptr)},
+                     {"archives", archives ? node::archived_ledgers(dir).size() : 0},
                      {"clock_offset_ms", ledger::SystemClock::offset()}};
         if (served_too) {
             started[served_too->first] = served_too->second;
@@ -446,6 +478,9 @@ int serve(const Args& args, const ServeDefaults& defaults) {
             const auto issuer = options.credentials->base();
             std::println("credentials: issuer {}, its DID document at {}", issuer->did,
                          issuer->did_document_url);
+        }
+        if (const std::size_t kept = archives ? node::archived_ledgers(dir).size() : 0; kept > 0) {
+            std::println("archives: {} ledgers kept, answered at /a/LEDGER_ID", kept);
         }
         if (options.keeper) {
             std::println(
@@ -512,6 +547,11 @@ int serve(const Args& args, const ServeDefaults& defaults) {
             [api = api.get(), dir, every, quiet = args.has("quiet")](const std::stop_token& stop) {
                 ask_witnesses_until(stop, *api, dir, every, quiet);
             });
+    }
+    // The archives' syncs and re-attestations, never in a request's path.
+    std::jthread archiving;
+    if (archives) {
+        archiving = std::jthread([archives](const std::stop_token& stop) { archives->run(stop); });
     }
     server.run();
     closing.now();
