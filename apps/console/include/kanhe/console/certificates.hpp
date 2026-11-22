@@ -125,12 +125,26 @@ certificate_of(const Kind& kind, const protocol::RecordState& record,
 /// The languages a certificate's page and default template come in.
 [[nodiscard]] bool certificate_language(std::string_view language) noexcept;
 
+/// The verifier page the console's certificate links open.
+inline constexpr std::string_view certificate_verifier = "https://kanhe.cirraya.com/verify/";
+
+/// The longest link verifier_link makes: its QR code then takes at most 109
+/// modules a side (version 23) at medium error correction, which a phone
+/// still reads from a printed certificate.
+inline constexpr std::size_t max_verifier_link = 800;
+
 /// The verifier's link a certificate's QR code holds:
-/// VERIFIER#l=LEDGER&r=RECORD&b=ADDRESS[&lang=LANGUAGE] (the page fetches the
-/// address and checks what it gets is the record of that ledger).
+/// VERIFIER#l=LEDGER&r=RECORD&b=ADDRESS[&a=ARCHIVE]...[&lang=LANGUAGE]. The
+/// page fetches the address and checks what it gets is the record of that
+/// ledger; if the address cannot be fetched (this ledger's server is gone),
+/// it tries each archive's address of the same record in turn
+/// (node::archive_fallbacks), and checks its answer the same way. Archives
+/// are named in their order, at most four, while the link stays within
+/// max_verifier_link characters; those that do not fit are left out.
 [[nodiscard]] std::string verifier_link(std::string_view verifier, const protocol::Id& ledger,
                                         const protocol::Id& record, std::string_view address,
-                                        std::string_view language = "en");
+                                        std::string_view language = "en",
+                                        const std::vector<std::string>& archives = {});
 
 /// A QR code of `text` as an SVG element (medium error correction, the
 /// quiet zone included), to put in a page.

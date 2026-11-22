@@ -13,6 +13,7 @@
 #include <fstream>
 #include <future>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
@@ -63,8 +64,11 @@
 #include <kanhe/node/executor.hpp>
 #include <kanhe/node/keeper.hpp>
 #include <kanhe/node/peers.hpp>
+#include <kanhe/node/published.hpp>
 #include <kanhe/node/record_files.hpp>
+#include <kanhe/node/server.hpp>
 #include <kanhe/node/sources.hpp>
+#include <kanhe/node/trust.hpp>
 
 #include "support/authenticator.hpp"
 #include "support/ledger_world.hpp"
@@ -3237,6 +3241,289 @@ TEST_CASE("a renewed proof file keeps its range proofs, checked again",
     REQUIRE(report);
     REQUIRE(report->range_proofs.size() == 1);
     CHECK(report->range_proofs[0].verified);
+}
+
+namespace {
+
+/// An archive's server as far as the console asks it: GET
+/// /a/LEDGER/v1/checkpoint, answered as the test says.
+class StubArchive final : public kanhe::node::Application {
+public:
+    void handle(http::Request request, std::string, Respond respond) override {
+        http::Response r;
+        {
+            const std::lock_guard lock(mutex_);
+            asked_.push_back(request.path);
+            r = answer_;
+        }
+        respond(std::move(r));
+    }
+    void answer(int status, kanhe::Bytes body) {
+        const std::lock_guard lock(mutex_);
+        answer_ = {};
+        answer_.status = status;
+        answer_.content_type = "application/cose";
+        answer_.body = std::move(body);
+    }
+    std::vector<std::string> asked() {
+        const std::lock_guard lock(mutex_);
+        return asked_;
+    }
+
+private:
+    std::mutex mutex_;
+    std::vector<std::string> asked_;
+    http::Response answer_;
+};
+
+/// A server on 127.0.0.1, on a thread of its own until destroyed.
+class ArchiveServer {
+public:
+    explicit ArchiveServer(kanhe::node::Application& app) : server_(app, options()) {
+        REQUIRE(server_.listen());
+        thread_ = std::thread([this] { server_.run(); });
+    }
+    ArchiveServer(const ArchiveServer&) = delete;
+    ArchiveServer& operator=(const ArchiveServer&) = delete;
+    ~ArchiveServer() {
+        server_.stop();
+        thread_.join();
+    }
+    [[nodiscard]] std::string url() const {
+        return "http://127.0.0.1:" + std::to_string(server_.port());
+    }
+
+private:
+    static kanhe::node::ServerOptions options() {
+        kanhe::node::ServerOptions o;
+        o.host = "127.0.0.1";
+        o.port = 0;
+        o.threads = 1;
+        o.request_timeout = std::chrono::seconds(10);
+        return o;
+    }
+    kanhe::node::Server server_;
+    std::thread thread_;
+};
+
+} // namespace
+
+TEST_CASE("the archives that keep this ledger: added once one answers a checkpoint it made",
+          "[console][archives]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    const std::string admin = f.w.session_for("Ada", console::Role::admin);
+    const std::string member = f.w.session_for("Mia", console::Role::member);
+    const std::string viewer = f.w.session_for("Vera", console::Role::viewer);
+    const auto log = f.w.keys.open("log");
+    REQUIRE(served.session.ledger().checkpoint(log));
+    const auto mine = served.session.ledger().latest_checkpoint();
+    REQUIRE(mine);
+    const auto ledger_id = served.session.state().ledger_id();
+    const std::string hex = kanhe::to_hex(ledger_id.bytes());
+    StubArchive stub;
+    ArchiveServer archive(stub);
+    const std::string at = archive.url() + "/a/" + hex;
+    auto listed = [&] {
+        return json_of(f.w.get("/console/api/archives", owner));
+    };
+    auto refused = [&](const nlohmann::json& request, int status, const std::string& code) {
+        const auto r = f.w.post_as("/console/api/archives", request, admin);
+        INFO(body(r));
+        CHECK(r.status == status);
+        CHECK(json_of(r)["error"]["code"] == code);
+    };
+    auto actions = [&] {
+        std::vector<std::string> out;
+        for (const console::Activity& a : console::read_activity(f.w.state, 50)) {
+            out.push_back(a.action);
+        }
+        return out;
+    };
+
+    // Owners and admins only, even to look: the console asks each archive.
+    CHECK(f.w.get("/console/api/archives", member).status == 403);
+    CHECK(f.w.get("/console/api/archives", viewer).status == 403);
+    CHECK(f.w.post_as("/console/api/archives", {{"url", at}}, member).status == 403);
+    CHECK(f.w.web.handle(request("GET", "/console/api/archives", "localhost:7470")).status == 401);
+    auto view = listed();
+    CHECK(view["archives"].empty());
+    CHECK(view["ledger"] == hex);
+    CHECK(view["max"] == 4);
+    CHECK(view["problem"].is_null());
+
+    // Not an archive's address for this ledger: nothing is asked.
+    refused({{"url", archive.url() + "/a/" + std::string(64, '0')}}, 400, "not_address");
+    refused({{"url", "ftp://archive.example/a/" + hex}}, 400, "not_address");
+    refused({{"url", at + "?x=1"}}, 400, "not_address");
+    refused({{"url", 7}}, 400, "invalid_argument");
+    refused(nlohmann::json::object(), 400, "invalid_argument");
+    CHECK(stub.asked().empty());
+
+    // An archive that answers an error, or no checkpoint, or another
+    // ledger's, or one with this ledger's id that this ledger never made
+    // (signed with its key, so only the comparison finds it), is not added.
+    const std::string missing = R"({"error": {"message": "no such ledger here"}})";
+    stub.answer(404, kanhe::Bytes(missing.begin(), missing.end()));
+    refused({{"url", at}}, 502, "unreachable");
+    CHECK(stub.asked().back() == "/a/" + hex + "/v1/checkpoint");
+    CHECK(json_of(f.w.post_as("/console/api/archives", {{"url", at}}, admin))["error"]["detail"] ==
+          "no such ledger here");
+    stub.answer(200, kanhe::Bytes{1, 2, 3});
+    refused({{"url", at}}, 422, "not_checkpoint");
+    kanhe::test::World other;
+    REQUIRE(other.ledger().checkpoint(other.log_key()));
+    stub.answer(200, other.ledger().latest_checkpoint()->encoded);
+    refused({{"url", at}}, 422, "other_ledger");
+    auto forged = mine->checkpoint;
+    forged.timestamp += 1;
+    const auto signed_forged = kanhe::protocol::sign_checkpoint(log, provider(), forged);
+    REQUIRE(signed_forged);
+    stub.answer(200, signed_forged->encoded);
+    refused({{"url", at}}, 422, "not_ours");
+    // Nothing answers there at all.
+    std::string nowhere;
+    {
+        StubArchive quiet;
+        const ArchiveServer gone(quiet);
+        nowhere = gone.url();
+    }
+    refused({{"url", nowhere}}, 502, "unreachable");
+    CHECK(kanhe::node::load_archive_links(f.w.dir.path)->empty());
+    CHECK(std::ranges::count(actions(), std::string("archives.add")) == 0);
+
+    // Its answer is a checkpoint this ledger made: added (the archive's
+    // server alone is completed with /a/LEDGER), logged, and listed with its
+    // latest copy.
+    stub.answer(200, mine->encoded);
+    const auto added = f.w.post_as("/console/api/archives", {{"url", archive.url() + "/"}}, admin);
+    INFO(body(added));
+    REQUIRE(added.status == 200);
+    CHECK(json_of(added)["added"] == at);
+    CHECK(json_of(added)["size"] == mine->checkpoint.tree_size);
+    auto links = kanhe::node::load_archive_links(f.w.dir.path);
+    REQUIRE(links);
+    REQUIRE(links->size() == 1);
+    CHECK((*links)[0].url == at);
+    CHECK((*links)[0].added == f.w.clock.now());
+    CHECK(std::ranges::count(actions(), std::string("archives.add")) == 1);
+    view = listed();
+    REQUIRE(view["archives"].size() == 1);
+    CHECK(view["archives"][0]["url"] == at);
+    CHECK(view["archives"][0]["size"] == mine->checkpoint.tree_size);
+    CHECK(view["archives"][0]["time"] == mine->checkpoint.timestamp);
+    CHECK(view["archives"][0]["problem"].is_null());
+    refused({{"url", at}}, 409, "listed");
+    // One that stops answering is listed with why.
+    stub.answer(503, {});
+    view = listed();
+    CHECK(view["archives"][0]["problem"] == "unreachable");
+    CHECK(view["archives"][0]["size"].is_null());
+
+    // Removed, and logged; a second time finds nothing.
+    const auto removed = f.w.post_as("/console/api/archives", {{"remove", at}}, owner);
+    REQUIRE(removed.status == 200);
+    CHECK(kanhe::node::load_archive_links(f.w.dir.path)->empty());
+    CHECK(std::ranges::count(actions(), std::string("archives.remove")) == 1);
+    CHECK(f.w.post_as("/console/api/archives", {{"remove", at}}, owner).status == 404);
+
+    // At most four; and none whose address would make a certificate's link
+    // too long for its QR code. Both are refused before the archive is asked.
+    std::vector<kanhe::node::ArchiveLink> four;
+    for (int i = 1; i <= 4; ++i) {
+        four.push_back({"https://keep-" + std::to_string(i) + ".example/a/" + hex, 1});
+    }
+    REQUIRE(kanhe::node::save_archive_links(f.w.dir.path, ledger_id, four));
+    const std::size_t before = stub.asked().size();
+    refused({{"url", at}}, 409, "full");
+    REQUIRE(kanhe::node::save_archive_links(f.w.dir.path, ledger_id, {}));
+    refused({{"url", archive.url() + "/" + std::string(700, 'x') + "/a/" + hex}}, 409, "too_long");
+    CHECK(stub.asked().size() == before);
+
+    // A damaged list is shown as such, and not written over.
+    kanhe::client::write_file(f.w.dir.path / "trust" / "archives.json", kanhe::as_bytes("[1]"),
+                              true);
+    view = listed();
+    CHECK(view["archives"].empty());
+    CHECK(view["problem"].get<std::string>().contains("damaged"));
+    stub.answer(200, mine->encoded);
+    refused({{"url", at}}, 500, "internal");
+    CHECK(kanhe::client::read_file(f.w.dir.path / "trust" / "archives.json") ==
+          kanhe::Bytes{'[', '1', ']'});
+    std::filesystem::remove(f.w.dir.path / "trust" / "archives.json");
+
+    // A locked console changes nothing, as with its other settings; the list
+    // is still shown.
+    f.w.keys.lock();
+    refused({{"url", at}}, 423, "locked");
+    CHECK(f.w.post_as("/console/api/archives", {{"remove", at}}, owner).status == 423);
+    CHECK(f.w.get("/console/api/archives", owner).status == 200);
+}
+
+TEST_CASE("a certificate's link names the archives that keep the ledger",
+          "[console][archives][certificates]") {
+    FirstRunWorld f;
+    Served served(f);
+    const std::string owner = f.made["session"].get<std::string>();
+    console::Kind kind;
+    kind.type = "example.org.diploma/1";
+    kind.name = "Diploma";
+    kind.fields = {{"name", "Name", console::FieldType::text, true, true}};
+    kind.printed = {"name"};
+    console::save_kinds(f.w.state, {kind});
+    const auto record = served.session.submit(
+        f.w.keys.open("root"),
+        kanhe::protocol::RecordRegisterBody{
+            kind.type, kanhe::Bytes(32, 7), 1, {}, std::nullopt, std::nullopt, {}},
+        std::nullopt);
+    const auto published =
+        kanhe::node::publish_record(f.w.dir.path, record, {}, f.w.entropy, f.w.clock);
+    REQUIRE(published);
+    const std::string token = published->token;
+    const auto ledger_id = served.session.state().ledger_id();
+    const std::string hex = kanhe::to_hex(ledger_id.bytes());
+    const std::string own = "&b=http://localhost:7470/c/" + token;
+    auto link = [&] {
+        const auto view = json_of(f.w.get("/console/api/certificates", owner));
+        REQUIRE(view["certificates"].size() == 1);
+        return view["certificates"][0]["verify_url"].get<std::string>();
+    };
+    auto page = [&](const std::string& language) {
+        const auto r =
+            f.w.get("/console/api/certificates/" + token + "/page?language=" + language, owner);
+        REQUIRE(r.status == 200);
+        return body(r);
+    };
+
+    // None listed: the link is as it always was.
+    CHECK(link().ends_with(own));
+    CHECK_FALSE(link().contains("&a="));
+
+    // Two: each after the certificate's own address, in the list's order,
+    // in the list of certificates, the page to print, and its QR code.
+    const std::string one = "https://one.example/a/" + hex;
+    const std::string two = "http://two.example:8080/a/" + hex;
+    REQUIRE(kanhe::node::save_archive_links(f.w.dir.path, ledger_id, {{one, 1}, {two, 2}}));
+    const std::string both = own + "&a=" + one + "/c/" + token + "&a=" + two + "/c/" + token;
+    CHECK(link().ends_with(both));
+    const std::string escaped = [&] {
+        std::string out;
+        for (const char c : both + "&lang=zh-Hant") {
+            out += c == '&' ? std::string("&amp;") : std::string(1, c);
+        }
+        return out;
+    }();
+    CHECK(page("zh-Hant-HK").contains(escaped));
+    const auto qr = f.w.get("/console/api/certificates/" + token + "/qr?language=en", owner);
+    REQUIRE(qr.status == 200);
+    CHECK(body(qr).contains("<svg"));
+
+    // A damaged list: the links name none, and Settings says so.
+    kanhe::client::write_file(f.w.dir.path / "trust" / "archives.json", kanhe::as_bytes("{"), true);
+    CHECK(link().ends_with(own));
+    CHECK_FALSE(page("en").contains("&amp;a="));
+    CHECK_FALSE(json_of(f.w.get("/console/api/archives", owner))["problem"].is_null());
 }
 
 #if defined(BO_PROGRAM)

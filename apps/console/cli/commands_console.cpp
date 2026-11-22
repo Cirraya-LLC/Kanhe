@@ -311,7 +311,9 @@ std::vector<CommandSpec> console_commands() {
                 "The verifier page (default: https://kanhe.cirraya.com/verify/)"},
                {"language", "LANG", "The page's language: en, zh-Hant, or zh-Hans (default: en)"},
                {"sheet", "FILE", "The kind's sheet (default: the console's kinds)"}}),
-         cmd_certificate_show},
+         cmd_certificate_show,
+         "The link names, after the certificate's own address, the archives that keep the\n"
+         "ledger (kanhe trust archive): the page tries them when the ledger's server is gone."},
         {{"certificate", "withdraw"},
          "Take a certificate's address down (the record stays on the ledger)",
          "Certificates",
@@ -343,7 +345,9 @@ std::vector<CommandSpec> console_commands() {
          "A template fills {{kind}}, {{issuer}}, {{issued}}, {{record}}, {{verify_url}},\n"
          "{{qr}} (the QR code, SVG), {{fields}} (the printed fields as a list), and {{NAME}} or\n"
          "{{field.NAME}} for one printed field; a name it does not know stops it before\n"
-         "anything is written. Revoked and replaced certificates are not printed."},
+         "anything is written. Revoked and replaced certificates are not printed. Each link\n"
+         "names the archives that keep the ledger (kanhe trust archive) as they are when it\n"
+         "is printed: the page tries them when the ledger's server is gone."},
         {{"settings", "show"},
          "Show the web console's settings",
          "Console",
@@ -351,7 +355,10 @@ std::vector<CommandSpec> console_commands() {
          0,
          0,
          with({ledger_option}),
-         cmd_console_settings_show},
+         cmd_console_settings_show,
+         "With the archives that keep the ledger, which certificates' links name after their\n"
+         "own address (kanhe trust archive adds and removes them; so does the console's\n"
+         "Settings page)."},
         {{"settings", "set"},
          "Change the web console's settings",
          "Console",

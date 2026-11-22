@@ -45,8 +45,10 @@
 #include <kanhe/node/credentials.hpp>
 #include <kanhe/node/record_files.hpp>
 #include <kanhe/node/server.hpp>
+#include <kanhe/node/trust.hpp>
 #include <kanhe/search/served.hpp>
 #include <kanhe/verifier/credentials.hpp>
+#include <kanhe/verifier/report.hpp>
 
 #include "console_commands.hpp"
 #include "output.hpp"
@@ -1915,15 +1917,34 @@ int cmd_console_user_passkeys(const Args& args) {
 
 namespace {
 
-Json settings_json(const console::Settings& settings) {
-    return {{"language", settings.language ? Json(*settings.language) : Json()},
-            {"backup_folder",
-             settings.backup_folder ? Json(settings.backup_folder->string()) : Json()}};
+/// The archives that keep the ledger, as Settings lists them (kanhe trust
+/// archive changes them).
+std::vector<node::ArchiveLink> archives_in(const std::filesystem::path& ledger) {
+    auto archives = node::load_archive_links(ledger);
+    if (!archives) {
+        throw CommandError{(ledger / "trust" / "archives.json").string() +
+                           ": the list of archives is damaged"};
+    }
+    return std::move(*archives);
 }
 
-void print_settings(const Args& args, const console::Settings& settings) {
+Json settings_json(const console::Settings& settings,
+                   const std::vector<node::ArchiveLink>& archives) {
+    Json listed = Json::array();
+    for (const node::ArchiveLink& a : archives) {
+        listed.push_back({{"url", a.url}, {"added", verifier::iso_time(a.added)}});
+    }
+    return {
+        {"language", settings.language ? Json(*settings.language) : Json()},
+        {"backup_folder", settings.backup_folder ? Json(settings.backup_folder->string()) : Json()},
+        {"archives", listed}};
+}
+
+void print_settings(const Args& args, const console::Settings& settings,
+                    const std::filesystem::path& ledger) {
+    const std::vector<node::ArchiveLink> archives = archives_in(ledger);
     if (args.json()) {
-        print_json(settings_json(settings));
+        print_json(settings_json(settings, archives));
         return;
     }
     std::println("language: {}", settings.language.value_or("each browser's own"));
@@ -1931,6 +1952,12 @@ void print_settings(const Args& args, const console::Settings& settings) {
                                           ? settings.backup_folder->string()
                                           : std::string("none chosen (console settings set "
                                                         "--backup-folder DIR)"));
+    if (archives.empty()) {
+        std::println("archives: none (kanhe trust archive add URL)");
+    }
+    for (const node::ArchiveLink& a : archives) {
+        std::println("archive: {} (added {})", a.url, verifier::format_time(a.added));
+    }
 }
 
 } // namespace
@@ -1939,7 +1966,7 @@ int cmd_console_settings_show(const Args& args) {
     const std::filesystem::path dir = args.console_ledger();
     require_ledger_directory(dir);
     try {
-        print_settings(args, console::load_settings(console::state_directory(dir)));
+        print_settings(args, console::load_settings(console::state_directory(dir)), dir);
     } catch (const std::runtime_error& e) {
         throw CommandError{e.what()};
     }
@@ -1983,7 +2010,7 @@ int cmd_console_settings_set(const Args& args) {
         }
     }
     console::save_settings(state, settings);
-    print_settings(args, settings);
+    print_settings(args, settings, dir);
     return exit_ok;
 }
 

@@ -25,6 +25,7 @@
 #include <kanhe/core/protocol/record.hpp>
 #include <kanhe/ledger/environment.hpp>
 #include <kanhe/node/credentials.hpp>
+#include <kanhe/node/trust.hpp>
 #include <kanhe/verifier/credentials.hpp>
 
 #include "console_commands.hpp"
@@ -93,6 +94,18 @@ std::string verifier_of(const Args& args) {
         throw UsageError{"--verifier-url must be an http(s) URL without a #fragment"};
     }
     return verifier;
+}
+
+/// The archives that keep the ledger (`kanhe trust archive`), which a
+/// certificate's link names after its own address: those of a ledger
+/// directory (a mirror of a server's lists none).
+std::vector<node::ArchiveLink> archives_of(const client::Session& session) {
+    auto archives = node::load_archive_links(session.directory());
+    if (!archives) {
+        throw CommandError{(session.directory() / "trust" / "archives.json").string() +
+                           ": the list of archives is damaged"};
+    }
+    return std::move(*archives);
 }
 
 std::string language_of(const Args& args) {
@@ -516,9 +529,11 @@ int cmd_certificate_show(const Args& args) {
     const console::Certificate& c = find_certificate(all, args.positional().front());
     const std::string base = address_base(args, session);
     const std::string link =
-        base.empty() ? std::string()
-                     : console::verifier_link(verifier_of(args), session.state().ledger_id(),
-                                              c.record, base + "/c/" + c.token, language_of(args));
+        base.empty()
+            ? std::string()
+            : console::verifier_link(verifier_of(args), session.state().ledger_id(), c.record,
+                                     base + "/c/" + c.token, language_of(args),
+                                     node::archive_fallbacks(archives_of(session), c.token));
     if (args.json()) {
         Json j(console::certificate_json(c, base + "/c/" + c.token));
         j["verify_url"] = link.empty() ? Json(nullptr) : Json(link);
@@ -594,9 +609,11 @@ int cmd_certificate_print(const Args& args) {
     const std::filesystem::path out = args.need("out");
     std::filesystem::create_directories(out);
     Json files = Json::array();
+    const std::vector<node::ArchiveLink> archives = archives_of(session);
     for (const console::Certificate* c : chosen) {
         const std::string link = console::verifier_link(
-            verifier, session.state().ledger_id(), c->record, base + "/c/" + c->token, language);
+            verifier, session.state().ledger_id(), c->record, base + "/c/" + c->token, language,
+            node::archive_fallbacks(archives, c->token));
         std::string page;
         try {
             page = console::fill_certificate(

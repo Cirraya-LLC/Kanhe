@@ -11,7 +11,8 @@
 // renewed after its ledger moved to post-quantum keys, with algorithms
 // distrusted, in the three languages; and range proofs from the
 // specification's test vectors, with a challenge required, in the three
-// languages.
+// languages; and from an archive when the issuer's server is gone, which the
+// link names after the bundle's own address.
 // Usage: node page_test.js PAGE EVIDENCE_DIR KANHE
 "use strict";
 const assert = require("node:assert/strict");
@@ -27,7 +28,9 @@ const ledgerId = text("ledger-id");
 const recordId = text("record-id");
 
 function serve() {
+  fs.writeFileSync(path.join(dir, "garbage.cbor"), "not evidence at all");
   const files = { "/kanhe-verify.html": pagePath, "/bundle.cbor": path.join(dir, "bundle.cbor"),
+                  "/garbage.cbor": path.join(dir, "garbage.cbor"),
                   "/contract.cbor": path.join(dir, "contract.cbor"), "/part.cbor": path.join(dir, "part.cbor"),
                   "/claim.cbor": path.join(dir, "claim.cbor"), "/sourced.cbor": path.join(dir, "sourced.cbor"),
                   "/approvals.cbor": path.join(dir, "approvals.cbor"), "/guardians.cbor": path.join(dir, "guardians.cbor") };
@@ -711,6 +714,99 @@ async function verdict(page) {
       v = await verdict(page);
       assert.deepEqual([v.kind, v.title], ["bad", "Not verified"]);
       await page.close();
+    }
+
+    // 11f. Archives (spec section 16): after the bundle's address, a link
+    // names the archives that keep the same record, each tried in turn only
+    // when the addresses before it could not be fetched. Whichever answered,
+    // the ledger and the record are checked as ever, and the page says that
+    // an archive answered. The issuer's server here is a port nothing
+    // listens on; the archive, another server, which answers one record.
+    const archiveHits = [];
+    const archive = http.createServer((req, res) => {
+      archiveHits.push(req.url);
+      const found = req.url === `/a/${ledgerId}/c/kept`;
+      res.writeHead(found ? 200 : 404, { "Content-Type": "application/cbor", "Access-Control-Allow-Origin": "*" });
+      if (found) fs.createReadStream(path.join(dir, "bundle.cbor")).pipe(res);
+      else res.end();
+    });
+    await new Promise((resolve) => archive.listen(0, "127.0.0.1", resolve));
+    const kept = `http://127.0.0.1:${archive.address().port}/a/${ledgerId}`;
+    const gone = await new Promise((resolve) => {
+      const probe = http.createServer().listen(0, "127.0.0.1", () => {
+        const { port } = probe.address();
+        probe.close(() => resolve(`http://127.0.0.1:${port}/c/gone`));
+      });
+    });
+    const linked = (record, own, archives) => base + "/kanhe-verify.html#l=" + ledgerId + "&r=" + record + "&b=" +
+      encodeURIComponent(own) + archives.map((a) => "&a=" + encodeURIComponent(a)).join("");
+    // The issuer's server is gone, the first archive knows nothing of the
+    // record (404), the second answers; what is not an http(s) URL is never
+    // tried. In the three languages.
+    const archived = linked(recordId, gone, ["javascript:alert(1)", kept + "/c/missing", "data:,x", kept + "/c/kept"]);
+    try {
+      page = await open(archived);
+      v = await verdict(page);
+      assert.equal(v.kind, "ok", v.title + ": " + v.detail);
+      assert.equal(v.title, "Verified");
+      assert.match(v.detail, /Cirraya Test Factory/);
+      assert.deepEqual(archiveHits, [`/a/${ledgerId}/c/missing`, `/a/${ledgerId}/c/kept`]);
+      assert.equal(await page.isVisible("#source"), true);
+      assert.equal(await page.textContent("#source"),
+                   "The issuer's server did not answer, so this evidence came from the archive at 127.0.0.1.");
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a57\u8b49");
+      assert.equal(await page.textContent("#source"),
+                   "\u7c3d\u767c\u8005\u7684\u4f3a\u670d\u5668\u6c92\u6709\u56de\u61c9\uff0c\u6240\u4ee5\u9019\u4efd\u8b49\u660e\u53d6\u81ea 127.0.0.1 \u7684\u5b58\u6a94\u3002");
+      await page.selectOption("#language", "zh-Hans");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u5df2\u9a8c\u8bc1");
+      assert.equal(await page.textContent("#source"),
+                   "\u7b7e\u53d1\u8005\u7684\u670d\u52a1\u5668\u6ca1\u6709\u54cd\u5e94\uff0c\u6240\u4ee5\u8fd9\u4efd\u8bc1\u660e\u53d6\u81ea 127.0.0.1 \u7684\u5b58\u6863\u3002");
+      // Another file checked by hand is no archive's.
+      await page.click("#another");
+      await page.setInputFiles("#bundle-file", path.join(dir, "bundle.cbor"));
+      await page.waitForFunction(() => document.getElementById("source").hidden);
+      await page.close();
+
+      // The archive's answer is checked as the issuer's would be: a link
+      // naming another record refuses it.
+      page = await open(linked("ab".repeat(32), gone, [kept + "/c/kept"]));
+      v = await verdict(page);
+      assert.equal(v.kind, "bad");
+      assert.match(v.detail, /different record/);
+      await page.close();
+
+      // The issuer's server answered, with something that is not evidence:
+      // that is the verdict, and no archive is asked.
+      archiveHits.length = 0;
+      page = await open(linked(recordId, base + "/garbage.cbor", [kept + "/c/kept"]));
+      v = await verdict(page);
+      assert.deepEqual([v.kind, v.title], ["bad", "Not verified"]);
+      assert.equal(await page.isVisible("#source"), false);
+      assert.deepEqual(archiveHits, []);
+      await page.close();
+
+      // Nothing answered: the error names each address tried, with what
+      // went wrong.
+      page = await open(linked(recordId, gone, [kept + "/c/missing"]));
+      v = await verdict(page);
+      assert.deepEqual([v.kind, v.title], ["warn", "Could not download the evidence"]);
+      assert.ok(v.detail.startsWith("None of the link's addresses answered: " + gone + " ("), v.detail);
+      assert.ok(v.detail.includes("; " + kept + "/c/missing (HTTP 404)."), v.detail);
+      assert.equal(await page.isVisible("#drop"), true);
+      await page.selectOption("#language", "zh-Hant");
+      await page.waitForFunction(() => document.getElementById("verdict-title").textContent === "\u7121\u6cd5\u4e0b\u8f09\u8b49\u660e");
+      assert.ok((await page.textContent("#verdict-detail")).includes("\uff1b" + kept + "/c/missing\uff08HTTP 404\uff09\u3002"));
+      await page.close();
+      // Only http and https: a bundle's address of another kind is not
+      // fetched.
+      page = await open(base + "/kanhe-verify.html#l=" + ledgerId + "&b=" + encodeURIComponent("data:,x"));
+      v = await verdict(page);
+      assert.equal(v.kind, "warn");
+      assert.equal(v.detail, "The link points to data:,x (not an http or https address). Download that file yourself and drop it below.");
+      await page.close();
+    } finally {
+      archive.close();
     }
 
     // 12. A W3C credential chosen as a file (spec/credentials.md): the page

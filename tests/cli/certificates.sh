@@ -136,6 +136,16 @@ echo "$SHOW" | json 'd["verify_url"]' |
     contains "^https://kanhe.cirraya.com/verify/#l=$LEDGER_ID&r=[0-9a-f]\{64\}&b=https://academy.example/c/$TOKEN$" ||
     fail "the link its QR code holds"
 cert show "$TOKEN" --url https://academy.example --language zh-Hans | contains "&lang=zh-Hans"
+# The archives that keep the ledger (kanhe trust archive) follow the
+# certificate's own address in its link, in their order.
+mkdir -p "$KANHE_LEDGER/trust"
+printf '{"version": 1, "archives": [{"url": "https://keep.example/a/%s", "added": 1}, {"url": "http://two.example:8080/a/%s", "added": 2}]}\n' \
+    "$LEDGER_ID" "$LEDGER_ID" > "$KANHE_LEDGER/trust/archives.json"
+cert show "$TOKEN" --url https://academy.example --json | json 'd["verify_url"]' |
+    contains "&b=https://academy.example/c/$TOKEN&a=https://keep.example/a/$LEDGER_ID/c/$TOKEN&a=http://two.example:8080/a/$LEDGER_ID/c/$TOKEN$" ||
+    fail "the link names the archives"
+cert show "$TOKEN" --url https://academy.example --language zh-Hant |
+    contains "&a=http://two.example:8080/a/$LEDGER_ID/c/$TOKEN&lang=zh-Hant$" || fail "the language last"
 
 # --- Served: what scanning gets ------------------------------------------------------
 start_server server.json --ledger "$KANHE_LEDGER" --log-key log.key --checkpoint-interval 0
@@ -155,6 +165,8 @@ PAGE="pages/$TOKEN.html"
 contains "Chan, Tai Man" "$PAGE" && contains "Example Academy" "$PAGE" && contains "<svg" "$PAGE" ||
     fail "the page"
 contains "#l=$LEDGER_ID&amp;r=" "$PAGE" || fail "the link, escaped"
+contains "&amp;a=https://keep.example/a/$LEDGER_ID/c/$TOKEN&amp;a=http://two.example:8080/a/$LEDGER_ID/c/$TOKEN" "$PAGE" ||
+    fail "the printed link names the archives"
 contains -F "content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\"" \
     "$PAGE" || fail "the page's own policy"
 contains "BA &amp; MA" "pages/$LEE.html" || fail "values are escaped"
@@ -169,6 +181,11 @@ printf '<p>{{grades}}</p>' > sealed.html
 expect_exit 1 kanhe-console certificate print "$TOKEN" --out sealed --url "$URL" --template sealed.html
 contains "{{grades}}" out.txt || fail "a sealed field cannot be printed"
 [ -z "$(ls sealed 2> /dev/null)" ] || fail "nothing written from a wrong template"
+# A damaged list of archives stops printing rather than leave them out.
+echo '{"version": 1, "archives": 7}' > "$KANHE_LEDGER/trust/archives.json"
+expect_exit 2 kanhe-console certificate print "$TOKEN" --out damaged --url "$URL"
+contains "the list of archives is damaged" out.txt || fail "a damaged list of archives"
+rm "$KANHE_LEDGER/trust/archives.json"
 
 # --- Revoked, then withdrawn ---------------------------------------------------------
 WONG_RECORD="$(echo "$LIST" | json '[c for c in d if c["token"] == "'"$WONG"'"][0]["record"]')"

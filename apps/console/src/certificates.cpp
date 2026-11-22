@@ -15,6 +15,7 @@
 #include <kanhe/client/support.hpp>
 #include <kanhe/console/certificates.hpp>
 #include <kanhe/core/bytes.hpp>
+#include <kanhe/node/trust.hpp>
 #include <kanhe/verifier/report.hpp>
 
 namespace kanhe::console {
@@ -516,13 +517,18 @@ bool certificate_language(std::string_view language) noexcept {
 
 std::string verifier_link(std::string_view verifier, const protocol::Id& ledger,
                           const protocol::Id& record, std::string_view address,
-                          std::string_view language) {
+                          std::string_view language, const std::vector<std::string>& archives) {
     std::string link = std::string(verifier) + "#l=" + to_hex(ledger.bytes()) +
                        "&r=" + to_hex(record.bytes()) + "&b=" + percent_encode(address);
-    if (language != "en") {
-        link += "&lang=" + std::string(language);
+    const std::string lang = language != "en" ? "&lang=" + std::string(language) : std::string();
+    for (std::size_t i = 0; i < archives.size() && i < node::max_archive_links; ++i) {
+        const std::string named = "&a=" + percent_encode(archives[i]);
+        if (link.size() + named.size() + lang.size() > max_verifier_link) {
+            break;
+        }
+        link += named;
     }
-    return link;
+    return link + lang;
 }
 
 std::string qr_svg(std::string_view text) {

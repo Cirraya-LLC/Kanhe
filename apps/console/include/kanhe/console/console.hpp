@@ -43,6 +43,7 @@
 #include <kanhe/node/http.hpp>
 #include <kanhe/node/long_term.hpp>
 #include <kanhe/node/peers.hpp>
+#include <kanhe/node/trust.hpp>
 
 /// The web console's server side: the page's files, compiled into the
 /// binary; the headers every answer carries; and the checks every request
@@ -508,6 +509,18 @@ private:
     /// parameters; reports also as CSV (format=csv).
     [[nodiscard]] http::Response search_route(const http::Request& request) const;
     [[nodiscard]] http::Response settings_route(const http::Request& request) const;
+    /// The archives that keep this ledger (archives.cpp; spec section 16):
+    /// GET /console/api/archives, each with the latest checkpoint it
+    /// answers; POST {"url"} adds one once it answers a checkpoint this
+    /// ledger made, POST {"remove"} removes one. Owners and admins only, and
+    /// changed only while the console is unlocked.
+    [[nodiscard]] http::Response archives_route(const http::Request& request) const;
+    /// The archives' addresses of the record published under `token`, which
+    /// its link names after its own (none when the list cannot be read).
+    [[nodiscard]] std::vector<std::string> archive_links_of(std::string_view token) const;
+    /// Whether a certificate's link can name every one of `archives`.
+    [[nodiscard]] bool archive_links_fit(const protocol::Id& ledger,
+                                         const std::vector<node::ArchiveLink>& archives) const;
     [[nodiscard]] http::Response kinds_route(const http::Request& request) const;
     /// /console/api/rules/...: the compiler on a sheet or a source.
     [[nodiscard]] http::Response rules_route(const http::Request& request) const;
