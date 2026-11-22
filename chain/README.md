@@ -15,7 +15,7 @@ is WebAssembly code with the source its deploy carries, as given, and the
 | `crypto/longfellow` | Zero-knowledge range proofs on Google's Longfellow ZK: that a value committed to with a salted SHA-256 lies in a range, without disclosing it; `kanhe verify` checks a bundle's range proofs with it, and `kanhe-range` makes and checks them as JSON for programs that do not link C++. The browser verifier checks them too, on the published circuit, which it loads instead of building (`KANHE_RANGE_PROOFS`) |
 | `verifier` | Verification reports (text and JSON) shared by the command line and the browser; `verifier/wasm` is the browser verifier's page |
 | `ledger` | The ledger: crash-safe storage, the rule engine, checkpoints, receipts, evidence, backups (C++26) |
-| `node` | The HTTP API server and client (Asio), API tokens, replicas, clusters (Raft), the registrar, the keeper, and executors; applications attach to it as extensions (C++26) |
+| `node` | The HTTP API server and client (Asio), API tokens, replicas, archives of other ledgers, clusters (Raft), the registrar, the keeper, and executors; applications attach to it as extensions (C++26) |
 | `client` | What a program does with a ledger: opening one, or a verified mirror of a server's, building, signing, and submitting statements, records and their vault, provable values and their range proofs, contract calls and consents, requests, peers, and JSON views. Shared by the command line and the console (C++26) |
 | `cli` | The `kanhe` program, its MCP server (`kanhe mcp`), and the command-line base all four programs share: options, `--help`, `--json`, completion |
 
