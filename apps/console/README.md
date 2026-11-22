@@ -233,6 +233,16 @@ kanhe-console settings show
   every one that does not hold, waits for a person. Each such answer is in the activity log.
 - **Settings** show the ledger and its folder, the language new browsers start in, and the
   backup folder (`console settings show|set` from the command line).
+- **Archives that keep this ledger.** A trust node may keep a read-only copy of the ledger and
+  the evidence of its published certificates, and answer them at its own address once the
+  ledger's server is gone. In Settings, an owner or an admin lists the archives with the latest
+  copy each answers, adds one by its address (the console first checks that it answers a
+  checkpoint this ledger made), and removes one, while the console is unlocked; each change is
+  in the activity log. The list is the ledger's `trust/archives.json`, the same that
+  `kanhe trust archive` changes, at most four. Certificates' links printed after an archive is
+  added name it after their own address (`&a=`), so they still verify if this ledger's server
+  closes; links printed before do not. A link stays at most 800 characters, so its QR code
+  stays readable (at most 109 modules a side).
 - **In the background.** `kanhe-console open` starts the console if it is not running (in
   the background, its log in the console's folder) and opens it in the browser;
   `console open FILE` opens a proposal or consent file there.

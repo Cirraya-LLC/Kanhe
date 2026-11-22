@@ -339,6 +339,21 @@ run kanhe-console settings set --language browser --backup-folder none > /dev/nu
 [ "$(run kanhe-console settings show --json | json 'd["language"]')" = None ] || fail "language cleared"
 run kanhe-console settings set --help > out.txt
 grep -q -- "--backup-folder DIR" out.txt || fail "console settings set --help"
+# The archives that keep the ledger, as kanhe trust archive lists them.
+grep -q "archives: none" <(run kanhe-console settings show) || fail "no archives at first"
+[ "$(run kanhe-console settings show --json | json 'd["archives"]')" = "[]" ] || fail "no archives, --json"
+LEDGER_HEX=$(run status --json | json 'd["ledger_id"]')
+mkdir -p "$KANHE_LEDGER/trust"
+printf '{"version": 1, "archives": [{"url": "https://keep.example/a/%s", "added": 1800000000000}]}\n' \
+    "$LEDGER_HEX" > "$KANHE_LEDGER/trust/archives.json"
+grep -q "archive: https://keep.example/a/$LEDGER_HEX (added 2027-01-15" <(run kanhe-console settings show) ||
+    fail "settings show lists the archives"
+[ "$(run kanhe-console settings show --json | json 'd["archives"][0]["url"]')" = "https://keep.example/a/$LEDGER_HEX" ] ||
+    fail "settings show --json lists the archives"
+echo '{"version": 1, "archives": 7}' > "$KANHE_LEDGER/trust/archives.json"
+expect_exit 2 kanhe-console settings show
+grep -q "the list of archives is damaged" out.txt || fail "a damaged list of archives"
+rm "$KANHE_LEDGER/trust/archives.json"
 
 # --- Document kinds ---------------------------------------------------------------
 cat > photo-kind.json << 'JSON'

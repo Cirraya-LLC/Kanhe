@@ -43,7 +43,6 @@ namespace kanhe::console {
 
 namespace {
 
-constexpr std::string_view verifier_url = "https://kanhe.cirraya.com/verify/";
 /// How long the ledger may take to register one certificate.
 constexpr auto register_wait = std::chrono::seconds(30);
 
@@ -183,6 +182,11 @@ http::Response Console::certificates_route(const http::Request& request) const {
                            {"may_grant", signer.role == Role::owner}};
         const auto issuer = verifier::parse_base_url(base);
         const protocol::Timestamp now = services_.clock->now();
+        // The archives that keep this ledger, which each link names after
+        // its own address.
+        const auto archives = node::load_archive_links(services_.directory.parent_path());
+        const std::vector<node::ArchiveLink> kept =
+            archives ? *archives : std::vector<node::ArchiveLink>{};
         served->read_state([&](const protocol::LedgerState& state) {
             const auto machine = machine_actor(state);
             for (const auto& [type, kind] : certificate_kinds(services_.directory)) {
@@ -204,8 +208,9 @@ http::Response Console::certificates_route(const http::Request& request) const {
                 {"problem", issuer ? nlohmann::json() : nlohmann::json(issuer.error())}};
             for (const Certificate& c : certificates_now(state)) {
                 nlohmann::json j = certificate_json(c, base + "/c/" + c.token);
-                j["verify_url"] = verifier_link(verifier_url, state.ledger_id(), c.record,
-                                                base + "/c/" + c.token);
+                j["verify_url"] = verifier_link(certificate_verifier, state.ledger_id(), c.record,
+                                                base + "/c/" + c.token, "en",
+                                                node::archive_fallbacks(kept, c.token));
                 const auto entry = credential
                                        ? node::credential_entry_of(entries, c.record, *credential)
                                        : std::nullopt;
@@ -365,8 +370,9 @@ http::Response Console::certificates_route(const http::Request& request) const {
     }
     if ((what == "/qr" || what == "/page") && request.method == "GET") {
         const std::string language = language_of(request);
-        const std::string link = verifier_link(verifier_url, ledger_id, certificate->record,
-                                               base + "/c/" + token, language);
+        const std::string link =
+            verifier_link(certificate_verifier, ledger_id, certificate->record,
+                          base + "/c/" + token, language, archive_links_of(token));
         http::Response r;
         r.status = 200;
         if (what == "/qr") {

@@ -2251,9 +2251,108 @@ async function settingsScreen() {
     parts.push(...await longTermView());
     parts.push(...await guardiansView());
     if (changeable) {
-        parts.push(...await tokensView(), ...await activityView());
+        parts.push(archivesView(), ...await tokensView(), ...await activityView());
     }
-    show(keysNotice(), ...parts);
+    show(flash(), keysNotice(), ...parts);
+}
+
+// --- Archives that keep this ledger ------------------------------------------------
+
+/// Why an archive is not added, or what is wrong with one listed: the
+/// console's codes, each in the catalogs.
+const ARCHIVE_PROBLEMS = ["not_address", "listed", "full", "too_long", "unreachable", "not_checkpoint",
+                          "other_ledger", "not_ours"];
+
+/// Settings, "Archives that keep this ledger": trust nodes that keep a copy
+/// of it and its published records' evidence, and answer them once its own
+/// server is gone; certificates' links printed after one is added name it.
+/// Each listed with the latest copy it answers, which the console checks is
+/// one this ledger made; added by its address, and removed. The archives are
+/// asked as the screen opens, so the section fills in when they answer.
+function archivesView() {
+    const area = el("section", { id: "archives", "aria-labelledby": "archives-title", "aria-live": "polite" });
+    const head = [el("h2", { id: "archives-title", text: t("archives.title") }),
+                  el("p", { class: "hint", text: t("archives.intro") }),
+                  el("p", { class: "hint", id: "archives-hint", text: t("archives.hint") })];
+    area.replaceChildren(...head, el("p", { class: "hint", text: t("archives.checking") }));
+    const said = el("div", { role: "status" });
+    const refusal = (error, ledger) => {
+        const code = error.answer?.error?.code;
+        if (error.status === 423) {
+            return t("keys.locked");
+        }
+        return ARCHIVE_PROBLEMS.includes(code)
+            ? t(`archives.refused.${code}`, { ledger, message: error.answer.error.detail || error.message })
+            : t("error.server", { message: error.message });
+    };
+    const fill = (listed) => {
+        const parts = [...head];
+        if (listed.problem) {
+            parts.push(el("p", { class: "problem warning", text: t("archives.damaged", { message: listed.problem }) }));
+        }
+        if (listed.archives.length === 0) {
+            parts.push(el("p", { id: "archives-none", text: t("archives.none") }));
+        } else {
+            parts.push(...table(t("archives.listed"), [
+                ["archives.address", (a) => ({ id: true, text: a.url })],
+                ["archives.latest", (a) => (a.size !== null && a.size !== undefined
+                    ? t("archives.copy", { size: a.size, time: timeText(a.time) })
+                    : t(`archives.problem.${ARCHIVE_PROBLEMS.includes(a.problem) ? a.problem : "unreachable"}`,
+                        { message: a.detail ?? a.message ?? "" }))],
+                ["archives.added_at", (a) => timeText(a.added)],
+                ["archives.remove", (a) => {
+                    const remove = el("button", { type: "button", text: t("archives.remove"),
+                                                  "aria-label": t("archives.remove_label", { url: a.url }) });
+                    remove.addEventListener("click", async () => {
+                        remove.disabled = true;
+                        status(t("status.working"));
+                        try {
+                            await api("POST", "archives", { remove: a.url });
+                            state.flash = t("archives.removed", { url: a.url });
+                            route();
+                        } catch (error) {
+                            said.replaceChildren(problem(refusal(error, listed.ledger)));
+                            remove.disabled = false;
+                        } finally {
+                            status("");
+                        }
+                    });
+                    return remove;
+                }],
+            ], listed.archives));
+        }
+        if (listed.archives.length >= listed.max) {
+            parts.push(el("p", { class: "hint", text: t("archives.full", { max: listed.max }) }), said);
+            area.replaceChildren(...parts);
+            return;
+        }
+        const [urlField, url] = field("archive-url", t("archives.url"),
+                                      t("archives.url_hint", { ledger: listed.ledger }),
+                                      { type: "url", placeholder: "https://", spellcheck: "false" });
+        const add = el("button", { type: "submit", text: t("archives.add") });
+        const form = el("form", { novalidate: true }, urlField, add, said);
+        form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            add.disabled = true;
+            status(t("status.working"));
+            try {
+                const added = await api("POST", "archives", { url: url.value.trim() });
+                state.flash = t("archives.added", { url: added.added, size: added.size });
+                route();
+            } catch (error) {
+                said.replaceChildren(problem(refusal(error, listed.ledger)));
+            } finally {
+                add.disabled = false;
+                status("");
+            }
+        });
+        parts.push(form);
+        area.replaceChildren(...parts);
+    };
+    api("GET", "archives").then(fill, (error) => {
+        area.replaceChildren(...head, problem(t("error.server", { message: error.message })));
+    });
+    return area;
 }
 
 // --- Evidence for decades -----------------------------------------------------------

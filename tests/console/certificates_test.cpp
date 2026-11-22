@@ -115,6 +115,71 @@ TEST_CASE("the verifier's link names the ledger, the record, and the address",
     CHECK_FALSE(console::certificate_language("fr"));
 }
 
+namespace {
+
+/// The modules a side of the QR code qr_svg draws, its quiet zone left out.
+int modules_of(const std::string& svg) {
+    const std::string at = "viewBox=\"0 0 ";
+    const std::size_t from = svg.find(at) + at.size();
+    return std::stoi(svg.substr(from, svg.find(' ', from) - from)) - 8;
+}
+
+} // namespace
+
+TEST_CASE("the verifier's link names the archives after the address, within a QR code's reach",
+          "[console][certificates]") {
+    const auto ledger = *kanhe::protocol::to_id(kanhe::Bytes(32, 0xab));
+    const auto record = *kanhe::protocol::to_id(kanhe::Bytes(32, 0x01));
+    const std::string hex = kanhe::to_hex(ledger.bytes());
+    const std::string token = "AbCdEfGhIjKlMnOpQrStUv";
+    const std::string address = "https://ledger.example.com/c/" + token;
+    std::vector<std::string> archives;
+    for (const char* host : {"trust-one.example.org", "trust-two.example.org",
+                             "trust-three.example.org", "trust-four.example.org"}) {
+        archives.push_back(std::string("https://") + host + "/a/" + hex + "/c/" + token);
+    }
+    const std::string verifier(console::certificate_verifier);
+    // None: as a link without archives always was.
+    const std::string plain = console::verifier_link(verifier, ledger, record, address, "zh-Hant");
+    CHECK(plain == console::verifier_link(verifier, ledger, record, address, "zh-Hant", {}));
+    CHECK(plain.ends_with("&b=" + address + "&lang=zh-Hant"));
+    // Each in order after the address, its own characters encoded as the
+    // address's are; the language last.
+    std::string expected =
+        verifier + "#l=" + hex + "&r=" + kanhe::to_hex(record.bytes()) + "&b=" + address;
+    for (const std::string& a : archives) {
+        expected += "&a=" + a;
+    }
+    const std::string link =
+        console::verifier_link(verifier, ledger, record, address, "zh-Hant", archives);
+    CHECK(link == expected + "&lang=zh-Hant");
+    CHECK_THAT(console::verifier_link(verifier, ledger, record, address, "en",
+                                      {"https://t.example/a/" + hex + "/c/x?y"}),
+               ContainsSubstring("&a=https://t.example/a/" + hex + "/c/x%3Fy"));
+    // At most four, and only while the link stays short enough for its QR
+    // code to be read: those that do not fit are left out, in order.
+    std::vector<std::string> five = archives;
+    five.push_back("https://trust-five.example.org/a/" + hex + "/c/" + token);
+    CHECK(console::verifier_link(verifier, ledger, record, address, "zh-Hant", five) == link);
+    const std::vector<std::string> long_ones{
+        "https://" + std::string(300, 'l') + ".example/a/" + hex + "/c/" + token,
+        "https://" + std::string(300, 'm') + ".example/a/" + hex + "/c/" + token, archives[0]};
+    const std::string cut =
+        console::verifier_link(verifier, ledger, record, address, "zh-Hans", long_ones);
+    CHECK(cut == verifier + "#l=" + hex + "&r=" + kanhe::to_hex(record.bytes()) + "&b=" + address +
+                     "&a=" + long_ones[0] + "&lang=zh-Hans");
+    CHECK(cut.size() <= console::max_verifier_link);
+
+    // The QR codes' sizes (modules a side, medium error correction): 61
+    // without archives, 105 with these four, and at most 109 for the longest
+    // link made.
+    CHECK(modules_of(console::qr_svg(plain)) == 61);
+    CHECK(modules_of(console::qr_svg(console::verifier_link(verifier, ledger, record, address,
+                                                            "zh-Hant", {archives[0]}))) == 73);
+    CHECK(modules_of(console::qr_svg(link)) == 105);
+    CHECK(modules_of(console::qr_svg(std::string(console::max_verifier_link, 'x'))) == 109);
+}
+
 TEST_CASE("a page is filled from a template", "[console][certificates]") {
     console::CertificatePage page;
     page.kind = "Diploma";
