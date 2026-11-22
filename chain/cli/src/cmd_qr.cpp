@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Cirraya
 
+#include <algorithm>
 #include <cstdio>
 #include <print>
 #include <qrcodegen.hpp>
 #include <unistd.h>
+#include <vector>
+
+#include <kanhe/node/published.hpp>
+#include <kanhe/node/trust.hpp>
 
 #include "commands.hpp"
 #include "output.hpp"
@@ -106,8 +111,36 @@ int cmd_qr(const Args& args) {
     if (!is_web_url(bundle)) {
         throw UsageError{"--bundle-url must be an http(s) URL"};
     }
-    const std::string url = verifier + "#l=" + hex_id(session.state().ledger_id()) +
-                            "&r=" + hex_id(record) + "&b=" + percent_encode(bundle);
+    // Where else the page may fetch the bundle when its own address cannot be
+    // reached: the archives that keep this ledger, for a published record
+    // (/c/TOKEN), then any given.
+    std::vector<std::string> fallbacks;
+    if (const std::size_t at = bundle.rfind("/c/");
+        at != std::string::npos && session.server_url().empty()) {
+        const std::string token = bundle.substr(at + 3);
+        if (node::valid_published_token(token)) {
+            fallbacks = node::archive_fallbacks(
+                unwrap(node::load_archive_links(session.directory()), "reading the archives"),
+                token);
+        }
+    }
+    for (const std::string& f : args.all("fallback-url")) {
+        if (!is_web_url(f) || f.find('#') != std::string::npos) {
+            throw UsageError{"--fallback-url must be an http(s) URL without a #fragment"};
+        }
+        if (!std::ranges::contains(fallbacks, f)) {
+            fallbacks.push_back(f);
+        }
+    }
+    if (fallbacks.size() > node::max_archive_links) {
+        throw UsageError{"a link names at most 4 fallbacks, the archives listed (kanhe trust "
+                         "archive list) and --fallback-url together"};
+    }
+    std::string url = verifier + "#l=" + hex_id(session.state().ledger_id()) +
+                      "&r=" + hex_id(record) + "&b=" + percent_encode(bundle);
+    for (const std::string& f : fallbacks) {
+        url += "&a=" + percent_encode(f);
+    }
     const auto qr = qrcodegen::QrCode::encodeText(url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
     const auto out = args.get("out");
     if (out) {
@@ -118,6 +151,7 @@ int cmd_qr(const Args& args) {
         print_json({{"url", url},
                     {"ledger_id", hex_id(session.state().ledger_id())},
                     {instance ? "instance_id" : "record_id", hex_id(record)},
+                    {"fallbacks", fallbacks},
                     {"modules", qr.getSize()},
                     {"file", out ? Json(*out) : Json(nullptr)}});
         return exit_ok;

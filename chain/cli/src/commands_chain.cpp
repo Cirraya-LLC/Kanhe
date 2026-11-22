@@ -1153,6 +1153,53 @@ std::vector<CommandSpec> chain_commands() {
          "checked, kept in place of the one before (never by an older one). A proof shows the\n"
          "membership as of its checkpoint, so fetch again from time to time (a suspension\n"
          "shows only then)."},
+        {{"trust", "archive", "add"},
+         "List an archive that keeps this ledger, which links then name as a fallback",
+         "Trust nodes",
+         "URL",
+         1,
+         1,
+         with({ledger_option,
+               {"ca-file", "FILE",
+                "CA certificates (PEM) to trust for the archive, if not the "
+                "system's"}}),
+         cmd_trust_archive_add,
+         "URL is the archive's address for this ledger, https://HOST/a/LEDGER_ID, which its\n"
+         "operator gives (kanhe archive add on that server). It is checked first: "
+         "URL/v1/checkpoint\n"
+         "must answer a checkpoint this ledger made. At most 4. Links to this ledger's published\n"
+         "records (kanhe qr, record publish) then carry URL/c/TOKEN as a fallback (&a=), which a\n"
+         "verifier's page tries only when the ledger's own server cannot be reached."},
+        {{"trust", "archive", "list"},
+         "List the archives that keep this ledger",
+         "Trust nodes",
+         "",
+         0,
+         0,
+         with({ledger_option}),
+         cmd_trust_archive_list},
+        {{"trust", "archive", "remove"},
+         "Stop listing an archive: links no longer name it",
+         "Trust nodes",
+         "URL",
+         1,
+         1,
+         with({ledger_option}),
+         cmd_trust_archive_remove,
+         "Links already printed still name it; they work as long as the archive keeps the ledger."},
+        {{"trust", "archive", "check"},
+         "Check each archive: its latest checkpoint of this ledger against this ledger's",
+         "Trust nodes",
+         "",
+         0,
+         0,
+         with({ledger_option,
+               {"ca-file", "FILE",
+                "CA certificates (PEM) to trust for the archives, if not the "
+                "system's"}}),
+         cmd_trust_archive_check,
+         "Exit 2 if an archive cannot be reached or answers a checkpoint this ledger never made.\n"
+         "An archive trails the ledger by its sync interval (an hour by default)."},
         {{"record", "publish"},
          "Publish a record at a private address: its evidence as it is, with chosen fields",
          "Records",
@@ -1651,12 +1698,20 @@ std::vector<CommandSpec> chain_commands() {
                {"bundle-url", "URL",
                 "Where you publish the evidence (from kanhe export, or contract evidence)", true},
                {"verifier-url", "URL", "Where you host kanhe-verify.html", true},
+               {"fallback-url", "URL",
+                "Another address of the same bundle, tried when the first cannot be reached (at "
+                "most 4 in all)",
+                false, true},
                {"out", "FILE", "Write an SVG image (default: draw the code in the terminal)"}}),
          cmd_qr,
          "The code links to the verifier page with the ledger id, the record id, and the bundle's\n"
          "URL. Scanning it verifies the evidence on the scanner's own device; the page refuses\n"
          "evidence about another record or from another ledger. The server that hosts the bundle\n"
-         "must allow cross-origin requests from the verifier's origin."},
+         "must allow cross-origin requests from the verifier's origin.\n"
+         "For a published record (--bundle-url ending in /c/TOKEN), the archives this ledger\n"
+         "lists (kanhe trust archive add) are named as fallbacks, ARCHIVE/c/TOKEN each, after\n"
+         "the bundle's URL (&a=): the page tries them only when that URL cannot be fetched, so a\n"
+         "printed certificate outlives its issuer's server."},
         {{"inspect"},
          "Decode any Kanhe file",
          "Evidence",
@@ -2098,7 +2153,7 @@ std::vector<CommandSpec> chain_commands() {
          1,
          with({ledger_option,
                {"scope", "SCOPES",
-                "read, submit, admin, peer, executor, comma-separated (default: read)"},
+                "read, submit, admin, peer, executor, archive, comma-separated (default: read)"},
                {"out", "FILE", "Write the token to FILE (owner-only) instead of printing it"}}),
          cmd_token_create,
          "The token is shown once; the ledger keeps only its SHA-256. Scopes: read (the log,\n"
@@ -2106,7 +2161,9 @@ std::vector<CommandSpec> chain_commands() {
          "admin (checkpoints, witness cosignatures), peer (another organization's access\n"
          "requests, deliveries, receipts, and witnessing), executor (the requests contract\n"
          "calls make, instances' evidence, and answers to requests, no other statements; add\n"
-         "read for request commands with --server). Name a peer's token after the peer\n"
+         "read for request commands with --server), archive (for another server that archives\n"
+         "this ledger: what a replica copies and the list of published records, never sealed\n"
+         "data, evidence, state, or writes). Name a peer's token after the peer\n"
          "(kanhe peer add NAME): it then reaches only that peer's own exchanges. A token\n"
          "only gates access: what a statement may do is still decided by its signature and\n"
          "the ledger's rules."},
@@ -2189,6 +2246,118 @@ std::vector<CommandSpec> chain_commands() {
          cmd_replica_promote,
          "Stop the old primary first, for good: two primaries would fork the ledger. The new\n"
          "primary needs the log key (keep it in an HSM, reachable from both)."},
+
+        // ------------------------------------------------------------------
+        {{"archive", "config"},
+         "Show or set what re-attests the ledgers archived here, and how often",
+         "Archives",
+         "",
+         0,
+         0,
+         with({ledger_option,
+               {"witness", "URL", "A public witness to cosign the archived ledgers (sets the list)",
+                false, true},
+               {"no-witnesses", "", "Ask no witness"},
+               {"tsa", "URL",
+                "A time-stamp authority (RFC 3161 over HTTP) to stamp them (sets the "
+                "list)",
+                false, true},
+               {"no-tsa", "", "Ask no time-stamp authority"},
+               {"sync-interval", "D",
+                "Sync each archived ledger this often (default 1h; Ns, Nm, "
+                "Nh, Nd)"},
+               {"attest-interval", "D",
+                "Re-attest a ledger whose newest attestation is older than this (default 365d)"}}),
+         cmd_archive_config,
+         "Given nothing, shows the config. Each --witness is a public witness's server (serve\n"
+         "--witness-public): its key is taken from its GET /v1/witness now, and its\n"
+         "cosignatures are checked with that key later. At most 8 witnesses and 8 authorities.\n"
+         "A ledger is re-attested when its latest checkpoint's newest attestation (a dated\n"
+         "cosignature's time, a token's time), or with none the newest of any, is older than the\n"
+         "attestation interval: each witness cosigns the latest checkpoint afresh and each\n"
+         "authority stamps it, kept beside it, so that renewals from this archive carry them.\n"
+         "Prefer a witness whose key is ML-DSA: the point is to outlast the classical\n"
+         "algorithms. Network cosignatures need the ledger's own note key: an archive renews\n"
+         "none."},
+        {{"archive", "add"},
+         "Archive another ledger: a replica of it, and its published records' evidence",
+         "Archives",
+         "LEDGER_ID",
+         1,
+         1,
+         with({ledger_option,
+               {"source", "URL", "The ledger's server", true},
+               {"token-file", "FILE",
+                "The ledger's API token for this archive (kanhe token create NAME --scope archive "
+                "on its side)",
+                true},
+               {"ca-file", "FILE", "CA certificates (PEM) to trust for its server, kept here"}}),
+         cmd_archive_add,
+         "The archive is kept beside this ledger in archive/LEDGER_ID: a replica of exactly that\n"
+         "ledger (its genesis is checked against LEDGER_ID before anything is kept), with\n"
+         "commitments and public metadata only, never sealed data, and the newest verified\n"
+         "evidence of each record it publishes (GET /c/TOKEN). kanhe serve then answers, with no\n"
+         "token, GET /a/LEDGER_ID/v1/checkpoint, /v1/consistency, /v1/renewal, and /c/TOKEN (the\n"
+         "kept evidence, with a renewal from this archive's copy appended), and syncs it every\n"
+         "sync interval. An archive holds no key of the ledger's: it cannot make evidence, only\n"
+         "keep what the ledger served. The token is kept owner-only."},
+        {{"archive", "list"},
+         "List the ledgers archived here",
+         "Archives",
+         "",
+         0,
+         0,
+         with({ledger_option}),
+         cmd_archive_list},
+        {{"archive", "show"},
+         "Show an archived ledger: its source, syncs, attestations, and kept evidence",
+         "Archives",
+         "LEDGER",
+         1,
+         1,
+         with({ledger_option}),
+         cmd_archive_show,
+         "LEDGER is the ledger's id, or the start of it."},
+        {{"archive", "sync"},
+         "Copy what is new from each archived ledger's server, or LEDGER's",
+         "Archives",
+         "[LEDGER]",
+         0,
+         1,
+         with({ledger_option}),
+         cmd_archive_sync,
+         "As a replica syncs (every checkpoint and entry checked), then the published records:\n"
+         "the ledger's list (GET /v1/published), and each record's evidence fetched again when\n"
+         "the record changed since the kept one's checkpoint, verified, and kept only if newer.\n"
+         "Records no longer listed are dropped, as the ledger took them down. A server that\n"
+         "cannot be reached is noted (exit 2): what is kept is served as last synced. Exit 3 if\n"
+         "the ledger's history does not verify. kanhe serve syncs by itself."},
+        {{"archive", "attest"},
+         "Re-attest each archived ledger (or LEDGER) that is due: witnesses and authorities",
+         "Archives",
+         "[LEDGER]",
+         0,
+         1,
+         with({ledger_option, {"force", "", "Ask now, due or not"}}),
+         cmd_archive_attest,
+         "With the witnesses and authorities of kanhe archive config. A witness that has\n"
+         "cosigned the latest checkpoint is not asked again (a ledger keeps one cosignature per\n"
+         "witness and checkpoint). A witness the ledger's own server has cosign its checkpoints\n"
+         "is never moved to a later one, so the ledger's own requests go on as before; a witness\n"
+         "that has cosigned a later checkpoint than this archive holds is reported, not forced.\n"
+         "A witness the ledger does not use is registered with it, from the ledger's genesis\n"
+         "and a signed checkpoint. Each authority stamps the latest checkpoint afresh. Network\n"
+         "cosignatures are not renewed.\n"
+         "Exit 2 if a round was due and nothing attested. kanhe serve re-attests by itself."},
+        {{"archive", "remove"},
+         "Remove an archived ledger: this server's copy and the evidence kept for it",
+         "Archives",
+         "LEDGER",
+         1,
+         1,
+         with({ledger_option, {"yes", "", "Yes, delete it (required)"}}),
+         cmd_archive_remove,
+         "Links that name this archive as a fallback stop being answered here."},
 
         // ------------------------------------------------------------------
         {{"backup", "create"},

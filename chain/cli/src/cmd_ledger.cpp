@@ -6,6 +6,7 @@
 #include <span>
 
 #include <kanhe/core/cbor.hpp>
+#include <kanhe/node/archive.hpp>
 #include <kanhe/node/long_term.hpp>
 
 #include "commands.hpp"
@@ -51,7 +52,32 @@ Json status_json(Session& session) {
     // Whether its keys and attestations carry its evidence past the
     // classical algorithms (spec v0.21), with advice.
     out["long_term"] = Json::parse(node::long_term_json(session.ledger(), session.now()).dump());
+    // The ledgers archived beside this one (archive add), as a server's
+    // GET /v1/status shows them.
+    if (session.server_url().empty()) {
+        if (const auto archives = node::archives_status(session.directory(), session.now())) {
+            out["archives"] = Json::parse(archives->dump());
+        }
+    }
     return out;
+}
+
+/// The status's archives block, in words.
+void print_archives(const Json& a) {
+    std::println("archives:      {} ledgers kept; {} cannot be reached; oldest sync {}",
+                 a["count"].get<std::size_t>(), a["unreachable"].get<std::size_t>(),
+                 a["oldest_sync"].is_null() ? std::string("never")
+                                            : a["oldest_sync"].get<std::string>());
+    std::println("               {} witnesses ({}), {} time-stamp authorities; next attestation {}",
+                 a["witnesses"].get<std::size_t>(),
+                 a["witnesses_post_quantum"].get<bool>() ? "post-quantum among them"
+                                                         : "none post-quantum",
+                 a["authorities"].get<std::size_t>(),
+                 a["next_attestation"].is_null() ? std::string("-")
+                                                 : a["next_attestation"].get<std::string>());
+    for (const Json& line : a["advice"]) {
+        std::println("               {}", line.get<std::string>());
+    }
 }
 
 /// The status's long-term block, in words.
@@ -173,6 +199,9 @@ int cmd_status(const Args& args) {
                      s["instances"].get<std::size_t>());
     }
     print_long_term(s["long_term"]);
+    if (s.contains("archives")) {
+        print_archives(s["archives"]);
+    }
     return exit_ok;
 }
 
