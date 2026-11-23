@@ -411,8 +411,9 @@ inline constexpr std::array<std::string_view, 3> outcome_names{"done", "fails", 
 /// `when KIND done`, `when KIND fails`, `when KIND expires` : what the
 /// contract does when an answer to one of its requests of that kind comes.
 /// Compiled code runs it in the reply function (reply_function), which takes
-/// every answer: it never refuses one, so its block asks no consent and
-/// refuses nothing.
+/// every answer: it never refuses one, so its block asks no consent and has
+/// no requires or reject (from codegen 6 on, a block that cannot be carried
+/// out is put back, and the answer recorded with the reason).
 struct AnswerRule {
     Span span;
     std::string kind;

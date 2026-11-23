@@ -94,7 +94,7 @@ foreach(pack IN LISTS official_packs)
     list(APPEND pack_files "packs/${pack}.pack" "packs/history/${pack}-1.pack"
         "packs/history/${pack}-2.pack" "packs/history/${pack}-3.pack"
         "packs/history/${pack}-4.pack" "packs/history/${pack}-5.pack"
-        "packs/history/${pack}-6.pack")
+        "packs/history/${pack}-6.pack" "packs/history/${pack}-7.pack")
 endforeach()
 # The official vocabulary packs (and, in vocab/history/, every earlier
 # version), which hold their standard terms.

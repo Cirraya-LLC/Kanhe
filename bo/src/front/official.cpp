@@ -8,7 +8,9 @@
 // before vocabulary packs, version 2, from before temperatures and
 // field defaults, version 3, from before vocabulary pack files,
 // version 4, from before requests, version 5, from before a service's
-// periods and bills, and version 6, from before approvals inside contracts.
+// periods and bills, version 6, from before approvals inside contracts, and
+// version 7, from before the contract text said that every answer is
+// recorded.
 
 #include <cstdio>
 #include <cstdlib>
@@ -173,6 +175,29 @@ constexpr unsigned char zh_hans_cn_6_bytes[] = {
 #include "history/zh-Hans-CN-6.pack.inc"
 #endif
 };
+// Version 7 of each, from before the contract text said that every answer
+// is recorded (codegen 6).
+constexpr unsigned char en_7_bytes[] = {
+#if KANHE_BO_EMBED
+#embed "../../packs/history/en-7.pack"
+#else
+#include "history/en-7.pack.inc"
+#endif
+};
+constexpr unsigned char zh_hant_hk_7_bytes[] = {
+#if KANHE_BO_EMBED
+#embed "../../packs/history/zh-Hant-HK-7.pack"
+#else
+#include "history/zh-Hant-HK-7.pack.inc"
+#endif
+};
+constexpr unsigned char zh_hans_cn_7_bytes[] = {
+#if KANHE_BO_EMBED
+#embed "../../packs/history/zh-Hans-CN-7.pack"
+#else
+#include "history/zh-Hans-CN-7.pack.inc"
+#endif
+};
 // Version 5 of each, from before a service's periods and bills.
 constexpr unsigned char en_5_bytes[] = {
 #if KANHE_BO_EMBED
@@ -239,6 +264,12 @@ const PackText texts_6[] = {
     {"zh-Hans-CN", as_text(zh_hans_cn_6_bytes)},
 };
 
+const PackText texts_7[] = {
+    {"en", as_text(en_7_bytes)},
+    {"zh-Hant-HK", as_text(zh_hant_hk_7_bytes)},
+    {"zh-Hans-CN", as_text(zh_hans_cn_7_bytes)},
+};
+
 const PackText texts_3[] = {
     {"en", as_text(en_3_bytes)},
     {"zh-Hant-HK", as_text(zh_hant_hk_3_bytes)},
@@ -246,15 +277,21 @@ const PackText texts_3[] = {
 };
 
 /// Every release carried, the current one first, then newest first.
-constexpr Officials release_order[] = {Officials::current,           Officials::before_approvals,
-                                       Officials::before_billing,    Officials::before_requests,
-                                       Officials::before_pack_files, Officials::before_temperature,
+constexpr Officials release_order[] = {Officials::current,
+                                       Officials::before_recorded_answers,
+                                       Officials::before_approvals,
+                                       Officials::before_billing,
+                                       Officials::before_requests,
+                                       Officials::before_pack_files,
+                                       Officials::before_temperature,
                                        Officials::before_vocabulary};
 
 std::span<const PackText> texts_of(const Officials which) noexcept {
     switch (which) {
     case Officials::current:
         return texts;
+    case Officials::before_recorded_answers:
+        return texts_7;
     case Officials::before_approvals:
         return texts_6;
     case Officials::before_billing:
@@ -313,6 +350,8 @@ const std::vector<Pack>& read_release(const Officials which) {
     switch (which) {
     case Officials::current:
         return read_once<Officials::current>();
+    case Officials::before_recorded_answers:
+        return read_once<Officials::before_recorded_answers>();
     case Officials::before_approvals:
         return read_once<Officials::before_approvals>();
     case Officials::before_billing:

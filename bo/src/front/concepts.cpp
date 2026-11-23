@@ -662,6 +662,7 @@ constexpr SentenceSpec unsorted_sentences[] = {
     {"request-expiry-only", "kind"},
     {"request-no-failure", ""},
     {"answers-note", "function"},
+    {"answers-note-recorded", "function"},
     {"answer-done", "kind"},
     {"answer-fails", "kind"},
     {"answer-fails-expired", "kind"},

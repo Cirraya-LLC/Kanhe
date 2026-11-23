@@ -27,7 +27,7 @@ The reference is [`spec/bo.md`](../spec/bo.md), with the conformance suite
 |---|---|
 | `src/front/` | What reads source: the language and vocabulary packs, the lexer, the parser, the checker, the contract text, the formatter, forms, and calls' arguments. It also builds with Clang, so that libFuzzer fuzzes it |
 | `src/` | Building: the checked model lowered (`lower.cpp`) to WebAssembly (`wasm.cpp`) with its runtime (`runtime*.cpp`), each function's fuel and output bounds (`cost.cpp`), and the contract's tests run on its code (`scenario.cpp`) |
-| `packs/` | The official language packs (`en`, `zh-Hant-HK`, `zh-Hans-CN`, version 7), with every released version in `packs/history/` |
+| `packs/` | The official language packs (`en`, `zh-Hant-HK`, `zh-Hans-CN`, version 8), with every released version in `packs/history/` |
 | `vocab/` | The official vocabulary packs (`finance`, `commerce`, `services`), with earlier versions in `vocab/history/` |
 | `stdlib/` | The standard terms of the built-in actions |
 | `cli/` | The `bo` program |
@@ -390,11 +390,12 @@ The same in Traditional Chinese (`bo fmt --language zh-Hant-HK`):
 ```
 
 A failed request and one no answer reaches by its deadline (expired) take the rule for failures,
-unless one is written for expiry (`when notify expires`). An answer is never refused, so these
-rules ask no consent and refuse nothing; from codegen 6 on, a rule that would still refuse the
-call (an overflow, a date past 9999, a request too large) changes nothing, and the answer is
-recorded with the reason in its event (`"refused": "bo:overflow"`); an instance that has ended
-takes its answers but asks nothing more. The contract text states every request, its deadline, and what happens if it fails.
+unless one is written for expiry (`when notify expires`). An answer is always recorded, so these
+rules ask no consent and have no `requires` or `reject`; a rule that cannot be carried out (an
+overflow, a date past 9999, a request too large) has what it changed put back, and the answer is
+recorded with the reason in its event (`"refused": "bo:overflow"`; code built by codegens 4 and 5
+refuses such an answer instead, its request left open, and the text of their deploys says so); an
+instance that has ended takes its answers but asks nothing more. The contract text states every request, its deadline, and what happens if it fails.
 Tests answer requests as an executor, a keeper, or a person would:
 
 ```

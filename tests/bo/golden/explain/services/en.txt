@@ -95,7 +95,7 @@ A call that does not meet one of an action's requirements is refused, and the in
   5.4.2 It does terminate, under that action's clauses.
 
 6. Answers to requests
-6.1 The function result takes every answer to the contract's requests: an executor's, a person's by hand, or a keeper's once a deadline has passed (expired). It records the answer as an event and applies the rule below for it, if there is one. An answer is never refused, so these rules ask no consent and refuse nothing; on an instance that has ended, they change no state and make no requests.
+6.1 The function result takes every answer to the contract's requests: an executor's, a person's by hand, or a keeper's once a deadline has passed (expired). It records the answer as an event and applies the rule below for it, if there is one. An answer is always recorded, so these rules ask no consent; if a rule cannot be carried out (a number too large or a date out of range, for instance), what it changed is put back, and the answer's event gives the reason. On an instance that has ended, they change no state and make no requests.
 
 6.2 When a request invoice is done:
   6.2.1 It asks an executor for notify for the customer, outside the ledger, to be answered within 1 day of the call (its deadline). [R10]

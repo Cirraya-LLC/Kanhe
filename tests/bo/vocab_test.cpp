@@ -241,6 +241,7 @@ TEST_CASE("the official vocabulary packs are files, their concepts the edition's
     CHECK(core == 85);
     // Each release reads with its own versions.
     CHECK(vocabulary_packs(Officials::current).front()->version == 3);
+    CHECK(vocabulary_packs(Officials::before_recorded_answers).front()->version == 3);
     CHECK(vocabulary_packs(Officials::before_approvals).front()->version == 3);
     CHECK(vocabulary_packs(Officials::before_billing).front()->version == 2);
     CHECK(vocabulary_packs(Officials::before_requests).front()->version == 2);

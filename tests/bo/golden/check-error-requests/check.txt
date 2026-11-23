@@ -55,8 +55,8 @@ test "answers"
 13:31 error check.request-value: state: a request carries numbers, money, quantities, rates, dates, durations, texts, yes or no, parties, and lists of them, not a state
 15:5 error check.each-body: request notify within 1 day: the block of each runs once for each item, so it cannot change the state, do an action, or make a request; move it out of each
 17:1 error check.request-count: flood can make 17 requests in one call; a call makes at most 16
-37:3 error check.answer-line: requires amount > 0: an answer is never refused and cites no consent, so a rule for answers does no action, refuses nothing, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
-38:3 error check.answer-line: owner = we: an answer is never refused and cites no consent, so a rule for answers does no action, refuses nothing, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
+37:3 error check.answer-line: requires amount > 0: an answer is always recorded and cites no consent, so a rule for answers does no action, writes no requires or reject, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
+38:3 error check.answer-line: owner = we: an answer is always recorded and cites no consent, so a rule for answers does no action, writes no requires or reject, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
 40:6 error check.answer-twice: a second rule for notify: one rule for each kind and outcome
 43:1 warning check.answer-unasked: the contract makes no request ping, so this rule never applies
 49:12 error check.test-answer: executor ping done: a step answers a request the contract makes, as executor KIND done, fails, or expires, giving at most a result and a reason, both texts

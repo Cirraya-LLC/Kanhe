@@ -593,7 +593,7 @@ TEST_CASE("approvals: the line, the person type, and their checks", "[bo][check]
           "check.when-approvals");
     CHECK(check_codes(head + "can go by we\n  requires 1 approval within 7 days\n"
                              "  active -> gone\nwhen due go\n") == "check.when-approvals");
-    // A rule for answers refuses nothing, and waits for nobody.
+    // A rule for answers has no requirement, and waits for nobody.
     CHECK(check_codes(head + "can ask by we\n  request sync within 1 day\n"
                              "when sync done\n  requires 1 approval within 7 days\n") ==
           "check.answer-line");

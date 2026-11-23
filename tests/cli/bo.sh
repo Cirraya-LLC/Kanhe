@@ -111,7 +111,7 @@ contains -x 1 out.txt || fail "version names the edition"
 
 echo "== the official packs, and their digests"
 run bo packs list > out.txt
-contains -F "zh-Hant-HK   version 7   official   繁體中文（香港）" out.txt || fail "list"
+contains -F "zh-Hant-HK   version 8   official   繁體中文（香港）" out.txt || fail "list"
 run bo packs list --json > list.json
 json 'len(d)' < list.json > out.txt
 contains -x 3 out.txt || fail "three official packs"
@@ -121,7 +121,7 @@ for hash in SHA-256 SM3; do
     [ "$hash" = SM3 ] && option=sm3
     run bo packs list --json --hash "$option" |
         json "'\\n'.join(p['id'] + ' ' + str(p['version']) + ' ' + p['hash'] + ' ' + p['digest'] for p in d)" > digests.txt
-    grep -E "^(en|zh-Hant-HK|zh-Hans-CN) 7 $hash " "$GOLDEN" > expected.txt
+    grep -E "^(en|zh-Hant-HK|zh-Hans-CN) 8 $hash " "$GOLDEN" > expected.txt
     diff expected.txt digests.txt > /dev/null || fail "digests ($hash) differ from $GOLDEN"
     # The vocabulary packs too.
     run bo vocab list --json --hash "$option" |
@@ -145,7 +145,7 @@ run bo packs show zh-Hans-CN --json > show.json
 json 'd["keywords"]["kw.each"], d["vocabulary"]["unit.item"]["category"], d["reading"]["multipliers"]["万"]' < show.json > out.txt
 contains -Fx "['逐个'] unit 10000" out.txt || fail "show --json"
 json 'len(d["messages"]), len(d["sentences"])' < show.json > out.txt
-contains -Fx "273 291" out.txt || fail "messages and sentences"
+contains -Fx "273 292" out.txt || fail "messages and sentences"
 expect_exit 1 bo packs show fr
 contains -F "no pack fr" out.txt || fail "unknown pack"
 expect_exit 1 bo packs show en --section nope
@@ -573,7 +573,7 @@ contains -Fx "agreement.bo: built contract Agreement (Bo edition 1)" out.txt || 
 contains -F "functions  amend, close, countersign, create (creates), sign" out.txt || fail "functions"
 contains -F "code       $GOLDEN_SIZE bytes, SHA-256 $GOLDEN_HASH" out.txt || fail "code"
 contains -F "compiler   $COMPILER" out.txt || fail "compiler"
-contains -F "the packs en 7, zh-Hans-CN 7, zh-Hant-HK 7, and the vocabulary packs commerce 3 (SHA-256 digests)" out.txt || fail "packs"
+contains -F "the packs en 8, zh-Hans-CN 8, zh-Hant-HK 8, and the vocabulary packs commerce 3 (SHA-256 digests)" out.txt || fail "packs"
 contains -F "wrote" out.txt && fail "nothing written without --out"
 # The highest fuel and output bounds, as the golden keeps them.
 AMEND_FUEL="$(sed -n 's/^bound amend: fuel \([0-9]*\),.*/\1/p' "$BUILDS/agreement-en/build.txt")"
@@ -923,7 +923,7 @@ contains -Fx "language:   bo (compiler: $COMPILER)" show.txt || fail "show: comp
 d contract export "$C" --out exported.boc > /dev/null
 cmp agreement.boc exported.boc || fail "the deploy file, exported as built"
 run bo rebuild exported.boc > rebuild.txt
-contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 7, zh-Hans-CN 7, zh-Hant-HK 7; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the bundle"
+contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 8, zh-Hans-CN 8, zh-Hant-HK 8; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the bundle"
 contains -F "rebuild:  rebuilds: the source rebuilds to the deployed code ($GOLDEN_SIZE bytes, SHA-256 ${GOLDEN_HASH:0:16}) with $COMPILER" rebuild.txt || fail "rebuild"
 run bo rebuild exported.boc --json | json 'd["status"], d["failed"], d["edition"], len(d["packs"])' > out.txt
 contains -Fx "rebuilds False 1 3" out.txt || fail "rebuild --json"
@@ -1000,7 +1000,7 @@ run contract verify e1.cbor --ledger-id "$D_ID" --json | json 'd["verified"]' | 
 # The deploy the evidence carries is the one deployed, and it rebuilds.
 cmp agreement.boc e1.boc || fail "the evidence's deploy"
 run bo rebuild e1.boc > rebuild.txt
-contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 7, zh-Hans-CN 7, zh-Hant-HK 7; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the source"
+contains -F "Bo, edition 1: $SOURCE_SIZE bytes of source; packs en 8, zh-Hans-CN 8, zh-Hant-HK 8; vocabulary packs commerce 3" rebuild.txt || fail "rebuild: the source"
 contains -F "rebuild:  rebuilds: the source rebuilds to the deployed code ($GOLDEN_SIZE bytes, SHA-256 ${GOLDEN_HASH:0:16})" rebuild.txt || fail "rebuild: rebuilds"
 run bo rebuild e1.boc --json | json 'd["status"], d["compiler"] == d["this_compiler"], d["bundle_size"]' > out.txt
 contains -Fx "rebuilds True $BUNDLE_SIZE" out.txt || fail "rebuild --json"
@@ -1596,6 +1596,11 @@ contains -F "If it expires, the rule for an expired remind applies (see the answ
 contains -Fx "6. Answers to requests" text.txt || fail "requests: the section"
 contains -F "When a request notify fails, or expires: [R33]" text.txt || fail "requests: the rule for failures"
 contains -F "It sets note to the answer's reason." text.txt || fail "requests: the answer's reason"
+contains -F "An answer is always recorded, so these rules ask no consent; if a rule cannot be carried out" text.txt || fail "requests: every answer recorded"
+# A deploy's text is that of the codegen that built it: today's records every answer.
+run bo build requests.bo --out requests.boc > /dev/null
+run bo explain requests.boc > text.txt
+contains -F "An answer is always recorded, so these rules ask no consent" text.txt || fail "requests: a deploy's answers recorded"
 run bo explain requests.bo --language zh-Hans-CN | contains -F "向执行器请求通知（对象：consignee），在账本之外办理，须在调用后 1 天内答复（即其期限）。" || fail "requests: the text in zh-Hans"
 # One tree in three languages: done, result, and reason stay names
 # elsewhere (the state done).
@@ -1613,7 +1618,7 @@ for code in request-kind request-within request-value request-count answer-twice
     contains -F "(check.$code)" out.txt || fail "requests: check.$code"
 done
 KANHE_LANGUAGE=zh-Hant expect_exit 2 bo check bad-requests.bo
-contains -F "答覆永不被拒絕" out.txt || fail "requests: check.answer-line in zh-Hant"
+contains -F "答覆一律記錄在案" out.txt || fail "requests: check.answer-line in zh-Hant"
 # The compose file's sample contract for its executor service (deploy/cluster)
 # builds and passes its tests; its scripts parse.
 run bo test "$SOURCE/deploy/cluster/executor/notices.bo" | contains -F "1 test: 1 passed" \

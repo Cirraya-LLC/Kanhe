@@ -580,8 +580,8 @@ int level_of(const m::Expr& e) noexcept {
 
 class Explainer {
 public:
-    Explainer(const m::Model& model, const Pack* language)
-        : model_(model), w_(language, model.utc_offset_ms) {}
+    Explainer(const m::Model& model, const Pack* language, const ExplainOptions& options)
+        : model_(model), w_(language, model.utc_offset_ms), options_(options) {}
 
     /// A concept by id: the edition's, or one of the users' vocabulary
     /// packs the model uses.
@@ -631,6 +631,7 @@ public:
 private:
     const m::Model& model_;
     Writer w_;
+    ExplainOptions options_;
     Explained out_;
     Rules used_;
     /// While an action's or a time rule's clauses are written.
@@ -1857,8 +1858,14 @@ private:
         ExplainedSection& s = section("answers", "section-answers");
         std::size_t n = 0;
         function_ = std::string(m::reply_function);
+        // Code built before codegen 6 refuses an answer whose rule cannot
+        // be carried out, and its text says so.
+        const bool recorded =
+            options_.codegen == 0 || options_.codegen >= codegen_recording_answers;
         add(s.clauses, s.number, n, "answers",
-            w_.say("answers-note", {{"function", plain(function_)}}), {});
+            w_.say(recorded ? "answers-note-recorded" : "answers-note",
+                   {{"function", plain(function_)}}),
+            {});
         for (const m::AnswerRule& r : model_.answers) {
             requirement_ = 0;
             Rules rules;
@@ -2002,8 +2009,8 @@ void explain_proposals(const model::Model& model, const cbor::Value& state, cons
 
 } // namespace
 
-Explained explain(const model::Model& model, const Pack* language) {
-    return Explainer(model, language).run();
+Explained explain(const model::Model& model, const Pack* language, const ExplainOptions& options) {
+    return Explainer(model, language, options).run();
 }
 
 ExplainedState explain_state(const model::Model& model, const cbor::Value& state,

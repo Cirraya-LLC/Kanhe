@@ -169,7 +169,10 @@ DeployText explain_deploy(const protocol::ContractDeployBody& deploy,
     const bo::Lexed lexed = bo::lex(bundle.source, lexicon);
     const bo::Parsed parsed = bo::parse(bundle.source, lexed);
     bo::Checked checked = bo::check(bundle.source, parsed.file);
-    out.explained = bo::explain(checked.model, reader);
+    // The text of the code that runs: as its codegen version built it.
+    const std::optional<bo::CompilerId> compiler = bo::parse_compiler(deploy.compiler);
+    out.explained = bo::explain(checked.model, reader,
+                                {.codegen = compiler ? compiler->codegen : std::uint64_t{0}});
     out.model = std::move(checked.model);
     return out;
 }
