@@ -232,6 +232,12 @@ public:
     /// reflects.
     Result<std::uint64_t> update(std::chrono::milliseconds budget = std::chrono::hours(24),
                                  std::size_t batch = 16384);
+    /// Catches up for a query, so that it reads its own writes: as `update`,
+    /// but within `budget` all told: it waits for another update at most
+    /// that long, takes small steps, and leaves a first build (in bulk, a
+    /// step of which takes seconds) to whoever started it, or to the next
+    /// `update`. Returns the log size the index reflects.
+    Result<std::uint64_t> catch_up(std::chrono::milliseconds budget, std::size_t batch = 1024);
     /// Empties the index, to be rebuilt by `update`.
     Status clear();
 

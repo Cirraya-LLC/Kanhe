@@ -5,9 +5,11 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <iterator>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <system_error>
@@ -549,14 +551,23 @@ std::string_view name(Group group) noexcept {
 struct Index::Impl {
     const ledger::Ledger& ledger;
     std::filesystem::path file;
-    /// The writer's connection, under `mutex`.
+    /// The writer's connection, under `mutex` (timed: a query waits for it
+    /// only as long as its budget).
     sql::Database db;
-    mutable std::mutex mutex;
+    mutable std::timed_mutex mutex;
     std::atomic<std::uint64_t> indexed = 0;
     /// A first build is under way: the secondary indexes are dropped until
     /// it reaches the log's end.
     bool bulk = false;
     std::uint64_t bulk_from = Index::bulk_from;
+
+    /// Far behind, and by more than it holds (a first build, or one that
+    /// more than doubles it): a build in bulk is due. Under `mutex`.
+    [[nodiscard]] bool far_behind() const {
+        const std::uint64_t held = indexed;
+        const std::uint64_t size = ledger.size();
+        return !bulk && size > held && size - held > bulk_from && size - held > held;
+    }
 
     /// Readers' connections, idle: searches and reports run on them, side
     /// by side and beside the writer (WAL).
@@ -1071,9 +1082,7 @@ Result<std::uint64_t> Index::update(std::chrono::milliseconds budget, std::size_
     // making them again at every pause would cost more than the build.
     // Behind by less than it holds, an index searches rely on keeps them,
     // and the rows go in with them in place.
-    const std::uint64_t held = impl_->indexed;
-    if (const std::uint64_t size = impl_->ledger.size();
-        !impl_->bulk && size > held && size - held > impl_->bulk_from && size - held > held) {
+    if (impl_->far_behind()) {
         SEARCH_CHECK(impl_->db.exec(drop_indexes));
         impl_->bulk = true;
     }
@@ -1094,6 +1103,31 @@ Result<std::uint64_t> Index::update(std::chrono::milliseconds budget, std::size_
             continue; // to make the indexes, if this was a first build
         }
         if (std::chrono::steady_clock::now() >= deadline) {
+            return reached;
+        }
+    }
+}
+
+Result<std::uint64_t> Index::catch_up(std::chrono::milliseconds budget, std::size_t batch) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    std::unique_lock lock(impl_->mutex, std::defer_lock);
+    if (!lock.try_lock_until(deadline)) {
+        return impl_->indexed.load(); // the writer is busy: answer as of now
+    }
+    // A first build (under way, or due) is the follower's: one of its steps
+    // takes seconds, and searches meanwhile read the rows as they are.
+    if (impl_->bulk || impl_->far_behind()) {
+        return impl_->indexed.load();
+    }
+    batch = std::max<std::size_t>(batch, 1);
+    for (;;) {
+        const std::uint64_t size = impl_->ledger.size();
+        if (impl_->indexed >= size) {
+            return impl_->indexed.load();
+        }
+        SEARCH_TRY(const std::uint64_t reached,
+                   impl_->step(std::min<std::uint64_t>(size, impl_->indexed + batch)));
+        if (reached < size && std::chrono::steady_clock::now() >= deadline) {
             return reached;
         }
     }
@@ -1382,8 +1416,16 @@ Result<Report> run_report(sql::Database& db, std::uint64_t as_of, const ReportRe
     out.as_of = as_of;
     const int columns = static_cast<int>(keys.size());
     for (;;) {
-        SEARCH_TRY(const bool row, s.step());
+        const Result<bool> row = s.step();
         if (!row) {
+            if (summed && row.error().code == Errc::unsupported) {
+                return fail(Errc::unsupported,
+                            "the field's sum is beyond the 64-bit range (about 9.2 x 10^18): "
+                            "report fewer instances (filters), or group them more finely");
+            }
+            return std::unexpected(row.error());
+        }
+        if (!*row) {
             break;
         }
         if (out.rows.size() == max_groups) {

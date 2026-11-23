@@ -106,9 +106,10 @@ struct Served::State {
         if (served == nullptr) {
             return error_response(503, "unavailable", "this server has no search index");
         }
-        // Read your own writes: catch up first, for at most two seconds.
+        // Read your own writes: catch up first, for at most two seconds (a
+        // first build is the follower's: the answer is then as of now).
         if (served->as_of() < ledger->size()) {
-            static_cast<void>(served->update(std::chrono::seconds(2)));
+            static_cast<void>(served->catch_up(std::chrono::seconds(2)));
         }
         const Params params(r.query.begin(), r.query.end());
         const auto bad = [](const std::string& problem) {

@@ -4,6 +4,7 @@
 #include "sqlite.hpp"
 
 #include <sqlite3.h>
+#include <string_view>
 #include <utility>
 
 namespace kanhe::search::sql {
@@ -59,6 +60,12 @@ Result<bool> Statement::step() {
     }
     if (rc == SQLITE_DONE) {
         return false;
+    }
+    // SUM over whole numbers whose total leaves 64 bits: an answer this
+    // index cannot give, not a fault of the index.
+    if (rc == SQLITE_ERROR &&
+        std::string_view(sqlite3_errmsg(sqlite3_db_handle(statement_))) == "integer overflow") {
+        return fail(Errc::unsupported, "a sum is beyond the 64-bit range");
     }
     return std::unexpected(
         failure(sqlite3_db_handle(statement_), "the search index could not be read or written"));

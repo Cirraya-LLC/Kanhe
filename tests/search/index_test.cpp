@@ -354,6 +354,26 @@ TEST_CASE("the index finds instances by their contract, state, parties, and fiel
     REQUIRE(summed->rows.size() == 1);
     CHECK(summed->rows[0].count == 1);
     CHECK_FALSE(summed->rows[0].sum);
+
+    // Fees that each fit in 64 bits but whose total does not: the report
+    // says so, where SQLite's SUM fails.
+    for (int i = 0; i < 2; ++i) {
+        protocol::ContractCallBody rich;
+        rich.contract = contract;
+        rich.function = "apply";
+        rich.arguments = output("submitted", 9'000'000'000'000'000'000, "S7C", false);
+        home.ok(home.org(), home.statement(home.org_id(), std::nullopt, rich));
+    }
+    REQUIRE((*index)->update());
+    const auto rich_only = search::InstanceFilter{.fields = {F{"class", "S7C", {}, {}}}};
+    const auto beyond = (*index)->report(rich_only, {.sum = "fee"});
+    REQUIRE_FALSE(beyond);
+    CHECK(beyond.error().code == kanhe::Errc::unsupported);
+    CHECK(std::string(beyond.error().detail).find("64-bit") != std::string::npos);
+    // Counted, they are reported.
+    const auto counted = (*index)->report(rich_only, {});
+    REQUIRE(counted);
+    CHECK(counted->rows[0].count == 2);
 }
 
 TEST_CASE("an index of another ledger, or of none, is rebuilt from the log", "[search]") {
@@ -761,4 +781,47 @@ TEST_CASE("reports count days and weeks in the offset's time, before 1970 too", 
     CHECK(keys(search::Group::day, 0) == Keys{"1970-01-01", "1970-01-02"});
     CHECK(keys(search::Group::day, 8 * 60) == Keys{"1970-01-01", "1970-01-02"});
     CHECK(keys(search::Group::week, 0) == Keys{"1969-12-29"});
+}
+
+TEST_CASE("a query's catch-up stays small and leaves a first build to the update", "[search]") {
+    World w;
+    const auto org = w.org_id();
+    auto add = [&](int count) {
+        for (int i = 0; i < count; ++i) {
+            w.ok(w.org(), w.statement(org, std::nullopt,
+                                      form("example.note/1",
+                                           metadata({{"class", cbor::Value::text("S1")}}))));
+        }
+    };
+    add(20);
+    TempFile file;
+    // A build in bulk is due from 10 entries behind.
+    auto opened = search::Index::open(w.ledger(), file.path, 10);
+    REQUIRE(opened);
+    search::Index& index = **opened;
+    // Far behind: a first build, which a query leaves to the update.
+    auto reached = index.catch_up(std::chrono::seconds(2));
+    REQUIRE(reached);
+    CHECK(*reached == 0);
+    CHECK(index.as_of() == 0);
+    REQUIRE(index.update());
+    const std::uint64_t built = index.as_of();
+    CHECK(built == w.ledger().size());
+    // A few behind: the query catches up, in steps as small as asked.
+    add(3);
+    reached = index.catch_up(std::chrono::seconds(2), 1);
+    REQUIRE(reached);
+    CHECK(*reached == w.ledger().size());
+    CHECK(index.as_of() == w.ledger().size());
+    auto found = index.records(
+        {.metadata = {search::RecordFilter::Metadata{"class", "S1", {}, {}}}}, {.limit = 100});
+    REQUIRE(found);
+    CHECK(found->rows.size() == 23);
+    // With no time at all, one step, and it answers as of where it is.
+    const std::uint64_t before = w.ledger().size();
+    add(2);
+    reached = index.catch_up(std::chrono::milliseconds(0), 1);
+    REQUIRE(reached);
+    CHECK(*reached > before);
+    CHECK(*reached < w.ledger().size());
 }

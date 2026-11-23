@@ -27,8 +27,11 @@ to rely on.
 `kanhe-index serve` serves the ledger read-only, with the index's routes beside the ledger's
 read routes: `GET /v1/records`, `/v1/records/{id}/versions`, `/v1/instances`, and
 `/v1/reports/records|instances`, under the ledger's read tokens. Run it beside the primary on the
-same directory (it catches up with what the primary writes before each read) or on a replica, as
-an explorer runs beside a node. An AI agent searches through it (`kanhe mcp --server URL`, the
+same directory (it catches up with what the primary writes before each read, for at most two
+seconds; during a first build, which its own thread makes, a read answers as of where the index
+is, and says so) or on a replica, as an explorer runs beside a node. A sum whose total is beyond
+the 64-bit range is refused with a message to that effect: report fewer instances, or group them
+more finely. An AI agent searches through it (`kanhe mcp --server URL`, the
 tools `kanhe_search_records`, `kanhe_search_instances`, and `kanhe_report`), and the
 [web console](../console/README.md) reads the index on its Things and Reports screens.
 
