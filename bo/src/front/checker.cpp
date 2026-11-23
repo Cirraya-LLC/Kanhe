@@ -2638,8 +2638,8 @@ void Checker::check_answer(const ast::AnswerRule& r) {
     }
     frames_.emplace_back();
     place_ = Place::answer;
-    // An answer is never refused and cites no consent: its rule does no
-    // action, refuses nothing, and sets no party's field.
+    // An answer is always recorded and cites no consent: its rule does no
+    // action, has no requires or reject, and sets no party's field.
     std::vector<m::Consent> consents;
     consents_ = &consents;
     for (const ast::Do& d : r.actions) {

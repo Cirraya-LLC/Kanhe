@@ -197,7 +197,9 @@ std::vector<Lexicon::Impl::DatePart> date_parts(std::string_view pattern) {
 Lexicon::Lexicon(const PackSet& packs) : impl_(std::make_unique<Impl>()) {
     Impl& lx = *impl_;
     lx.implicit_vocabulary = packs.implicit_vocabulary();
-    if (packs.officials() == Officials::current) {
+    // 須由 reads as 須 + 由 from the official packs version 7 on.
+    if (packs.officials() == Officials::current ||
+        packs.officials() == Officials::before_recorded_answers) {
         lx.requires_by = find_concept("kw.by");
     }
     lx.vocabularies = packs.vocabularies_handle();

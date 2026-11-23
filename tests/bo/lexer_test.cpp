@@ -250,6 +250,13 @@ TEST_CASE("a count of approvals, and the prefix requires joined to by", "[bo][le
     CHECK(tokens("須由", before) == std::vector<std::string>{"name 須由 split=kw.requires/由"});
     CHECK(tokens("2 approvals", before) == std::vector<std::string>{"number 2", "name approvals"});
     CHECK(codes(lex("2人批核", before)) == "lex.number-suffix");
+    // Version 7 reads them as today's packs do.
+    const PackSetRead seventh = make_pack_set({}, Officials::before_recorded_answers);
+    REQUIRE(seventh.set.has_value());
+    const Lexicon version_7(*seventh.set);
+    CHECK(tokens("須由", version_7) == std::vector<std::string>{"word kw.requires", "word kw.by"});
+    CHECK(tokens("2 approvals", version_7) ==
+          std::vector<std::string>{"number 2", "word cond.approval form=plural"});
 }
 
 TEST_CASE("places: lines and columns count characters, offsets count bytes", "[bo][lexer]") {

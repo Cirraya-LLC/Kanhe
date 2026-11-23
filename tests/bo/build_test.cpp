@@ -321,11 +321,11 @@ TEST_CASE("another compiler's output is reported as such", "[bo][build]") {
     newer.compiler = other_codegen();
     auto bundle = decode_source_bundle(*deploy.source);
     REQUIRE(bundle.has_value());
-    bundle->packs[2].version = 8;
+    bundle->packs[2].version = 9;
     newer.source = *encode_source_bundle(*bundle);
     r = rebuilt(newer);
     CHECK(r.status == RebuildStatus::other_compiler);
-    CHECK(mentions(r, "zh-Hant-HK version 8; this compiler carries version 7"));
+    CHECK(mentions(r, "zh-Hant-HK version 9; this compiler carries version 8"));
     // A vocabulary pack version this compiler does not carry.
     bundle = decode_source_bundle(*deploy.source);
     REQUIRE(bundle->vocabulary.size() == 1);
@@ -509,6 +509,23 @@ TEST_CASE("a deploy made before approvals still rebuilds, its names as they were
     // A contract of before approvals builds to the same code with today's
     // packs: the agreement's deploys rebuild as they were.
     CHECK(deploy_of(agreement(), *then.set).code == deploy_of(agreement()).code);
+}
+
+TEST_CASE("a deploy made with the official packs version 7 still rebuilds", "[bo][build]") {
+    // Version 8 words the contract text and messages again; it reads like
+    // version 7, so a source builds to the same code with either, and a
+    // deploy made with version 7 rebuilds with it.
+    PackSetRead then = make_pack_set({}, Officials::before_recorded_answers);
+    REQUIRE(then.set.has_value());
+    const protocol::ContractDeployBody old_deploy = deploy_of(agreement(), *then.set);
+    const auto bundle = decode_source_bundle(*old_deploy.source);
+    REQUIRE(bundle.has_value());
+    CHECK(bundle->packs.front().version == 7);
+    CHECK(rebuilt(old_deploy).status == RebuildStatus::rebuilds);
+    const protocol::ContractDeployBody today = deploy_of(agreement());
+    CHECK(old_deploy.code == today.code);
+    CHECK(old_deploy.interface == today.interface);
+    CHECK(old_deploy.source != today.source);
 }
 
 TEST_CASE("a deploy's use lines are its bundle's vocabulary packs", "[bo][build]") {

@@ -307,6 +307,35 @@ TEST_CASE("approvals: each line a requirement, and the function that approves", 
     CHECK(clauses_of(both, "approve").size() == 2);
 }
 
+TEST_CASE("the note on answers says what the code's codegen does with them", "[bo][explain]") {
+    // Code built from codegen 6 on records every answer, putting back what
+    // a rule that cannot be carried out changed; code built by codegens 4
+    // and 5 refuses such an answer, and a deploy of it keeps the note its
+    // text had.
+    const model::Model vps = model_of(golden_dir / "example-vps-en/source.bo");
+    const auto note = [&](const ExplainOptions& options, std::string_view id) {
+        const Explained text = explain(vps, language(id), options);
+        const std::vector<const ExplainedClause*> answers = clauses_of(text, "answers");
+        REQUIRE(answers.size() == 1);
+        return answers.front()->text;
+    };
+    for (const auto& [id, file] : languages) {
+        INFO(id);
+        const Pack* pack = language(id);
+        const auto said = [&](std::string_view sentence) {
+            std::string text = pack->sentences.at(std::string(sentence));
+            return text.replace(text.find("{function}"), 10, "result");
+        };
+        CHECK(note({}, id) == said("answers-note-recorded"));
+        CHECK(note({.codegen = 6}, id) == said("answers-note-recorded"));
+        CHECK(note({.codegen = 5}, id) == said("answers-note"));
+        CHECK(note({.codegen = 4}, id) == said("answers-note"));
+        CHECK(said("answers-note") != said("answers-note-recorded"));
+    }
+    CHECK(contains(note({}, "en"), "An answer is always recorded"));
+    CHECK(contains(note({.codegen = 5}, "en"), "An answer is never refused"));
+}
+
 TEST_CASE("every inferred clause is marked, and every rule used explained", "[bo][explain]") {
     for (const Case& c : cases()) {
         INFO(c.name);

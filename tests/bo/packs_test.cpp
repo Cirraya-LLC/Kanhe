@@ -146,7 +146,8 @@ TEST_CASE("the official packs read, and their digests match the goldens", "[bo][
     // kind word thing, and spells the retired kind.record; version 2 lacks
     // the words added since (a temperature).
     for (const auto& [which, version] :
-         {std::pair{Officials::before_approvals, 6U}, std::pair{Officials::before_billing, 5U},
+         {std::pair{Officials::before_recorded_answers, 7U},
+          std::pair{Officials::before_approvals, 6U}, std::pair{Officials::before_billing, 5U},
           std::pair{Officials::before_requests, 4U}, std::pair{Officials::before_pack_files, 3U},
           std::pair{Officials::before_temperature, 2U},
           std::pair{Officials::before_vocabulary, 1U}}) {
@@ -186,7 +187,7 @@ TEST_CASE("the official packs read, and their digests match the goldens", "[bo][
                                  digest_hex(*r.pack, crypto::HashAlg::sm3));
         }
     }
-    CHECK(official_releases().size() == 7);
+    CHECK(official_releases().size() == 8);
     CHECK(official_releases().front() == Officials::current);
     // The official vocabulary packs (vocab.hpp), current and carried.
     const crypto::openssl::Provider provider;
@@ -222,7 +223,7 @@ static std::size_t vocabulary_words() {
 TEST_CASE("the official packs spell every keyword, word, message, and sentence", "[bo][packs]") {
     for (const Pack& pack : official_packs()) {
         INFO(pack.id);
-        CHECK(pack.version == 7);
+        CHECK(pack.version == 8);
         // Every concept but the retired ones, which only the earlier
         // official packs spell: the core's from the pack's file, the
         // official vocabulary packs' from theirs (vocab.hpp).

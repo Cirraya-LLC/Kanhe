@@ -36,10 +36,11 @@
 /// spelled out in the clause and marked with its rule ("[R3]"), and every
 /// rule used is explained at the end.
 ///
-/// The text depends on the model and the pack only, never on the language
-/// the source was written in, its layout, or its places: one contract gives
-/// the same text, byte for byte, through any spelling of it. A pack without
-/// a sentence falls back to English for it.
+/// The text depends on the model and the pack only (and, for a deploy, on
+/// the codegen version that built it: ExplainOptions), never on the
+/// language the source was written in, its layout, or its places: one
+/// contract gives the same text, byte for byte, through any spelling of it.
+/// A pack without a sentence falls back to English for it.
 namespace kanhe::bo {
 
 /// One clause of the contract text.
@@ -94,9 +95,24 @@ struct Explained {
     std::string text;
 };
 
+/// The first codegen version whose code records every answer, putting back
+/// what a rule for it that cannot be carried out changed (spec/bo.md 6.11
+/// and 16.3); code that codegens 4 and 5 built refuses such an answer.
+inline constexpr std::uint64_t codegen_recording_answers = 6;
+
+struct ExplainOptions {
+    /// The codegen version of the code the text is of, as a deploy's
+    /// compiler string names it; 0 for what this compiler builds. Before
+    /// codegen_recording_answers, the note on answers is the one such
+    /// deploys' text had (the sentence answers-note); from it on, it says
+    /// that every answer is recorded (answers-note-recorded).
+    std::uint64_t codegen = 0;
+};
+
 /// The contract text of a model in a pack's language (English if null).
 /// Meant for a model the checker found no errors in; any model is safe.
-[[nodiscard]] Explained explain(const model::Model& model, const Pack* language);
+[[nodiscard]] Explained explain(const model::Model& model, const Pack* language,
+                                const ExplainOptions& options = {});
 
 /// One field of an instance, as the contract text writes it.
 struct ExplainedValue {

@@ -63,4 +63,4 @@ answer sync done function=result
 36:26 error check.approvals-by: 5: approvals are by people of the home: by names a person or a list of people (a field or an input of the type person)
 43:3 error check.when-approvals: requires 1 approval within 7 days: a when rule takes no approvals: a keeper (a device) calls it, and nobody approves its call
 44:18 error check.when-approvals: close_out: a when rule takes no approvals: a keeper (a device) calls it, and nobody approves its call
-46:3 error check.answer-line: requires 1 approval within 7 days: an answer is never refused and cites no consent, so a rule for answers does no action, refuses nothing, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
+46:3 error check.answer-line: requires 1 approval within 7 days: an answer is always recorded and cites no consent, so a rule for answers does no action, writes no requires or reject, and sets no party; it sets fields, changes the state with -> STATE (or if STATE -> STATE), and makes requests
