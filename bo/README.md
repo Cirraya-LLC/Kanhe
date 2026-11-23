@@ -394,7 +394,7 @@ unless one is written for expiry (`when notify expires`). An answer is always re
 rules ask no consent and have no `requires` or `reject`; a rule that cannot be carried out (an
 overflow, a date past 9999, a request too large) has what it changed put back, and the answer is
 recorded with the reason in its event (`"refused": "bo:overflow"`; code built by codegens 4 and 5
-refuses such an answer instead, and the text of their deploys says what it said then); an
+refuses such an answer instead, its request left open, and the text of their deploys says so); an
 instance that has ended takes its answers but asks nothing more. The contract text states every request, its deadline, and what happens if it fails.
 Tests answer requests as an executor, a keeper, or a person would:
 

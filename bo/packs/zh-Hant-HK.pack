@@ -538,8 +538,8 @@
     "request-expiry-only": "如請求過期，即適用請求{kind}過期時的規則（見「請求的答覆」）；如失敗，則不再有其他事發生：答覆記錄為事件。",
     "request-no-failure": "如請求失敗或過期，不再有其他事發生：答覆記錄為事件。",
     # The note on answers for code built by codegens 4 and 5, which refuses an
-    # answer whose rule cannot be carried out: the words its text had then.
-    "answers-note": "函數 {function} 接受合約所有請求的答覆：執行器的答覆、由人親手作出的答覆，或期限過後由排程器作出的答覆（過期）。它把答覆記錄為事件，並適用以下相應的規則（如有）。答覆永不被拒絕，因此這些規則不要求同意，亦不拒絕任何事；實例結束後，它們不轉變狀態，亦不發出請求。",
+    # answer whose rule cannot be carried out; from codegen 6 on, the next one.
+    "answers-note": "函數 {function} 接受合約所有請求的答覆：執行器的答覆、由人親手作出的答覆，或期限過後由排程器作出的答覆（過期）。它把答覆記錄為事件，並適用以下相應的規則（如有）。這些規則不要求同意；如規則無法執行（例如數字過大或日期超出範圍），該答覆即被拒絕：調用失敗，請求仍待答覆，可再次答覆，或於期限過後過期。實例結束後，它們不轉變狀態，亦不發出請求。",
     "answers-note-recorded": "函數 {function} 接受合約所有請求的答覆：執行器的答覆、由人親手作出的答覆，或期限過後由排程器作出的答覆（過期）。它把答覆記錄為事件，並適用以下相應的規則（如有）。答覆一律記錄在案，因此這些規則不要求同意；如規則無法執行（例如數字過大或日期超出範圍），其所作的更改會全部還原，答覆的事件會載明原因。實例結束後，它們不轉變狀態，亦不發出請求。",
     "answer-done": "請求{kind}完成時：",
     "answer-fails": "請求{kind}失敗時：",

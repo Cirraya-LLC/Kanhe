@@ -310,8 +310,8 @@ TEST_CASE("approvals: each line a requirement, and the function that approves", 
 TEST_CASE("the note on answers says what the code's codegen does with them", "[bo][explain]") {
     // Code built from codegen 6 on records every answer, putting back what
     // a rule that cannot be carried out changed; code built by codegens 4
-    // and 5 refuses such an answer, and a deploy of it keeps the note its
-    // text had.
+    // and 5 refuses such an answer, leaving its request open, and the text
+    // of a deploy of it says so.
     const model::Model vps = model_of(golden_dir / "example-vps-en/source.bo");
     const auto note = [&](const ExplainOptions& options, std::string_view id) {
         const Explained text = explain(vps, language(id), options);
@@ -333,7 +333,8 @@ TEST_CASE("the note on answers says what the code's codegen does with them", "[b
         CHECK(said("answers-note") != said("answers-note-recorded"));
     }
     CHECK(contains(note({}, "en"), "An answer is always recorded"));
-    CHECK(contains(note({.codegen = 5}, "en"), "An answer is never refused"));
+    CHECK(contains(note({.codegen = 5}, "en"),
+                   "the answer is refused: the call fails, and the request stays open"));
 }
 
 TEST_CASE("every inferred clause is marked, and every rule used explained", "[bo][explain]") {

@@ -537,8 +537,8 @@
     "request-expiry-only": "如果请求过期，即适用请求{kind}过期时的规则（见“请求的答复”）；如果失败，则不再发生其他事情：答复记录为事件。",
     "request-no-failure": "如果请求失败或过期，不再发生其他事情：答复记录为事件。",
     # The note on answers for code built by codegens 4 and 5, which refuses an
-    # answer whose rule cannot be carried out: the words its text had then.
-    "answers-note": "函数 {function} 接受合约所有请求的答复：执行器的答复、由人亲手作出的答复，或期限过后由调度器作出的答复（过期）。它把答复记录为事件，并适用以下相应的规则（如有）。答复永远不会被拒绝，因此这些规则不要求同意，也不拒绝任何内容；实例结束后，它们不改变状态，也不发出请求。",
+    # answer whose rule cannot be carried out; from codegen 6 on, the next one.
+    "answers-note": "函数 {function} 接受合约所有请求的答复：执行器的答复、由人亲手作出的答复，或期限过后由调度器作出的答复（过期）。它把答复记录为事件，并适用以下相应的规则（如有）。这些规则不要求同意；如果规则无法执行（例如数字过大或日期超出范围），该答复即被拒绝：调用失败，请求仍待答复，可以再次答复，或在期限过后过期。实例结束后，它们不改变状态，也不发出请求。",
     "answers-note-recorded": "函数 {function} 接受合约所有请求的答复：执行器的答复、由人亲手作出的答复，或期限过后由调度器作出的答复（过期）。它把答复记录为事件，并适用以下相应的规则（如有）。答复一律记录在案，因此这些规则不要求同意；如果规则无法执行（例如数字过大或日期超出范围），它所作的更改会全部还原，答复的事件会注明原因。实例结束后，它们不改变状态，也不发出请求。",
     "answer-done": "请求{kind}完成时：",
     "answer-fails": "请求{kind}失败时：",

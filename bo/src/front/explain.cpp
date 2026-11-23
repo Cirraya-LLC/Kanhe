@@ -1859,7 +1859,7 @@ private:
         std::size_t n = 0;
         function_ = std::string(m::reply_function);
         // Code built before codegen 6 refuses an answer whose rule cannot
-        // be carried out; its text keeps the note it had.
+        // be carried out, and its text says so.
         const bool recorded =
             options_.codegen == 0 || options_.codegen >= codegen_recording_answers;
         add(s.clauses, s.number, n, "answers",

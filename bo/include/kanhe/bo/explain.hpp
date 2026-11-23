@@ -103,9 +103,10 @@ inline constexpr std::uint64_t codegen_recording_answers = 6;
 struct ExplainOptions {
     /// The codegen version of the code the text is of, as a deploy's
     /// compiler string names it; 0 for what this compiler builds. Before
-    /// codegen_recording_answers, the note on answers is the one such
-    /// deploys' text had (the sentence answers-note); from it on, it says
-    /// that every answer is recorded (answers-note-recorded).
+    /// codegen_recording_answers, the note on answers says that an answer
+    /// whose rule cannot be carried out is refused and its request stays
+    /// open (the sentence answers-note); from it on, that every answer is
+    /// recorded (answers-note-recorded).
     std::uint64_t codegen = 0;
 };
 
