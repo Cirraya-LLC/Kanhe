@@ -343,7 +343,8 @@ std::vector<CommandSpec> console_commands() {
                {"sheet", "FILE", "The kind's sheet (default: the console's kinds)"}}),
          cmd_certificate_print,
          "A template fills {{kind}}, {{issuer}}, {{issued}}, {{record}}, {{verify_url}},\n"
-         "{{qr}} (the QR code, SVG), {{fields}} (the printed fields as a list), and {{NAME}} or\n"
+         "{{qr}} (the QR code, SVG), {{qr_size}} (its size to print: 34mm, more for a denser\n"
+         "code), {{fields}} (the printed fields as a list), and {{NAME}} or\n"
          "{{field.NAME}} for one printed field; a name it does not know stops it before\n"
          "anything is written. Revoked and replaced certificates are not printed. Each link\n"
          "names the archives that keep the ledger (kanhe trust archive) as they are when it\n"

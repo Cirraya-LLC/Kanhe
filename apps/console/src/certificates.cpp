@@ -205,7 +205,7 @@ dd { margin: 0; white-space: pre-line }
 .foot { margin-top: auto; display: flex; align-items: flex-end; justify-content: space-between;
   gap: 12mm; font-size: 9.5pt; line-height: 1.55; color: #6d675c }
 .id { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 7.5pt; word-break: break-all }
-.qr svg { display: block; width: 34mm; height: 34mm }
+.qr svg { display: block; width: {{qr_size}}; height: {{qr_size}} }
 @media print { html { background: none } .sheet { margin: 0 } }
 </style>
 </head>
@@ -550,6 +550,16 @@ std::string qr_svg(std::string_view text) {
         size, path);
 }
 
+std::string qr_print_size(std::string_view text) {
+    const auto qr =
+        qrcodegen::QrCode::encodeText(std::string(text).c_str(), qrcodegen::QrCode::Ecc::MEDIUM);
+    const int side = qr.getSize() + 2 * quiet_zone;
+    // At least 0.37 mm a module (quiet zone included), and never under 34 mm:
+    // a link that names four archives prints at about 42 mm.
+    const int mm = std::max(34, (side * 37 + 99) / 100);
+    return std::to_string(mm) + "mm";
+}
+
 std::string default_certificate_template(std::string_view language) {
     const Words words = words_in(language);
     std::string page(page_template);
@@ -562,7 +572,7 @@ std::string default_certificate_template(std::string_view language) {
 
 std::string fill_certificate(std::string_view html, const CertificatePage& page) {
     static const std::set<std::string, std::less<>> words{
-        "kind", "issuer", "issued", "record", "verify_url", "qr", "fields"};
+        "kind", "issuer", "issued", "record", "verify_url", "qr", "qr_size", "fields"};
     auto value_of = [&](const std::string& name) -> std::string {
         if (name == "kind") {
             return escape_html(page.kind);
@@ -581,6 +591,9 @@ std::string fill_certificate(std::string_view html, const CertificatePage& page)
         }
         if (name == "qr") {
             return qr_svg(page.verify_url);
+        }
+        if (name == "qr_size") {
+            return qr_print_size(page.verify_url);
         }
         if (name == "fields") {
             std::string list = "<dl>\n";

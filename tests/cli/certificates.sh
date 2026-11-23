@@ -172,11 +172,14 @@ contains -F "content=\"default-src 'none'; style-src 'unsafe-inline'; base-uri '
 contains "BA &amp; MA" "pages/$LEE.html" || fail "values are escaped"
 ! contains "A, A, B" "$PAGE" || fail "the grades are not printed"
 contains 'lang="en"' "$PAGE" && contains "Scan the code" "$PAGE"
+# Two archives named: a denser code, printed at 34 mm or more (0.37 mm a module).
+contains "width: [34][0-9]mm; height: [34][0-9]mm" "$PAGE" || fail "the code's printed size"
 cert print "$TOKEN" --out zh --url "$URL" --language zh-Hant > /dev/null
 contains "簽發日期" "zh/$TOKEN.html" && contains "lang=zh-Hant" "zh/$TOKEN.html" || fail "in Chinese"
-printf '<p>{{name}} / {{field.year}} / {{issued}}</p>{{qr}}' > own.html
+printf '<p>{{name}} / {{field.year}} / {{issued}}</p>{{qr}}<i>{{qr_size}}</i>' > own.html
 cert print "$TOKEN" --out own --url "$URL" --template own.html > /dev/null
 contains "<p>Chan, Tai Man / 2026 / 20" "own/$TOKEN.html" || fail "one's own template"
+contains "<i>[34][0-9]mm</i>" "own/$TOKEN.html" || fail "the code's size in one's own template"
 printf '<p>{{grades}}</p>' > sealed.html
 expect_exit 1 kanhe-console certificate print "$TOKEN" --out sealed --url "$URL" --template sealed.html
 contains "{{grades}}" out.txt || fail "a sealed field cannot be printed"

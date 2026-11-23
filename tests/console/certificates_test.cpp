@@ -178,6 +178,13 @@ TEST_CASE("the verifier's link names the archives after the address, within a QR
                                                             "zh-Hant", {archives[0]}))) == 73);
     CHECK(modules_of(console::qr_svg(link)) == 105);
     CHECK(modules_of(console::qr_svg(std::string(console::max_verifier_link, 'x'))) == 109);
+    // Printed at least 0.37 mm a module, quiet zone included: 34 mm until a
+    // link is dense, then larger.
+    CHECK(console::qr_print_size(plain) == "34mm");
+    CHECK(console::qr_print_size(console::verifier_link(verifier, ledger, record, address,
+                                                        "zh-Hant", {archives[0]})) == "34mm");
+    CHECK(console::qr_print_size(link) == "42mm");
+    CHECK(console::qr_print_size(std::string(console::max_verifier_link, 'x')) == "44mm");
 }
 
 TEST_CASE("a page is filled from a template", "[console][certificates]") {
@@ -195,6 +202,9 @@ TEST_CASE("a page is filled from a template", "[console][certificates]") {
     // A field named like one of the words is reached as field.NAME.
     CHECK(console::fill_certificate("{{field.qr}}", page) == "a field");
     CHECK_THAT(console::fill_certificate("{{qr}}", page), ContainsSubstring("<svg"));
+    CHECK(console::fill_certificate("{{qr_size}}", page) == "34mm");
+    CHECK_THAT(console::fill_certificate(console::default_certificate_template("en"), page),
+               ContainsSubstring(".qr svg { display: block; width: 34mm; height: 34mm }"));
     CHECK_THAT(console::fill_certificate("{{fields}}", page),
                ContainsSubstring("<dt>Name</dt><dd>&lt;Chan&gt;</dd>"));
     CHECK_THAT(refusal([&] { return console::fill_certificate("{{grades}}", page); }),

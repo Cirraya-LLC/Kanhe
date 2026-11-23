@@ -149,6 +149,10 @@ inline constexpr std::size_t max_verifier_link = 800;
 /// A QR code of `text` as an SVG element (medium error correction, the
 /// quiet zone included), to put in a page.
 [[nodiscard]] std::string qr_svg(std::string_view text);
+/// How large to print `text`'s QR code so that a phone reads it easily: at
+/// least 0.37 mm a module, quiet zone included, and never under 34 mm (CSS,
+/// such as "42mm"). A link that names archives makes a denser code.
+[[nodiscard]] std::string qr_print_size(std::string_view text);
 
 /// The verifier page's language for one of the console's (zh-Hant-HK is
 /// zh-Hant); English for any other.
@@ -179,7 +183,8 @@ struct CertificatePage {
 [[nodiscard]] std::string default_certificate_template(std::string_view language);
 
 /// Fills a template: {{kind}}, {{issuer}}, {{issued}}, {{record}},
-/// {{verify_url}}, {{qr}} (the QR code, an SVG), {{fields}} (the printed
+/// {{verify_url}}, {{qr}} (the QR code, an SVG), {{qr_size}} (its size to
+/// print, qr_print_size), {{fields}} (the printed
 /// fields as a list), and {{NAME}} or {{field.NAME}} for one printed field
 /// (field.NAME when NAME is one of the words before). Values are escaped as
 /// HTML text. Throws std::invalid_argument for a placeholder it does not
