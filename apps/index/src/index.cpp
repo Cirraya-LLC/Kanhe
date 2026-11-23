@@ -551,10 +551,9 @@ std::string_view name(Group group) noexcept {
 struct Index::Impl {
     const ledger::Ledger& ledger;
     std::filesystem::path file;
-    /// The writer's connection, under `mutex` (timed: a query waits for it
-    /// only as long as its budget).
+    /// The writer's connection, under `mutex`.
     sql::Database db;
-    mutable std::timed_mutex mutex;
+    mutable std::mutex mutex;
     std::atomic<std::uint64_t> indexed = 0;
     /// A first build is under way: the secondary indexes are dropped until
     /// it reaches the log's end.
@@ -1110,9 +1109,16 @@ Result<std::uint64_t> Index::update(std::chrono::milliseconds budget, std::size_
 
 Result<std::uint64_t> Index::catch_up(std::chrono::milliseconds budget, std::size_t batch) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
-    std::unique_lock lock(impl_->mutex, std::defer_lock);
-    if (!lock.try_lock_until(deadline)) {
-        return impl_->indexed.load(); // the writer is busy: answer as of now
+    // The writer may be busy: try again every 10 ms until the deadline, then
+    // answer as of now. (Not a timed mutex: libstdc++'s try_lock_until on the
+    // steady clock does not build under ThreadSanitizer.)
+    std::unique_lock lock(impl_->mutex, std::try_to_lock);
+    while (!lock.owns_lock()) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return impl_->indexed.load();
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        static_cast<void>(lock.try_lock());
     }
     // A first build (under way, or due) is the follower's: one of its steps
     // takes seconds, and searches meanwhile read the rows as they are.
