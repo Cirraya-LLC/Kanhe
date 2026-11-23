@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <string>
@@ -189,29 +190,32 @@ Status write(std::string& out, const Json& value, int depth) {
         return {};
     }
     case Json::value_t::object: {
-        std::vector<std::pair<std::u16string, const std::string*>> keys;
-        keys.reserve(value.size());
-        for (const auto& [key, item] : value.items()) {
-            (void)item;
-            if (auto s = i_json_text(key, true); !s) {
+        // The members, sorted once with their values beside them: looking
+        // each name up again would read every name before it (an
+        // ordered_json object is a list), n^2 for n members.
+        using Member = Json::object_t::value_type;
+        std::vector<std::pair<std::u16string, const Member*>> members;
+        members.reserve(value.size());
+        for (const Member& member : value.get_ref<const Json::object_t&>()) {
+            if (auto s = i_json_text(member.first, true); !s) {
                 return s;
             }
-            keys.emplace_back(*utf16(key), &key);
+            members.emplace_back(*utf16(member.first), &member);
         }
-        std::ranges::sort(keys, {}, &std::pair<std::u16string, const std::string*>::first);
+        std::ranges::sort(members, {}, &std::pair<std::u16string, const Member*>::first);
         out.push_back('{');
         bool first = true;
-        for (const auto& [units, key] : keys) {
+        for (const auto& [units, member] : members) {
             (void)units;
             if (!first) {
                 out.push_back(',');
             }
             first = false;
-            if (auto s = write_string(out, *key); !s) {
+            if (auto s = write_string(out, member->first); !s) {
                 return s;
             }
             out.push_back(':');
-            if (auto s = write(out, value.at(*key), depth + 1); !s) {
+            if (auto s = write(out, member->second, depth + 1); !s) {
                 return s;
             }
         }
@@ -278,6 +282,70 @@ struct Checks {
     }
 };
 
+/// Builds the value parse_i_json returns, once Checks has passed it (no
+/// name twice, nothing nested past max_json_depth): what nlohmann's own
+/// builder makes, members in the order written, in time linear in the text.
+/// Its builder adds a member to an ordered_json object by first reading
+/// every name before it (the object is a list), n^2 for n members; here an
+/// object's members are kept as they come and made into the object, as
+/// they are, when it closes.
+struct Builder {
+    struct Open {
+        bool object = false;
+        Json array;
+        std::vector<std::pair<std::string, Json>> members;
+        std::string key;
+    };
+    std::vector<Open> open; // the containers open, innermost last
+    Json root;
+
+    bool put(Json got) {
+        if (open.empty()) {
+            root = std::move(got);
+        } else if (Open& top = open.back(); top.object) {
+            top.members.emplace_back(std::move(top.key), std::move(got));
+        } else {
+            top.array.get_ref<Json::array_t&>().push_back(std::move(got));
+        }
+        return true;
+    }
+    bool null() { return put(Json(nullptr)); }
+    bool boolean(bool got) { return put(Json(got)); }
+    bool number_integer(Json::number_integer_t got) { return put(Json(got)); }
+    bool number_unsigned(Json::number_unsigned_t got) { return put(Json(got)); }
+    bool number_float(Json::number_float_t got, const Json::string_t&) { return put(Json(got)); }
+    bool string(Json::string_t& got) { return put(Json(got)); }
+    bool binary(Json::binary_t& got) { return put(Json(got)); }
+    bool start_object(std::size_t) {
+        open.emplace_back().object = true;
+        return true;
+    }
+    bool key(Json::string_t& got) {
+        open.back().key = got;
+        return true;
+    }
+    bool end_object() {
+        auto members = std::move(open.back().members);
+        open.pop_back();
+        Json object = Json::object();
+        object.get_ref<Json::object_t&>() = Json::object_t(std::make_move_iterator(members.begin()),
+                                                           std::make_move_iterator(members.end()));
+        return put(std::move(object));
+    }
+    bool start_array(std::size_t) {
+        open.emplace_back().array = Json::array();
+        return true;
+    }
+    bool end_array() {
+        Json array = std::move(open.back().array);
+        open.pop_back();
+        return put(std::move(array));
+    }
+    bool parse_error(std::size_t, const std::string&, const nlohmann::detail::exception&) {
+        return false;
+    }
+};
+
 } // namespace
 
 Result<std::string> jcs(const Json& value) {
@@ -317,11 +385,11 @@ Result<Json> parse_i_json(std::string_view text) {
         return fail(Errc::malformed, "JSON text with a noncharacter, which I-JSON excludes");
     }
     // Then the value itself, nested at most 64 deep.
-    Json value = Json::parse(text, nullptr, false);
-    if (value.is_discarded()) {
+    Builder builder;
+    if (!Json::sax_parse(text, &builder)) {
         return fail(Errc::malformed, "not JSON");
     }
-    return value;
+    return std::move(builder.root);
 }
 
 Result<Json> parse_jcs(std::string_view text) {

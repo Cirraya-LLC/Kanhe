@@ -1265,12 +1265,12 @@ SOFTWARE.</pre>
       networkWitnesses: $("network-witnesses").value.split("\n").map((l) => l.trim()).filter((l) => l),
       trustNodes: trustNodes(), didDocument: c.did, statusList: c.list, distrust, rangeContext,
     };
-    const report = state.verifier.verifyCredential(c.text, c.evidence, options);
+    const report = state.verifier.verifyCredential(c.bytes, c.evidence, options);
     window.lastReport = report;
     if (!report.evidence) {
       $("summary").hidden = true;
       $("details").hidden = true;
-      const run = (o) => state.verifier.verifyCredential(c.text, c.evidence, o);
+      const run = (o) => state.verifier.verifyCredential(c.bytes, c.evidence, o);
       if (failsByDistrust(options, run)) {
         setVerdict("bad", t("distrust_failed"), t("distrust_failed_detail", { error: report.error }));
       } else if (failsByRangeContext(options, run)) {
@@ -1322,15 +1322,22 @@ SOFTWARE.</pre>
     }
   }
 
-  // A compact JWS: three base64url parts. Its bytes are verified as read.
-  function credentialText(bytes) {
-    if (bytes.length > 1 << 20) return null;
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(bytes).trim();
-    return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(text) ? bytes : null;
+  // Whether a file is a credential (a compact JWS) rather than evidence
+  // (CBOR), guessed from its first bytes: a JWS's header is a JSON object, so
+  // its base64url begins "ey". For the guess only, spaces, tabs, line ends,
+  // NULs, and a byte order mark before it are passed over. What is verified
+  // is the file's bytes exactly as `kanhe credential verify` reads them, not
+  // decoded, nothing replaced, nothing taken off (the verifier itself passes
+  // over line ends at the end of a JWS, and nothing else), so a credential
+  // with anything more is refused for the reason the command line gives.
+  function isCredential(bytes) {
+    let i = bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
+    while (i < bytes.length && [0x00, 0x09, 0x0a, 0x0d, 0x20].includes(bytes[i])) i++;
+    return bytes[i] === 0x65 && bytes[i + 1] === 0x79;
   }
 
-  async function loadCredential(text, name) {
-    const where = state.verifier.credentialAddresses(text);
+  async function loadCredential(bytes, name) {
+    const where = state.verifier.credentialAddresses(bytes);
     state.credential = null;
     state.bundle = null;
     if (where.error) {
@@ -1361,9 +1368,9 @@ SOFTWARE.</pre>
       }
     };
     const [did, list] = await Promise.all([optional(where.did_document), optional(where.status_list)]);
-    state.credential = { text, evidence, did, list };
+    state.credential = { bytes, evidence, did, list };
     state.bundle = evidence;
-    $("bundle-name").textContent = name + " \u00b7 " + humanSize(text.length);
+    $("bundle-name").textContent = name + " \u00b7 " + humanSize(bytes.length);
     verify();
   }
 
@@ -1487,9 +1494,8 @@ SOFTWARE.</pre>
   async function loadBundle(bytes, name, archive) {
     state.archive = archive || null;
     showSource();
-    const credential = credentialText(bytes);
-    if (credential) {
-      await loadCredential(credential, name);
+    if (isCredential(bytes)) {
+      await loadCredential(bytes, name);
       return;
     }
     state.credential = null;

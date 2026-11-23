@@ -7,6 +7,8 @@
 // way it can lie.
 
 #include <fstream>
+#include <ranges>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -325,6 +327,109 @@ TEST_CASE("a DID document nested too deeply is refused, not copied", "[credentia
     REQUIRE(options.did_document->size() <= verifier::max_did_document_size);
     CHECK(c.check(credential, bundle, options).did_document_problems ==
           std::vector<std::string>{"the DID document cannot be read (JSON nested too deeply)"});
+}
+
+namespace {
+
+/// `"NNN":0` for the first `count` names of three characters from 0-9, A-Z,
+/// and a-z, in JCS's order (for ASCII, the bytes').
+std::vector<std::string> members_of(std::size_t count) {
+    static constexpr std::string_view digits =
+        "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    const std::size_t base = digits.size();
+    REQUIRE(count <= base * base * base);
+    std::vector<std::string> out;
+    out.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        out.push_back(std::string{'"', digits[i / (base * base)], digits[i / base % base],
+                                  digits[i % base], '"', ':', '0'});
+    }
+    return out;
+}
+
+/// An object of these members, in this order.
+template <class Range>
+std::string object_of(const Range& members) {
+    std::string out = "{";
+    for (const std::string& m : members) {
+        out += out.size() == 1 ? "" : ",";
+        out += m;
+    }
+    return out + "}";
+}
+
+} // namespace
+
+TEST_CASE("JSON objects of many members are read and written in n log n", "[credentials]") {
+    // An object of 100,000 members (an ordered_json object finds a name by
+    // reading those before it: both reading and JCS once took n^2), written
+    // in reverse: read in the order written, written in JCS's.
+    const auto members = members_of(100'000);
+    const std::string sorted = object_of(members);
+    const std::string reversed = object_of(std::views::reverse(members));
+    const auto read = verifier::parse_i_json(reversed);
+    REQUIRE(read);
+    REQUIRE(read->size() == members.size());
+    CHECK(read->begin().key() == members.back().substr(1, 3)); // the last name, first
+    CHECK(*verifier::jcs(*read) == sorted);
+    auto twice = members;
+    twice.push_back(members[50'000]);
+    const auto repeated = verifier::parse_i_json(object_of(twice));
+    REQUIRE_FALSE(repeated);
+    CHECK(repeated.error().detail == "a JSON object names a member twice");
+
+    // A credential of almost 1 MiB, a payload of 98,000 members: read (a
+    // JCS payload, so written again to compare), then refused for the
+    // members this profile does not define.
+    const std::string header =
+        kanhe::to_base64url(kanhe::as_bytes(std::string_view(R"({"alg":"ES256","kid":"k"})")));
+    const std::string payload = object_of(std::span(members).first(98'000));
+    const std::string jws = header + "." + kanhe::to_base64url(kanhe::as_bytes(payload)) + "." +
+                            kanhe::to_base64url(Bytes(64, 1));
+    REQUIRE(jws.size() <= verifier::max_compact_size);
+    const auto addresses = verifier::credential_addresses(jws);
+    REQUIRE_FALSE(addresses);
+    CHECK(addresses.error().detail == "a credential member this profile does not define");
+
+    // A DID document of 256 KiB, the issuer's with as many more members as
+    // fit; and one with thousands of verification methods and of names in
+    // its assertionMethod, none of them the issuer's key (read for the status
+    // list's keys).
+    College c;
+    const verifier::StatusEntry entry{.list = 1, .index = 9};
+    c.endorse(entry, c.device);
+    const Bytes bundle = c.evidence();
+    const std::string credential = c.sign(c.payload(bundle, entry), c.device);
+    const verifier_json d = *verifier::did_document(
+        provider(), c.base, std::vector<crypto::PublicKey>{c.device.public_key()}, c.w.org_id());
+    std::string big = d.dump();
+    big.pop_back();
+    for (const std::string& m : std::views::reverse(members)) {
+        if (big.size() + 1 + m.size() + 1 > verifier::max_did_document_size) {
+            break;
+        }
+        big += "," + m;
+    }
+    big += "}";
+    REQUIRE(big.size() > verifier::max_did_document_size - 8);
+    verifier_json wide = d;
+    for (std::size_t i = 0; i < 3'000; ++i) {
+        wide["verificationMethod"].push_back(
+            verifier_json{{"id", "#" + members[i].substr(1, 3)}, {"publicKeyJwk", 0}});
+    }
+    for (std::size_t i = 0; i < 15'000; ++i) {
+        wide["assertionMethod"].push_back("$" + members[i].substr(1, 3));
+    }
+    REQUIRE(wide.dump().size() <= verifier::max_did_document_size);
+    verifier::CredentialOptions options;
+    options.status_list = c.status_list(c.device);
+    for (const std::string& doc : {big, wide.dump()}) {
+        options.did_document = doc;
+        const auto r = c.check(credential, bundle, options);
+        CHECK(r.did_document_problems.empty());
+        CHECK(r.status_list_problems.empty());
+        CHECK(r.verified());
+    }
 }
 
 TEST_CASE("GZIP: ours round-trips small, others' decompress, damage fails", "[credentials]") {
