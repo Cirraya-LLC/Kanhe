@@ -863,6 +863,87 @@ async function verdict(page) {
     assert.equal(v.kind, "warn");
     assert.match(v.detail, /college\.example\/c\//);
     await page.close();
+
+    // 13. A credential, its DID document, and its status list are read as
+    // `kanhe credential verify` reads their files: line ends after a JWS are
+    // not part of it; nothing else is taken off, decoded, or replaced. What
+    // the command line refuses, the page refuses for the same reason; what
+    // it reads, the page reads, and reports alike.
+    const asRead = (name) => fs.readFileSync(path.join(dir, name));
+    const jws = asRead("credential.jwt").toString("latin1").replace(/[\r\n]+$/, "");
+    const did = asRead("credential-did.json");
+    const list = asRead("credential-list.jwt");
+    const bytes = (...parts) => Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p, "latin1") : p)));
+    const middle = jws.indexOf(".") + 20; // inside the payload
+    const withByte = (b) => bytes(jws.slice(0, middle), Buffer.from([b]), jws.slice(middle), "\n");
+    const commandLine = (credential, didDocument, statusList) => {
+      const file = (name, content) => { fs.writeFileSync(path.join(dir, name), content); return path.join(dir, name); };
+      const args = ["credential", "verify", file("probe.jwt", credential), "--offline",
+                    "--evidence", path.join(dir, "credential-evidence.cbor"),
+                    "--did-document", file("probe-did.json", didDocument),
+                    "--status-list", file("probe-list.jwt", statusList), "--json"];
+      try {
+        return JSON.parse(execFileSync(kanhe, args, { stdio: ["ignore", "pipe", "pipe"] }));
+      } catch (e) {
+        if (e.status === 3) return JSON.parse(e.stdout); // read, not verified
+        const refused = /^error: the credential: (.*) \([^()]*\)\s*$/.exec(String(e.stderr));
+        assert.ok(e.status === 2 && refused, String(e.stderr));
+        return { error: refused[1] };
+      }
+    };
+    const onThePage = async (credential, didDocument, statusList) => {
+      const p = await open("file://" + pagePath);
+      const answers = { "/.well-known/did.json": didDocument, "/status/1": statusList };
+      await p.route("https://college.example/**", (route) => {
+        const answer = answers[new URL(route.request().url()).pathname];
+        if (!answer) return answerCollege(route);
+        return route.fulfill({ status: 200, headers: { "Access-Control-Allow-Origin": "*" }, body: answer });
+      });
+      await p.setInputFiles("#bundle-file", { name: "credential.jwt", mimeType: "application/vc+jwt", buffer: credential });
+      const seen = await verdict(p);
+      seen.report = await p.evaluate(() => window.lastReport);
+      await p.close();
+      return seen;
+    };
+    // Refused: a space before it, a byte no UTF-8 text holds in it, a NUL in
+    // it, a byte order mark, and a space after it.
+    for (const [why, credential] of [["a leading space", bytes(" ", jws, "\n")], ["not UTF-8", withByte(0xff)],
+                                      ["a NUL", withByte(0)], ["a byte order mark", bytes("\xef\xbb\xbf", jws)],
+                                      ["a trailing space", bytes(jws, " \n")]]) {
+      const native = commandLine(credential, did, list);
+      assert.ok(native.error, why + ": " + JSON.stringify(native));
+      const seen = await onThePage(credential, did, list);
+      assert.deepEqual([seen.kind, seen.title, seen.detail], ["bad", "Not a valid credential", native.error], why);
+    }
+    // Read: line ends after the credential and after the status list, and
+    // spaces around the DID document (JSON's own whitespace).
+    for (const [why, credential, didDocument, statusList] of [
+      ["CRLF after the credential", bytes(jws, "\r\n"), did, list],
+      ["line ends after the status list", bytes(jws), did, bytes(list, "\r\n\n")],
+      ["spaces around the DID document", bytes(jws), bytes(" ", did, " \r\n"), list]]) {
+      const native = commandLine(credential, didDocument, statusList);
+      assert.equal(native.verified, true, why + ": " + JSON.stringify(native));
+      const seen = await onThePage(credential, didDocument, statusList);
+      assert.deepEqual([seen.kind, seen.title], ["warn", "Valid, from college.example"], why + ": " + seen.detail);
+      delete seen.report.text;
+      assert.deepEqual(seen.report, native, why);
+    }
+    // The DID document or the status list refused, the credential read: the
+    // same problems as the command line's.
+    for (const [why, didDocument, statusList] of [
+      ["a NUL in the DID document", bytes(did, "\0x"), list],
+      ["not UTF-8 in the DID document", bytes(did.toString("latin1").replace('"id":"', '"id":"\xff')), list],
+      ["a byte order mark before the DID document", bytes("\xef\xbb\xbf", did), list],
+      ["a space before the status list", did, bytes(" ", list)],
+      ["a NUL after the status list", did, bytes(list.toString("latin1").trimEnd(), "\0")]]) {
+      const native = commandLine(bytes(jws), didDocument, statusList);
+      assert.equal(native.verified, false, why + ": " + JSON.stringify(native));
+      assert.ok(native.did_document.problems.length + native.status_list.problems.length > 0, why);
+      const seen = await onThePage(bytes(jws), didDocument, statusList);
+      assert.equal(seen.kind, "bad", why + ": " + seen.detail);
+      delete seen.report.text;
+      assert.deepEqual(seen.report, native, why);
+    }
     // (The browser logs the refused fetch; nothing else may be logged.)
     const fetched = problems.filter((p) => !/Failed to load resource/.test(p));
     problems.splice(0, problems.length, ...fetched);

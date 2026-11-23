@@ -87,13 +87,18 @@ std::vector<Json> did_assertion_keys(const Json& doc) {
         !assertion->is_array()) {
         return out;
     }
+    // The names in a set: reading them all for each method would cost
+    // methods times names.
+    std::set<std::string_view> named;
+    for (const Json& name : *assertion) {
+        if (name.is_string()) {
+            named.insert(name.get_ref<const std::string&>());
+        }
+    }
     for (const Json& method : *methods) {
         const std::string* id = text_member(method, "id");
         const Json* jwk = member(method, "publicKeyJwk");
-        if (id != nullptr && jwk != nullptr &&
-            std::ranges::any_of(*assertion, [&](const Json& named) {
-                return named.is_string() && named.get_ref<const std::string&>() == *id;
-            })) {
+        if (id != nullptr && jwk != nullptr && named.contains(*id)) {
             out.push_back(*jwk);
         }
     }
